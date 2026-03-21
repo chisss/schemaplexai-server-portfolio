@@ -1,0 +1,82 @@
+# ==========================================
+# 生产环境配置
+# ==========================================
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:schemaplexai}?stringtype=unspecified
+    username: ${DB_USERNAME:schemaplexai}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      database: 0
+      lettuce:
+        pool:
+          max-active: 32
+          max-idle: 16
+          min-idle: 4
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:schemaplexai}
+    password: ${RABBITMQ_PASSWORD}
+    virtual-host: /schemaplexai
+
+# Flowable
+flowable:
+  database-schema-update: false
+  async-executor-activate: true
+
+# MinIO
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY}
+  secret-key: ${MINIO_SECRET_KEY}
+  bucket: schemaplexai
+
+# Milvus
+milvus:
+  host: ${MILVUS_HOST:localhost}
+  port: ${MILVUS_PORT:19530}
+
+# ClickHouse
+clickhouse:
+  url: jdbc:clickhouse://${CLICKHOUSE_HOST:localhost}:${CLICKHOUSE_PORT:8123}/${CLICKHOUSE_DB:schemaplexai}
+  username: ${CLICKHOUSE_USERNAME:default}
+  password: ${CLICKHOUSE_PASSWORD}
+
+# AI 模型
+ai:
+  claude:
+    api-key: ${CLAUDE_API_KEY}
+    base-url: ${CLAUDE_BASE_URL:https://api.anthropic.com}
+    default-model: ${CLAUDE_MODEL:claude-sonnet-4-20250514}
+  openai:
+    api-key: ${OPENAI_API_KEY}
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+    default-model: ${OPENAI_MODEL:gpt-4o}
+  gemini:
+    api-key: ${GEMINI_API_KEY}
+    base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com}
+    default-model: ${GEMINI_MODEL:gemini-2.5-pro}
+
+# Knife4j（生产环境关闭）
+knife4j:
+  enable: false
+
+# 日志级别
+logging:
+  level:
+    com.schemaplexai: INFO
+    org.springframework: WARN

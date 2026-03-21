@@ -1,0 +1,41 @@
+# 通用
+.DS_Store
+Thumbs.db
+*.log
+logs/
+
+# 环境与凭据
+.env
+.env.*
+
+# IDE/编辑器
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Java/Maven/Gradle
+**/target/
+**/out/
+**/build/
+*.class
+*.jar
+*.war
+*.ear
+
+# Node/前端
+**/node_modules/
+**/dist/
+**/build/
+
+# 临时与缓存
+*.tmp
+*.swp
+*.swo
+.cache/
+.ace-tool
+
+# 文档目录（不上传）
+/docs/

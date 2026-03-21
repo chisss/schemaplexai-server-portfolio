@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.schemaplexai</groupId>
+        <artifactId>schemaplexai-server</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>schemaplexai-dao</artifactId>
+    <name>SchemaPlexAI DAO</name>
+    <description>数据访问模块 - Mapper接口、类型处理器</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.schemaplexai</groupId>
+            <artifactId>schemaplexai-model</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.schemaplexai</groupId>
+            <artifactId>schemaplexai-common</artifactId>
+        </dependency>
+
+        <!-- MyBatis-Plus -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+</project>

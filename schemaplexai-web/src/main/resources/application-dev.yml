@@ -1,0 +1,97 @@
+# ==========================================
+# 开发环境配置
+# ==========================================
+spring:
+  # 数据源
+  datasource:
+    url: jdbc:postgresql://localhost:5432/schemaplexai?stringtype=unspecified
+    username: schemaplexai
+    password: ${DB_PASSWORD:schemaplexai123}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+  servlet:
+    multipart:
+      max-file-size: 100MB    # 单个文件最大大小
+      max-request-size: 100MB # 单次请求最大大小
+
+  # Redis
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: ${REDIS_PASSWORD:redis123}
+      database: 0
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+  # RabbitMQ
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: schemaplexai
+    password: ${RABBITMQ_PASSWORD:schemaplexai123}
+    virtual-host: /schemaplexai
+    listener:
+      simple:
+        prefetch: 10
+        concurrency: 5
+        max-concurrency: 10
+
+# Flowable 工作流引擎
+flowable:
+  database-schema-update: true
+  async-executor-activate: true
+
+# MinIO 对象存储
+minio:
+  endpoint: http://localhost:9000
+  access-key: ${MINIO_ACCESS_KEY:schemaplexai}
+  secret-key: ${MINIO_SECRET_KEY:schemaplexai123}
+  bucket: schemaplexai
+
+# Milvus 向量数据库
+milvus:
+  host: localhost
+  port: 19530
+  enabled: true   # 设为 false 可完全禁用 Milvus，系统自动降级
+
+# ClickHouse 分析数据库
+clickhouse:
+  url: jdbc:clickhouse://localhost:8123/schemaplexai
+  username: default
+  password: ${CLICKHOUSE_PASSWORD:x}
+
+
+# 日志输出到 schemaplexai-server/logs 目录
+logging:
+  file:
+    path: ${user.dir}/logs
+
+# Knife4j（开发环境开启）
+knife4j:
+  enable: true
+
+# 工作空间配置
+schemaplexai:
+  workspace:
+    root-path: ${WORKSPACE_ROOT:/data/workspaces}
+    max-disk-usage-gb: 50
+
+# 邮件服务配置
+spring.mail:
+  host: ${MAIL_HOST:smtp.example.com}
+  port: ${MAIL_PORT:465}
+  username: ${MAIL_USERNAME:noreply@example.com}
+  password: ${MAIL_PASSWORD:}
+  properties:
+    mail.smtp.ssl.enable: true
+    mail.smtp.auth: true
+  default-encoding: UTF-8
