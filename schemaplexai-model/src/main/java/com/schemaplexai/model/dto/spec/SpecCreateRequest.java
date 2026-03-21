@@ -1,0 +1,37 @@
+package com.schemaplexai.model.dto.spec;
+
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 创建Spec请求DTO
+ */
+@Data
+public class SpecCreateRequest {
+
+    /** Spec名称 */
+    @NotBlank(message = "Spec名称不能为空")
+    private String name;
+
+    /** 分类: feature-development/bug-fix/refactoring/data-analysis/config-change */
+    private String category;
+
+    /** 描述 */
+    private String description;
+
+    /** 标签 */
+    private List<String> tags;
+
+    /** 关联项目ID（废弃，保留兼容性） */
+    @Deprecated
+    private String projectId;
+
+    /** 关联工作空间ID列表（多选，一个Spec可跨多个系统） */
+    private List<String> workspaceIds = new ArrayList<>();
+
+    /** 关联工作流模板ID */
+    private String workflowId;
+}

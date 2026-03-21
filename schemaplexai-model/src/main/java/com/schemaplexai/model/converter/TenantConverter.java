@@ -1,0 +1,33 @@
+package com.schemaplexai.model.converter;
+
+import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.model.dto.system.TenantCreateRequest;
+import com.schemaplexai.model.entity.Tenant;
+import com.schemaplexai.model.vo.system.TenantVO;
+import org.mapstruct.Mapper;
+import org.mapstruct.Mapping;
+import org.mapstruct.ReportingPolicy;
+
+import java.util.List;
+
+/**
+ * 租户实体转换器
+ */
+@Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE,
+        imports = {CommonConstants.class})
+public interface TenantConverter {
+
+    TenantVO toVO(Tenant tenant);
+
+    List<TenantVO> toVOList(List<Tenant> tenants);
+
+    /**
+     * TenantCreateRequest -> Tenant
+     */
+    @Mapping(target = "id", ignore = true)
+    @Mapping(target = "status", expression = "java(CommonConstants.STATUS_ACTIVE)")
+    @Mapping(target = "config", ignore = true)
+    @Mapping(target = "createdAt", ignore = true)
+    @Mapping(target = "updatedAt", ignore = true)
+    Tenant fromCreateRequest(TenantCreateRequest request);
+}
