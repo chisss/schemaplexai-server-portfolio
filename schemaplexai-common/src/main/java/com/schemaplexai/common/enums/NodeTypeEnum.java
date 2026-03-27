@@ -29,6 +29,10 @@ public enum NodeTypeEnum {
     PARALLEL("parallel", "并行网关", "control"),
     LOOP("loop", "循环", "control"),
 
+    // 质量节点
+    DEVIATION_ANALYSIS("deviation_analysis", "偏离分析", "quality"),
+    QUALITY_REPORT("quality_report", "质量报告", "quality"),
+
     // 终止节点
     END("end", "结束节点", "end");
 

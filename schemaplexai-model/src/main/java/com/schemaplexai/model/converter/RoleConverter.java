@@ -1,6 +1,6 @@
 package com.schemaplexai.model.converter;
 
-import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.model.dto.system.RoleCreateRequest;
 import com.schemaplexai.model.entity.Role;
 import com.schemaplexai.model.vo.system.RoleVO;
@@ -14,7 +14,7 @@ import java.util.List;
  * 角色实体转换器
  */
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE,
-        imports = {CommonConstants.class})
+        imports = {CommonConstant.class})
 public interface RoleConverter {
 
     /**
@@ -31,7 +31,7 @@ public interface RoleConverter {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
     @Mapping(target = "isSystem", expression = "java(false)")
-    @Mapping(target = "status", expression = "java(CommonConstants.STATUS_ACTIVE)")
+    @Mapping(target = "status", expression = "java(CommonConstant.STATUS_ACTIVE)")
     @Mapping(target = "createdBy", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
     @Mapping(target = "updatedBy", ignore = true)

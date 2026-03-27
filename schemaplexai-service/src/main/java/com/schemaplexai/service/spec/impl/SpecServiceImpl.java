@@ -32,15 +32,19 @@ import com.schemaplexai.service.spec.SpecService;
 import com.schemaplexai.service.spec.validator.SpecStatusValidator;
 import com.schemaplexai.service.spec.handler.SpecVersionHandler;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
+import com.schemaplexai.service.mq.message.WorkflowTriggerMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Spec管理服务实现 — 编排器模式
@@ -60,6 +64,7 @@ public class SpecServiceImpl implements SpecService {
     private final EntityValidator entityValidator;
     private final WorkflowInstanceMapper workflowInstanceMapper;
     private final WorkflowInstanceService workflowInstanceService;
+    private final RabbitTemplate rabbitTemplate;
 
     @Override
     public PageResult<SpecVO> listSpecs(SpecQueryRequest request) {
@@ -156,6 +161,20 @@ public class SpecServiceImpl implements SpecService {
         specStatusValidator.validateTransition(spec.getStatus(), targetStatus);
         updateSpecStatus(id, targetStatus);
         log.info("Spec提交审批: specId={}, docType={}, newStatus={}", id, docType, targetStatus);
+
+        String requestId = UUID.randomUUID().toString();
+        WorkflowTriggerMessage message = WorkflowTriggerMessage.builder()
+                .specId(id)
+                .docType(docType)
+                .triggerType("spec-review")
+                .workflowTemplateId(spec.getWorkflowId())
+                .triggerBy(SecurityUtil.getCurrentUserId())
+                .tenantId(SecurityUtil.getCurrentTenantId())
+                .triggeredAt(LocalDateTime.now())
+                .requestId(requestId)
+                .build();
+        rabbitTemplate.convertAndSend("sf.workflow", "workflow.trigger.spec-review", message);
+        log.info("已发送工作流触发消息: specId={}, triggerType=spec-review, requestId={}", id, requestId);
     }
 
     @Override

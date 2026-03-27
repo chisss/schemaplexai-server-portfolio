@@ -1,6 +1,7 @@
 package com.schemaplexai.service.cost.validator;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.BudgetMapper;
@@ -33,7 +34,7 @@ public class BudgetValidator {
                         .eq(Budget::getBudgetLevel, budgetLevel)
                         .eq(Budget::getTargetId, targetId)
                         .eq(Budget::getBudgetCycle, budgetCycle)
-                        .eq(Budget::getStatus, "active")
+                        .eq(Budget::getStatus, CommonConstant.STATUS_ACTIVE)
         );
         if (count > 0) {
             throw new BusinessException(ResultCode.BUDGET_CYCLE_CONFLICT);

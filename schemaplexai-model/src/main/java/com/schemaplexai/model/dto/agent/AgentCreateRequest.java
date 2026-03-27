@@ -43,4 +43,10 @@ public class AgentCreateRequest {
 
     /** Agent能力标签，逗号分隔，对应字典 agent_tag */
     private String agentTag;
+
+    /** 模型绑定类型: model/model_group，默认 model */
+    private String aiModelType;
+
+    /** 当 aiModelType=model_group 时，指定模型组 ID */
+    private String aiModelGroupId;
 }

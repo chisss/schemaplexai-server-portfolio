@@ -19,6 +19,14 @@ public class IntentDefect implements Serializable {
     private String docType;
     /** 缺陷类型: ambiguity/contradiction/omission/vagueness */
     private String defectType;
+    /** 评估维度编码 */
+    private String dimensionCode;
+    /** 评估规则编码 */
+    private String ruleCode;
+    /** 来源类型: manual/agent/workflow/system */
+    private String sourceType;
+    /** 来源Agent ID */
+    private String sourceAgentId;
     /** 严重程度: critical/warning/info */
     private String severity;
     private String title;

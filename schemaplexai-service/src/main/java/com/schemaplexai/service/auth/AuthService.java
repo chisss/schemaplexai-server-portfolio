@@ -4,6 +4,7 @@ import com.schemaplexai.model.dto.auth.LoginRequest;
 import com.schemaplexai.model.dto.auth.RefreshTokenRequest;
 import com.schemaplexai.model.vo.auth.LoginVO;
 import com.schemaplexai.model.vo.auth.TokenVO;
+import com.schemaplexai.model.vo.auth.WsTicketVO;
 
 /**
  * 认证授权服务接口
@@ -32,4 +33,9 @@ public interface AuthService {
      * @param userId 用户ID
      */
     void logout(String userId);
+
+    /**
+     * 签发短期一次性 WebSocket ticket
+     */
+    WsTicketVO issueWsTicket(String userId, String tenantId);
 }

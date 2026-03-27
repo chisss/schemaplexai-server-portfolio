@@ -8,7 +8,6 @@ import org.mapstruct.ReportingPolicy;
 
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * 评审会话转换器
@@ -33,6 +32,6 @@ public interface ReviewSessionConverter {
         return reviewers.stream()
                 .filter(r -> r instanceof Map)
                 .map(r -> (Map<String, Object>) r)
-                .collect(Collectors.toList());
+                .toList();
     }
 }

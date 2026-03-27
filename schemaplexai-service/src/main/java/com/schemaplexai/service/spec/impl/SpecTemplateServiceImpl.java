@@ -2,7 +2,7 @@ package com.schemaplexai.service.spec.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.SpecStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
@@ -121,7 +121,7 @@ public class SpecTemplateServiceImpl implements SpecTemplateService {
         spec.setDescription(request.getDescription());
         spec.setTags(request.getTags());
         spec.setProjectId(request.getProjectId());
-        spec.setVersion(CommonConstants.SPEC_INITIAL_VERSION);
+        spec.setVersion(CommonConstant.SPEC_INITIAL_VERSION);
         spec.setStatus(SpecStatusEnum.DRAFT.getCode());
         spec.setOwner(SecurityUtil.getCurrentUserId());
         specMapper.insert(spec);

@@ -9,6 +9,7 @@ import com.schemaplexai.model.dto.agent.AgentExecutionQueryDTO;
 import com.schemaplexai.model.dto.agent.AgentInitInstructionsDTO;
 import com.schemaplexai.model.dto.agent.AgentQueryRequest;
 import com.schemaplexai.model.dto.agent.AgentTeamMemberBatchRequest;
+import com.schemaplexai.model.dto.agent.AgentToolBindingBatchRequest;
 import com.schemaplexai.model.dto.agent.AgentUpdateRequest;
 import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
@@ -16,7 +17,9 @@ import com.schemaplexai.model.vo.agent.AgentExecuteResultVO;
 import com.schemaplexai.model.vo.agent.AgentExecutionVO;
 import com.schemaplexai.model.vo.agent.AgentInstructionsCheckVO;
 import com.schemaplexai.model.vo.agent.AgentTeamMemberVO;
+import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentVO;
+import com.schemaplexai.model.vo.agent.AvailableToolVO;
 
 import java.util.List;
 
@@ -99,6 +102,21 @@ public interface AgentService {
      * 删除上下文绑定
      */
     void deleteContextBinding(String agentId, String bindingId);
+
+    /**
+     * 获取 Agent 工具绑定列表
+     */
+    List<AgentToolBindingVO> getToolBindings(String agentId);
+
+    /**
+     * 批量保存 Agent 工具绑定（全量覆盖）
+     */
+    List<AgentToolBindingVO> saveToolBindings(String agentId, AgentToolBindingBatchRequest request);
+
+    /**
+     * 获取 Agent 可绑定工具列表（内置工具/Skill/MCP，过滤已绑定）
+     */
+    List<AvailableToolVO> getAvailableTools(String agentId);
 
     // ==================== Agent 执行 ====================
 

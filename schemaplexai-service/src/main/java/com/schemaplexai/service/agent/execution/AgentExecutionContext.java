@@ -28,6 +28,12 @@ public class AgentExecutionContext {
     /** 指定使用的模型 ID（为空时使用 Agent 默认配置） */
     private String model;
 
+    /** 模型绑定类型: model/model_group */
+    private String agentModelType;
+
+    /** 当 agentModelType=model_group 时，绑定的模型组 ID */
+    private String agentModelGroupId;
+
     /** 附加上下文变量（键值对） */
     private Map<String, Object> inputContext;
 

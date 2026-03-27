@@ -3,6 +3,7 @@ package com.schemaplexai.service.workflow.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
@@ -149,7 +150,7 @@ public class WorkflowTemplateServiceImpl implements WorkflowTemplateService {
         // AI 编排占位实现：后续接入内置 Agent 执行引擎
         log.info("AI编排工作流: templateId={}, prompt={}", templateId, request.getPrompt());
         var result = new WorkflowAiArrangeVO();
-        result.setStatus("pending");
+        result.setStatus(WorkflowInstanceStatusEnum.PENDING.getCode());
         result.setExplanation("AI编排功能正在准备中，请稍后查看执行结果。");
         return result;
     }

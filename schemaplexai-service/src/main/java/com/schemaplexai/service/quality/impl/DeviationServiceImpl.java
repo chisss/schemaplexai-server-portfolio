@@ -26,7 +26,11 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
  * 偏离检测服务实现
@@ -40,6 +44,7 @@ public class DeviationServiceImpl implements DeviationService {
     private final DeviationConverter deviationConverter;
     private final DeviationValidator deviationValidator;
     private final EntityValidator entityValidator;
+    private final RabbitTemplate rabbitTemplate;
 
     @Override
     public DetectTaskVO detect(DeviationDetectRequest request) {
@@ -47,7 +52,14 @@ public class DeviationServiceImpl implements DeviationService {
         log.info("提交偏离检测任务: taskId={}, specId={}, agentExecutionId={}",
                 taskId, request.getSpecId(), request.getAgentExecutionId());
 
-        // TODO: 异步发送MQ消息，触发偏离检测引擎执行实际检测逻辑
+        Map<String, Object> message = new HashMap<>();
+        message.put("taskId", taskId);
+        message.put("specId", request.getSpecId());
+        message.put("agentExecutionId", request.getAgentExecutionId());
+        message.put("type", "deviation_detect");
+
+        rabbitTemplate.convertAndSend("sf.quality.check", message);
+        log.info("偏离检测任务已发送到MQ: taskId={}", taskId);
 
         return new DetectTaskVO(taskId, "submitted", "检测任务已提交");
     }

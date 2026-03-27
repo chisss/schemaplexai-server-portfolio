@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.dao.mapper.AgentContextBindingMapper;
 import com.schemaplexai.dao.mapper.ContextEntityMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
@@ -213,7 +214,7 @@ public class ContextInjector {
     private List<String> loadContextByLevel(String level, String projectId) {
         LambdaQueryWrapper<ContextEntity> ctxQuery = new LambdaQueryWrapper<ContextEntity>()
                 .eq(ContextEntity::getContextLevel, level)
-                .eq(ContextEntity::getStatus, "active");
+                .eq(ContextEntity::getStatus, CommonConstant.STATUS_ACTIVE);
         if (projectId != null) {
             ctxQuery.eq(ContextEntity::getProjectId, projectId);
         }

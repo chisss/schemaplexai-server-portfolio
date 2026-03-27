@@ -2,6 +2,7 @@ package com.schemaplexai.web.config;
 
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.AnonymousQueue;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.core.FanoutExchange;
@@ -40,6 +41,12 @@ public class RabbitMQConfig {
     @Bean
     public TopicExchange qualityExchange() {
         return new TopicExchange("sf.quality");
+    }
+
+    /** Agent 执行事件 fanout exchange（多实例 SSE 广播） */
+    @Bean
+    public FanoutExchange agentExecEventExchange() {
+        return new FanoutExchange("sf.agent.exec.event");
     }
 
     // ========== Queue ==========
@@ -84,6 +91,12 @@ public class RabbitMQConfig {
         return new Queue("sf.agent.team.context", true);
     }
 
+    /** 每个实例独占一个匿名队列，接收执行事件广播 */
+    @Bean
+    public Queue agentExecEventQueue() {
+        return new AnonymousQueue();
+    }
+
     // ========== Binding ==========
     @Bean
     public Binding agentExecuteBinding() {
@@ -124,6 +137,11 @@ public class RabbitMQConfig {
     @Bean
     public Binding agentTeamContextBinding() {
         return BindingBuilder.bind(agentTeamContextQueue()).to(agentExchange()).with("agent.team.context.#");
+    }
+
+    @Bean
+    public Binding agentExecEventBinding() {
+        return BindingBuilder.bind(agentExecEventQueue()).to(agentExecEventExchange());
     }
 
     /** 使用Jackson序列化消息 */

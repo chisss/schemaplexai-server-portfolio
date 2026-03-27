@@ -2,6 +2,7 @@ package com.schemaplexai.service.workflow.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
@@ -29,7 +30,6 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * 工作流实例服务实现
@@ -158,7 +158,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         var result = instanceMapper.selectPage(page, wrapper);
         var voList = result.getRecords().stream()
                 .map(this::enrichWithNodeExecutions)
-                .collect(Collectors.toList());
+                .toList();
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
 
@@ -166,7 +166,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     public List<WorkflowNodeExecutionVO> getNodeExecutions(String instanceId) {
         requireExists(instanceId);
         var executions = nodeExecutionMapper.selectByInstanceId(instanceId);
-        return executions.stream().map(this::toNodeExecutionVO).collect(Collectors.toList());
+        return executions.stream().map(this::toNodeExecutionVO).toList();
     }
 
     @Override
@@ -179,14 +179,15 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         }
         var execution = findNodeExecution(instanceId, nodeId);
         // 校验节点状态必须为待处理或运行中
-        if (!"pending".equals(execution.getStatus()) && !"running".equals(execution.getStatus())) {
+        if (!WorkflowInstanceStatusEnum.PENDING.getCode().equals(execution.getStatus())
+                && !WorkflowInstanceStatusEnum.RUNNING.getCode().equals(execution.getStatus())) {
             throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
         }
 
-        execution.setStatus("completed");
+        execution.setStatus(WorkflowInstanceStatusEnum.COMPLETED.getCode());
         execution.setCompletedAt(LocalDateTime.now());
         Map<String, Object> outputData = new HashMap<>();
-        outputData.put("approvalResult", "approved");
+        outputData.put("approvalResult", CommonConstant.APPROVAL_RESULT_APPROVED);
         outputData.put("comment", comment);
         execution.setOutputData(outputData);
         nodeExecutionMapper.updateById(execution);
@@ -207,14 +208,15 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         }
         var execution = findNodeExecution(instanceId, nodeId);
         // 校验节点状态必须为待处理或运行中
-        if (!"pending".equals(execution.getStatus()) && !"running".equals(execution.getStatus())) {
+        if (!WorkflowInstanceStatusEnum.PENDING.getCode().equals(execution.getStatus())
+                && !WorkflowInstanceStatusEnum.RUNNING.getCode().equals(execution.getStatus())) {
             throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
         }
 
-        execution.setStatus("failed");
+        execution.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
         execution.setCompletedAt(LocalDateTime.now());
         Map<String, Object> outputData = new HashMap<>();
-        outputData.put("approvalResult", "rejected");
+        outputData.put("approvalResult", CommonConstant.APPROVAL_RESULT_REJECTED);
         outputData.put("comment", comment);
         outputData.put("rollbackToNodeId", rollbackToNodeId);
         execution.setOutputData(outputData);
@@ -264,7 +266,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     private WorkflowInstanceVO enrichWithNodeExecutions(WorkflowInstance instance) {
         var vo = instanceConverter.toVO(instance);
         var executions = nodeExecutionMapper.selectByInstanceId(instance.getId());
-        vo.setNodeExecutions(executions.stream().map(this::toNodeExecutionVO).collect(Collectors.toList()));
+        vo.setNodeExecutions(executions.stream().map(this::toNodeExecutionVO).toList());
         return vo;
     }
 

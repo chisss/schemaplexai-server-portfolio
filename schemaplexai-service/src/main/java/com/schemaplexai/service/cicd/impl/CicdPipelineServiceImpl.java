@@ -2,6 +2,8 @@ package com.schemaplexai.service.cicd.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.enums.CicdPipelineStatusEnum;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.CicdPipelineMapper;
@@ -132,15 +134,15 @@ public class CicdPipelineServiceImpl implements CicdPipelineService {
 
             // 更新最近运行状态
             pipeline.setLastRunAt(LocalDateTime.now());
-            pipeline.setLastRunStatus("running");
-            pipeline.setStatus("active");
+            pipeline.setLastRunStatus(CicdPipelineStatusEnum.RUNNING.getCode());
+            pipeline.setStatus(CommonConstant.STATUS_ACTIVE);
         } catch (Exception e) {
             log.error("触发CICD Pipeline构建失败: pipelineId={}, type={}", id, pipeline.getPipelineType(), e);
             result = new HashMap<>();
             result.put("error", e.getMessage());
 
             pipeline.setLastRunAt(LocalDateTime.now());
-            pipeline.setLastRunStatus("failed");
+            pipeline.setLastRunStatus(CicdPipelineStatusEnum.FAILED.getCode());
         }
 
         pipelineMapper.updateById(pipeline);

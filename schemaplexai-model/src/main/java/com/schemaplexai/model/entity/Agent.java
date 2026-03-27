@@ -54,4 +54,10 @@ public class Agent extends BaseEntity {
 
     /** Agent能力标签，逗号分隔，对应字典 agent_tag */
     private String agentTag;
+
+    /** 模型绑定类型: model=单个模型, model_group=模型组 */
+    private String aiModelType;
+
+    /** 绑定的模型组ID（aiModelType=model_group时有效） */
+    private String aiModelGroupId;
 }

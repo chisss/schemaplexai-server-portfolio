@@ -32,8 +32,11 @@ public class MyBatisPlusConfig {
             "sf_i18n_message",
             // 权限体系表（系统级，不区分租户）
             "sf_permission",
+            "sf_role",
             "sf_user_role",
             "sf_role_permission",
+            // 菜单为系统级全局菜单（tenant_id=null），不做租户过滤
+            "sf_menu",
             // Agent 子表（通过 agent_id 关联父表，父表已做租户隔离）
             "sf_agent_config",
             "sf_agent_team_member",
@@ -50,7 +53,14 @@ public class MyBatisPlusConfig {
             "sf_review_comment",
             // 系统级字典表（全局共享，不做租户隔离）
             "sf_dict",
-            "sf_dict_item"
+            "sf_dict_item",
+            // 租户运行时策略由系统管理员统一管理
+            "sf_tenant_runtime_policy",
+            // 插件目录为系统级聚合目录（tenant_id 可为空）
+            "sf_plugin_catalog",
+            // 模型组子表（通过 group_id 关联父表，父表已做租户隔离）
+            "sf_ai_model_group_item",
+            "sf_builtin_tool"
     );
 
     @Bean

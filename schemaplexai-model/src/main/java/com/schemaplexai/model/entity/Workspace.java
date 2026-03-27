@@ -64,6 +64,12 @@ public class Workspace implements Serializable {
     /** 描述 */
     private String description;
 
+    /** 工作空间作用域: PROJECT/SYSTEM */
+    private String workspaceScope;
+
+    /** 保留策略: retain/ephemeral */
+    private String retentionPolicy;
+
     /** 创建人 */
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;

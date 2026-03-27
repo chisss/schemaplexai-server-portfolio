@@ -20,7 +20,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.stream.Collectors;
 
 /**
  * JWT认证过滤器
@@ -58,7 +57,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
                     // 设置Spring Security认证信息
                     List<SimpleGrantedAuthority> authorities = roles != null
-                            ? roles.stream().map(r -> new SimpleGrantedAuthority("ROLE_" + r)).collect(Collectors.toList())
+                            ? roles.stream().map(r -> new SimpleGrantedAuthority("ROLE_" + r)).toList()
                             : List.of();
 
                     UsernamePasswordAuthenticationToken authentication =

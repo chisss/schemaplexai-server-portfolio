@@ -30,4 +30,25 @@ public final class CommonConstant {
 
     /** 系统租户标识 */
     public static final String SYSTEM_TENANT = "system";
+
+    /** 通用状态：启用 */
+    public static final String STATUS_ACTIVE = "active";
+
+    /** 通用状态：停用 */
+    public static final String STATUS_INACTIVE = "inactive";
+
+    /** 登录类型：密码登录 */
+    public static final String LOGIN_TYPE_PASSWORD = "password";
+
+    /** Spec初始版本号 */
+    public static final String SPEC_INITIAL_VERSION = "1.0.0";
+
+    /** 全部权限通配符 */
+    public static final String PERMISSION_ALL = "*";
+
+    /** 审批结果：通过 */
+    public static final String APPROVAL_RESULT_APPROVED = "approved";
+
+    /** 审批结果：拒绝 */
+    public static final String APPROVAL_RESULT_REJECTED = "rejected";
 }

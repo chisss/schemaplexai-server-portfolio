@@ -1,5 +1,6 @@
 package com.schemaplexai.model.converter;
 
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.model.dto.cost.BudgetCreateRequest;
 import com.schemaplexai.model.entity.Budget;
 import com.schemaplexai.model.vo.cost.BudgetVO;
@@ -11,7 +12,7 @@ import java.util.List;
 /**
  * 预算转换器
  */
-@Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE)
+@Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE, imports = {CommonConstant.class})
 public interface BudgetConverter {
 
     BudgetVO toVO(Budget entity);
@@ -19,7 +20,7 @@ public interface BudgetConverter {
 
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
-    @Mapping(target = "status", constant = "active")
+    @Mapping(target = "status", expression = "java(CommonConstant.STATUS_ACTIVE)")
     @Mapping(target = "createdBy", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
     @Mapping(target = "updatedBy", ignore = true)

@@ -6,6 +6,7 @@ import com.schemaplexai.model.dto.workspace.WorkspaceCreateRequest;
 import com.schemaplexai.model.dto.workspace.WorkspaceQueryRequest;
 import com.schemaplexai.model.dto.workspace.WorkspaceUpdateRequest;
 import com.schemaplexai.model.vo.workspace.WorkspaceVO;
+import com.schemaplexai.service.integration.git.GitOperationService;
 import com.schemaplexai.service.workspace.WorkspaceService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -18,7 +19,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 工作空间管理控制器
@@ -67,5 +71,32 @@ public class WorkspaceController {
     @Operation(summary = "同步工作空间")
     public R<WorkspaceVO> sync(@PathVariable String id) {
         return R.ok(workspaceService.sync(id));
+    }
+
+    @GetMapping("/all")
+    @Operation(summary = "获取所有工作空间（用于上下文关联项目下拉）")
+    public R<List<WorkspaceVO>> listAll() {
+        return R.ok(workspaceService.listAll());
+    }
+
+    @GetMapping("/{id}/branches")
+    @Operation(summary = "列出工作空间的所有分支")
+    public R<List<GitOperationService.BranchInfo>> listBranches(@PathVariable String id) {
+        return R.ok(workspaceService.listBranches(id));
+    }
+
+    @GetMapping("/{id}/branches/current")
+    @Operation(summary = "获取当前分支")
+    public R<String> getCurrentBranch(@PathVariable String id) {
+        return R.ok(workspaceService.getCurrentBranch(id));
+    }
+
+    @PostMapping("/{id}/branches")
+    @Operation(summary = "创建分支")
+    public R<GitOperationService.BranchInfo> createBranch(
+            @PathVariable String id,
+            @RequestParam String branchName,
+            @RequestParam(required = false) String startPoint) {
+        return R.ok(workspaceService.createBranch(id, branchName, startPoint));
     }
 }

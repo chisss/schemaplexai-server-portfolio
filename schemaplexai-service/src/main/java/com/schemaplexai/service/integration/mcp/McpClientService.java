@@ -88,8 +88,8 @@ public class McpClientService {
                 if (response.containsKey("result")) {
                     Map<String, Object> result = (Map<String, Object>) response.get("result");
                     Object tools = result.get("tools");
-                    if (tools instanceof List) {
-                        return (List<Map<String, Object>>) tools;
+                    if (tools instanceof List<?> toolList) {
+                        return (List<Map<String, Object>>) toolList;
                     }
                 }
             }
@@ -97,6 +97,49 @@ public class McpClientService {
         } catch (Exception e) {
             log.error("MCP Server 工具发现失败: url={}, error={}", serverUrl, e.getMessage());
             return new ArrayList<>();
+        }
+    }
+
+    /**
+     * 调用 MCP 工具
+     *
+     * @param serverUrl  MCP Server 地址
+     * @param toolName   工具名称
+     * @param arguments  工具参数
+     * @param authType   认证类型
+     * @param authConfig 认证配置
+     * @return 工具执行结果
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> toolsCall(String serverUrl, String authType, Map<String, Object> authConfig,
+                                         String toolName, Map<String, Object> arguments) {
+        try {
+            Map<String, Object> params = new HashMap<>();
+            params.put("name", toolName);
+            params.put("arguments", arguments != null ? arguments : Map.of());
+
+            Map<String, Object> request = buildJsonRpcRequest("tools/call", params);
+            String responseBody = sendRequest(serverUrl, request, authType, authConfig);
+            if (responseBody != null) {
+                Map<String, Object> response = objectMapper.readValue(responseBody, new TypeReference<>() {});
+                if (response.containsKey("result")) {
+                    Object result = response.get("result");
+                    if (result instanceof Map<?, ?> resultMap) {
+                        return (Map<String, Object>) resultMap;
+                    }
+                    return Map.of("content", result);
+                }
+                if (response.containsKey("error")) {
+                    Object errorObj = response.get("error");
+                    String errorMsg = errorObj instanceof Map ?
+                        String.valueOf(((Map<?, ?>) errorObj).get("message")) : String.valueOf(errorObj);
+                    throw new RuntimeException("MCP 调用失败: " + errorMsg);
+                }
+            }
+            throw new RuntimeException("MCP Server 无响应");
+        } catch (Exception e) {
+            log.error("MCP 工具调用失败: tool={}, error={}", toolName, e.getMessage());
+            throw new RuntimeException("MCP 工具调用失败: " + e.getMessage(), e);
         }
     }
 

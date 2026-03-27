@@ -2,6 +2,7 @@ package com.schemaplexai.service.config.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
@@ -94,7 +95,7 @@ public class TenantServiceImpl implements TenantService {
 
     @Override
     public void updateStatus(String id, String status) {
-        if (!Set.of("active", "inactive").contains(status)) {
+        if (!Set.of(CommonConstant.STATUS_ACTIVE, CommonConstant.STATUS_INACTIVE).contains(status)) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "无效的状态值，允许值: active, inactive");
         }
         entityValidator.requireExists(tenantMapper, id, ResultCode.TENANT_NOT_FOUND);

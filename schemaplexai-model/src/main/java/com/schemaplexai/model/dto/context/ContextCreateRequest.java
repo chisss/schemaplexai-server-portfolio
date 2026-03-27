@@ -32,4 +32,7 @@ public class ContextCreateRequest {
 
     /** 创建时关联的其他上下文ID列表（用于建立知识图谱连线） */
     private List<String> linkedContextIds = new ArrayList<>();
+
+    /** 初始内容（创建时同步写入 Milvus 向量库） */
+    private String initialContent;
 }

@@ -71,6 +71,11 @@ public class AiModelConfig {
         while (trimmed.endsWith("/")) {
             trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
+        // Anthropic 官方 API 根地址（不含 /v1）→ 自动补上 /v1
+        // MiniMax / Zhipu 等代理已含 /anthropic 等路径，跳过处理
+        if (!trimmed.equals("https://api.anthropic.com") && trimmed.contains("anthropic") || trimmed.contains("claude")) {
+            trimmed = trimmed + "/v1";
+        }
         return trimmed;
     }
 
@@ -82,5 +87,13 @@ public class AiModelConfig {
             case "deepseek" -> "https://api.deepseek.com";
             default -> "https://api.openai.com";
         };
+    }
+
+    /**
+     * 生成模型实例缓存键（用于 LangChain4jModelFactory 缓存）
+     * 基于 provider + modelId + baseUrl + apiKey 哈希
+     */
+    public String cacheKey() {
+        return provider + "|" + modelId + "|" + baseUrl + "|" + maxTokens + "|" + timeoutSeconds + "|" + apiKey.hashCode();
     }
 }

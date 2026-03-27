@@ -3,7 +3,6 @@ package com.schemaplexai.model.vo.workspace;
 import lombok.Data;
 
 import java.time.LocalDateTime;
-import java.util.Map;
 
 /**
  * 工作空间视图对象
@@ -46,6 +45,12 @@ public class WorkspaceVO {
 
     /** 描述 */
     private String description;
+
+    /** 工作空间作用域: PROJECT/SYSTEM */
+    private String workspaceScope;
+
+    /** 保留策略: retain/ephemeral */
+    private String retentionPolicy;
 
     /** 创建时间 */
     private LocalDateTime createdAt;

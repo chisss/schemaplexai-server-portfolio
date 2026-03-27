@@ -7,9 +7,11 @@ import com.schemaplexai.model.dto.agent.AgentContextBindingDTO;
 import com.schemaplexai.model.dto.agent.AgentCreateRequest;
 import com.schemaplexai.model.dto.agent.AgentExecuteDTO;
 import com.schemaplexai.model.dto.agent.AgentExecutionQueryDTO;
+import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.dto.agent.AgentInitInstructionsDTO;
 import com.schemaplexai.model.dto.agent.AgentQueryRequest;
 import com.schemaplexai.model.dto.agent.AgentTeamMemberBatchRequest;
+import com.schemaplexai.model.dto.agent.AgentToolBindingBatchRequest;
 import com.schemaplexai.model.dto.agent.AgentUpdateRequest;
 import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
@@ -17,12 +19,17 @@ import com.schemaplexai.model.vo.agent.AgentExecuteResultVO;
 import com.schemaplexai.model.vo.agent.AgentExecutionVO;
 import com.schemaplexai.model.vo.agent.AgentInstructionsCheckVO;
 import com.schemaplexai.model.vo.agent.AgentTeamMemberVO;
+import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentVO;
+import com.schemaplexai.model.vo.agent.AvailableToolVO;
 import com.schemaplexai.service.agent.AgentService;
+import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
+import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -33,6 +40,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -45,6 +56,7 @@ import java.util.List;
 public class AgentController {
 
     private final AgentService agentService;
+    private final ExecutionEventStreamService executionEventStreamService;
 
     @GetMapping
     @Operation(summary = "分页查询Agent列表")
@@ -148,6 +160,27 @@ public class AgentController {
         return R.ok();
     }
 
+    // ========== 工具绑定管理 ==========
+
+    @GetMapping("/{id}/tools")
+    @Operation(summary = "获取Agent工具绑定列表")
+    public R<List<AgentToolBindingVO>> getToolBindings(@PathVariable String id) {
+        return R.ok(agentService.getToolBindings(id));
+    }
+
+    @PutMapping("/{id}/tools")
+    @Operation(summary = "批量更新Agent工具绑定（全量覆盖）")
+    public R<List<AgentToolBindingVO>> saveToolBindings(@PathVariable String id,
+                                                         @Valid @RequestBody AgentToolBindingBatchRequest request) {
+        return R.ok(agentService.saveToolBindings(id, request));
+    }
+
+    @GetMapping("/{id}/available-tools")
+    @Operation(summary = "获取Agent可绑定工具列表（内置工具/Skill/MCP）")
+    public R<List<AvailableToolVO>> getAvailableTools(@PathVariable String id) {
+        return R.ok(agentService.getAvailableTools(id));
+    }
+
     // ========== 执行管理 ==========
 
     @PostMapping("/{id}/execute")
@@ -174,6 +207,37 @@ public class AgentController {
     @PostMapping("/{id}/executions/{execId}/stop")
     @Operation(summary = "停止执行")
     public R<Void> stopExecution(@PathVariable String id, @PathVariable String execId) {
+        agentService.stopExecution(id, execId);
+        return R.ok();
+    }
+
+    @GetMapping(value = "/{id}/executions/{execId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "订阅执行事件流（SSE）")
+    public SseEmitter streamExecutionEvents(@PathVariable String id, @PathVariable String execId) {
+        // 复用读取权限校验：不存在或不归属会抛业务异常
+        agentService.getExecution(id, execId);
+        return executionEventStreamService.subscribe(execId);
+    }
+
+    @PostMapping("/{id}/executions/{execId}/input")
+    @Operation(summary = "提交 Human-in-Loop 输入")
+    public R<Void> submitExecutionInput(@PathVariable String id, @PathVariable String execId,
+                                        @Valid @RequestBody AgentExecutionInputDTO dto) {
+        // 复用读取权限校验
+        agentService.getExecution(id, execId);
+        executionEventStreamService.publish(AgentExecutionEvent.builder()
+                .eventType("USER_INPUT")
+                .executionId(execId)
+                .message(dto.getMessage())
+                .payload(dto.getOptions())
+                .timestamp(Instant.now())
+                .build());
+        return R.ok();
+    }
+
+    @PostMapping("/{id}/executions/{execId}/cancel")
+    @Operation(summary = "取消执行（兼容 stop）")
+    public R<Void> cancelExecution(@PathVariable String id, @PathVariable String execId) {
         agentService.stopExecution(id, execId);
         return R.ok();
     }

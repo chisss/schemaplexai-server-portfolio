@@ -1,7 +1,7 @@
 package com.schemaplexai.service.auth.validator;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.UserMapper;
@@ -49,7 +49,7 @@ public class AuthValidator {
      * 校验用户状态是否为 active
      */
     public void validateUserActive(User user) {
-        if (!CommonConstants.STATUS_ACTIVE.equals(user.getStatus())) {
+        if (!CommonConstant.STATUS_ACTIVE.equals(user.getStatus())) {
             throw new BusinessException(ResultCode.ACCOUNT_DISABLED);
         }
     }

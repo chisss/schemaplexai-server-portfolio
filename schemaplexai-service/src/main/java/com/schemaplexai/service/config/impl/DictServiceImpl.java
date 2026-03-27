@@ -2,6 +2,7 @@ package com.schemaplexai.service.config.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.SysDictItemMapper;
@@ -25,8 +26,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class DictServiceImpl implements DictService {
 
-    private static final String DEFAULT_STATUS = "active";
-    private static final List<String> VALID_STATUSES = List.of("active", "inactive");
+    private static final String DEFAULT_STATUS = CommonConstant.STATUS_ACTIVE;
+    private static final List<String> VALID_STATUSES = List.of(CommonConstant.STATUS_ACTIVE, CommonConstant.STATUS_INACTIVE);
 
     private final SysDictMapper sysDictMapper;
     private final SysDictItemMapper sysDictItemMapper;

@@ -8,8 +8,8 @@ import org.springframework.util.StringUtils;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Agent 上下文 Redis 缓存服务
@@ -157,14 +157,14 @@ public class ContextCacheService {
      *
      * @return JSON 字符串列表，Redis 异常时返回空列表
      */
-    public java.util.List<String> getSessionHistory(String executionId) {
+    public List<String> getSessionHistory(String executionId) {
         try {
             var raw = redisTemplate.opsForList().range(sessionKey(executionId), 0, -1);
-            if (raw == null) return java.util.List.of();
+            if (raw == null) return List.of();
             return raw.stream().map(Object::toString).toList();
         } catch (Exception e) {
             log.debug("读取对话历史失败: executionId={}", executionId);
-            return java.util.List.of();
+            return List.of();
         }
     }
 

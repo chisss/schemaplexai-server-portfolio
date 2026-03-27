@@ -10,6 +10,7 @@ import lombok.Data;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,6 +42,20 @@ public class Tenant implements Serializable {
     /** 租户级配置（JSONB） */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> config;
+
+    /** 行业类型: tech/finance/retail/healthcare/manufacturing */
+    private String industry;
+
+    /** 使用场景列表 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private List<String> scenarios;
+
+    /** 开通能力配置 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> enabledCapabilities;
+
+    /** 模板初始化状态: pending/running/done/failed */
+    private String initStatus;
 
     /** 创建时间 */
     @TableField(fill = FieldFill.INSERT)
