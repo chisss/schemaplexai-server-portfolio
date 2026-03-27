@@ -1,6 +1,6 @@
 package com.schemaplexai.model.converter;
 
-import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.model.dto.system.UserCreateRequest;
 import com.schemaplexai.model.entity.User;
 import com.schemaplexai.model.vo.system.UserVO;
@@ -14,7 +14,7 @@ import java.util.List;
  * 用户实体转换器
  */
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE,
-        imports = {CommonConstants.class})
+        imports = {CommonConstant.class})
 public interface UserConverter {
 
     /**
@@ -31,8 +31,8 @@ public interface UserConverter {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
     @Mapping(target = "passwordHash", ignore = true)
-    @Mapping(target = "status", expression = "java(CommonConstants.STATUS_ACTIVE)")
-    @Mapping(target = "loginType", expression = "java(CommonConstants.LOGIN_TYPE_PASSWORD)")
+    @Mapping(target = "status", expression = "java(CommonConstant.STATUS_ACTIVE)")
+    @Mapping(target = "loginType", expression = "java(CommonConstant.LOGIN_TYPE_PASSWORD)")
     @Mapping(target = "lastLoginAt", ignore = true)
     @Mapping(target = "lastLoginIp", ignore = true)
     @Mapping(target = "createdBy", ignore = true)

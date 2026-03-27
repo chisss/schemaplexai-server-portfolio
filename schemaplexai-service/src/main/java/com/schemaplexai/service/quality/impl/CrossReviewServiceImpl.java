@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.enums.TaskStatusEnum;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.CrossReviewMapper;
 import com.schemaplexai.model.converter.CrossReviewConverter;
@@ -14,9 +15,12 @@ import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.quality.CrossReviewService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+
+import java.util.Map;
 
 /**
  * 多模型交叉审查服务实现
@@ -29,6 +33,7 @@ public class CrossReviewServiceImpl implements CrossReviewService {
     private final CrossReviewMapper crossReviewMapper;
     private final CrossReviewConverter crossReviewConverter;
     private final EntityValidator entityValidator;
+    private final RabbitTemplate rabbitTemplate;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -38,7 +43,7 @@ public class CrossReviewServiceImpl implements CrossReviewService {
         entity.setTaskId(request.getTaskId());
         entity.setModelAId(request.getModelAId());
         entity.setModelBId(request.getModelBId());
-        entity.setStatus("pending");
+        entity.setStatus(TaskStatusEnum.PENDING.getCode());
         entity.setCreatedBy(SecurityUtil.getCurrentUserId());
         entity.setTenantId(SecurityUtil.getCurrentTenantId());
 
@@ -46,7 +51,17 @@ public class CrossReviewServiceImpl implements CrossReviewService {
         log.info("创建交叉审查: reviewId={}, specId={}, modelA={}, modelB={}",
                 entity.getId(), request.getSpecId(), request.getModelAId(), request.getModelBId());
 
-        // TODO: 异步发送MQ消息，调度AI模型进行交叉审查
+        Map<String, Object> message = Map.of(
+                "reviewId", entity.getId(),
+                "specId", request.getSpecId(),
+                "taskId", request.getTaskId(),
+                "modelAId", request.getModelAId(),
+                "modelBId", request.getModelBId(),
+                "type", "cross_review"
+        );
+
+        rabbitTemplate.convertAndSend("sf.quality.check", message);
+        log.info("交叉审查任务已发送到MQ: reviewId={}", entity.getId());
 
         return crossReviewConverter.toVO(entity);
     }

@@ -1,6 +1,7 @@
 package com.schemaplexai.web.config;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.dao.mapper.RoleMapper;
 import com.schemaplexai.dao.mapper.TenantMapper;
 import com.schemaplexai.dao.mapper.UserMapper;
@@ -58,7 +59,7 @@ public class DataInitializer implements CommandLineRunner {
         tenant.setName("默认租户");
         tenant.setCode("default");
         tenant.setDescription("系统预设默认租户");
-        tenant.setStatus("active");
+        tenant.setStatus(CommonConstant.STATUS_ACTIVE);
         tenant.setCreatedAt(LocalDateTime.now());
         tenant.setUpdatedAt(LocalDateTime.now());
         tenantMapper.insert(tenant);
@@ -71,7 +72,7 @@ public class DataInitializer implements CommandLineRunner {
      */
     private String ensureSuperAdminRole(String tenantId) {
         Role existing = roleMapper.selectOne(
-                new LambdaQueryWrapper<Role>().eq(Role::getCode, "SUPER_ADMIN")
+                new LambdaQueryWrapper<Role>().eq(Role::getCode, CommonConstant.ROLE_SUPER_ADMIN)
         );
         if (existing != null) {
             log.info("[角色] SUPER_ADMIN 角色已存在: id={}", existing.getId());
@@ -80,10 +81,10 @@ public class DataInitializer implements CommandLineRunner {
 
         Role role = new Role();
         role.setName("超级管理员");
-        role.setCode("SUPER_ADMIN");
+        role.setCode(CommonConstant.ROLE_SUPER_ADMIN);
         role.setDescription("系统预设超级管理员角色，拥有全部权限");
         role.setIsSystem(true);
-        role.setStatus("active");
+        role.setStatus(CommonConstant.STATUS_ACTIVE);
         role.setTenantId(tenantId);
         role.setCreatedAt(LocalDateTime.now());
         role.setUpdatedAt(LocalDateTime.now());
@@ -121,7 +122,7 @@ public class DataInitializer implements CommandLineRunner {
         user.setPasswordHash(passwordEncoder.encode("admin123"));
         user.setEmail("admin@schemaplexai.com");
         user.setRealName("系统管理员");
-        user.setStatus("active");
+        user.setStatus(CommonConstant.STATUS_ACTIVE);
         user.setLoginType("password");
         user.setDeleted(0);
         user.setCreatedAt(LocalDateTime.now());

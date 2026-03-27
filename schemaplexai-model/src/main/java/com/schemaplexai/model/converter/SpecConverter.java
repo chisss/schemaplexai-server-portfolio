@@ -1,6 +1,6 @@
 package com.schemaplexai.model.converter;
 
-import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.SpecStatusEnum;
 import com.schemaplexai.model.dto.spec.SpecCreateRequest;
 import com.schemaplexai.model.entity.Spec;
@@ -15,7 +15,7 @@ import java.util.List;
  * Spec实体转换器
  */
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE,
-        imports = {SpecStatusEnum.class, CommonConstants.class})
+        imports = {SpecStatusEnum.class, CommonConstant.class})
 public interface SpecConverter {
 
     /**
@@ -31,7 +31,7 @@ public interface SpecConverter {
      */
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
-    @Mapping(target = "version", expression = "java(CommonConstants.SPEC_INITIAL_VERSION)")
+    @Mapping(target = "version", expression = "java(CommonConstant.SPEC_INITIAL_VERSION)")
     @Mapping(target = "status", expression = "java(SpecStatusEnum.DRAFT.getCode())")
     @Mapping(target = "owner", ignore = true)
     @Mapping(target = "createdBy", ignore = true)

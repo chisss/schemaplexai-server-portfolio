@@ -11,7 +11,6 @@ import org.springframework.util.StringUtils;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * 上下文条目处理器
@@ -82,7 +81,7 @@ public class ContextItemHandler {
             map.put("tokenCount", item.getTokenCount());
             map.put("sortOrder", item.getSortOrder());
             return map;
-        }).collect(Collectors.toList());
+        }).toList();
 
         Map<String, Object> snapshotData = new HashMap<>();
         snapshotData.put("items", itemMaps);

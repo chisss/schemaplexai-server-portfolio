@@ -36,9 +36,10 @@ schemaplexai-server/
 
 **配置文件位置**: `application-dev.yml` / `application-prod.yml`
 
-**初始化**: Docker首次启动自动执行 `docs/12-init.sql`，或手动执行：
+**初始化**: 统一使用根目录 `sql/` 的基线脚本（`01~15`），推荐执行 `sql/init_database.sh`：
 ```bash
-psql -h localhost -U schemaplexai -d schemaplexai -f docs/12-init.sql
+cd ../sql
+./init_database.sh
 ```
 
 ### 2.2 Redis 7（缓存 + 会话）

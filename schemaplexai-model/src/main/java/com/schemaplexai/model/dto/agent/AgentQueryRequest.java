@@ -28,4 +28,10 @@ public class AgentQueryRequest {
 
     /** 是否内置Agent筛选 */
     private Boolean isBuiltin;
+
+    /**
+     * 按内置位置筛选（用于上下文创建等场景）
+     * 传入 builtin_position 值（如 "context-create"），返回该位置的内置Agent，忽略 status 过滤
+     */
+    private String builtinPosition;
 }

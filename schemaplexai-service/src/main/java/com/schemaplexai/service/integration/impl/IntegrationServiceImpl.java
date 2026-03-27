@@ -2,6 +2,7 @@ package com.schemaplexai.service.integration.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -64,7 +65,7 @@ public class IntegrationServiceImpl implements IntegrationService {
         var integration = integrationConverter.fromCreateRequest(request);
         integration.setTenantId(SecurityUtil.getCurrentTenantId());
         integration.setCreatedBy(SecurityUtil.getCurrentUserId());
-        integration.setStatus("active");
+        integration.setStatus(CommonConstant.STATUS_ACTIVE);
 
         integrationMapper.insert(integration);
         log.info("创建集成配置成功: integrationId={}, name={}, platform={}",
@@ -250,7 +251,7 @@ public class IntegrationServiceImpl implements IntegrationService {
         project.setExternalProjectId(request.getExternalProjectId());
         project.setExternalProjectName(request.getExternalProjectName());
         project.setSyncConfig(request.getSyncConfig());
-        project.setStatus("active");
+        project.setStatus(CommonConstant.STATUS_ACTIVE);
         project.setCreatedBy(SecurityUtil.getCurrentUserId());
         project.setCreatedAt(LocalDateTime.now());
         project.setUpdatedAt(LocalDateTime.now());
@@ -284,7 +285,18 @@ public class IntegrationServiceImpl implements IntegrationService {
         vo.setSyncConfig(project.getSyncConfig());
         vo.setStatus(project.getStatus());
         vo.setLastSyncAt(project.getLastSyncAt());
+        vo.setLocalPath(project.getLocalPath());
         return vo;
+    }
+
+    @Override
+    public List<IntegrationProjectVO> listAllImportedProjects() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        List<IntegrationProject> projects = integrationProjectMapper.selectList(
+                new LambdaQueryWrapper<IntegrationProject>()
+                        .eq(IntegrationProject::getTenantId, tenantId)
+                        .orderByDesc(IntegrationProject::getCreatedAt));
+        return projects.stream().map(this::toProjectVO).collect(java.util.stream.Collectors.toList());
     }
 
     // ======================== 私有方法 ========================

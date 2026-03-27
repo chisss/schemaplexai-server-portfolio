@@ -1,6 +1,7 @@
 package com.schemaplexai.service.config.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.ModelProviderEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
@@ -63,7 +64,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     public List<AiModel> listAiModels() {
         return aiModelMapper.selectList(
                 new LambdaQueryWrapper<AiModel>()
-                        .eq(AiModel::getStatus, "active")
+                        .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
                         .orderByAsc(AiModel::getCreatedAt)
         );
     }
@@ -95,6 +96,8 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         AiModel model = new AiModel();
         model.setName(request.getName());
         model.setProvider(request.getProvider());
+        model.setProviderCode(request.getProviderCode());
+        model.setUseCase(request.getUseCase());
         model.setModelId(request.getModelId());
         // apiKey 使用 Base64 编码存储（后续替换为加密）
         model.setApiKeyEncrypted(Base64.getEncoder().encodeToString(
@@ -112,7 +115,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                 ? request.getRetryIntervalSeconds() : 5);
         model.setMaxTokens(request.getMaxTokens() != null
                 ? request.getMaxTokens() : 4096);
-        model.setStatus("active");
+        model.setStatus(CommonConstant.STATUS_ACTIVE);
 
         aiModelMapper.insert(model);
         log.info("创建AI模型成功: modelId={}, name={}", model.getId(), model.getName());
@@ -137,6 +140,12 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         }
         if (StringUtils.hasText(request.getProvider())) {
             updateEntity.setProvider(request.getProvider());
+        }
+        if (StringUtils.hasText(request.getProviderCode())) {
+            updateEntity.setProviderCode(request.getProviderCode());
+        }
+        if (request.getUseCase() != null) {
+            updateEntity.setUseCase(request.getUseCase());
         }
         if (StringUtils.hasText(request.getModelId())) {
             updateEntity.setModelId(request.getModelId());
@@ -228,7 +237,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         route.setPrimaryTriggerCondition(request.getPrimaryTriggerCondition());
         route.setSecondaryTriggerCondition(request.getSecondaryTriggerCondition());
         route.setDescription(request.getDescription());
-        route.setStatus("active");
+        route.setStatus(CommonConstant.STATUS_ACTIVE);
 
         aiModelRouteMapper.insert(route);
         log.info("创建路由规则成功: routeId={}, name={}", route.getId(), route.getName());
@@ -307,7 +316,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     public List<TeamTemplate> listTeamTemplates() {
         return teamTemplateMapper.selectList(
                 new LambdaQueryWrapper<TeamTemplate>()
-                        .eq(TeamTemplate::getStatus, "active")
+                        .eq(TeamTemplate::getStatus, CommonConstant.STATUS_ACTIVE)
                         .orderByAsc(TeamTemplate::getCreatedAt)
         );
     }
@@ -337,7 +346,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         ConnectivityTestResultVO result;
         try {
             OkHttpClient client = new OkHttpClient.Builder()
-                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .connectTimeout(20, TimeUnit.SECONDS)
                     .readTimeout(30, TimeUnit.SECONDS)
                     .build();
 
@@ -390,7 +399,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                 .post(RequestBody.create(body, JSON_TYPE))
                 .header("Content-Type", "application/json");
         if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
-            builder.header("x-api-key", apiKey).header("anthropic-version", "2024-02-29");
+            builder.header("x-api-key", apiKey).header("anthropic-version", "2026-01-01");
         } else if (!ModelProviderEnum.GEMINI.getCode().equals(provider)) {
             builder.header("Authorization", "Bearer " + apiKey);
         }

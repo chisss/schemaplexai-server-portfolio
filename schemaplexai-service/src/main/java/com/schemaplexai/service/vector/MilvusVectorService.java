@@ -122,7 +122,7 @@ public class MilvusVectorService {
             ensureCollection();
             float[] vector = embeddingService.embed(content);
             String summary = content != null && content.length() > 500
-                    ? content.substring(0, 500) : (content != null ? content : "");
+                    ? content.substring(0, 500) : content;
 
             JsonObject row = new JsonObject();
             row.addProperty(FIELD_ITEM_ID, itemId);

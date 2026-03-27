@@ -17,6 +17,12 @@ public class AiModelUpdateRequest {
     /** 提供商 */
     private String provider;
 
+    /** 提供商编码 */
+    private String providerCode;
+
+    /** 模型用途分类 */
+    private String useCase;
+
     /** 模型标识 */
     private String modelId;
 

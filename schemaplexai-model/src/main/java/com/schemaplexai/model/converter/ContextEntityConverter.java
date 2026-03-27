@@ -1,6 +1,6 @@
 package com.schemaplexai.model.converter;
 
-import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.model.dto.context.ContextCreateRequest;
 import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextSnapshot;
@@ -17,7 +17,7 @@ import java.util.List;
  */
 @Mapper(componentModel = "spring",
         unmappedSourcePolicy = ReportingPolicy.IGNORE,
-        imports = {CommonConstants.class})
+        imports = {CommonConstant.class})
 public interface ContextEntityConverter {
 
     ContextVO toVO(ContextEntity entity);
@@ -26,7 +26,7 @@ public interface ContextEntityConverter {
 
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
-    @Mapping(target = "status", expression = "java(CommonConstants.STATUS_ACTIVE)")
+    @Mapping(target = "status", expression = "java(CommonConstant.STATUS_ACTIVE)")
     @Mapping(target = "createdBy", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
     @Mapping(target = "updatedBy", ignore = true)

@@ -2,6 +2,7 @@ package com.schemaplexai.service.config.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
@@ -71,7 +72,7 @@ public class RoleServiceImpl implements RoleService {
     @Override
     public List<RoleVO> listAllRoles() {
         var wrapper = new LambdaQueryWrapper<Role>()
-                .eq(Role::getStatus, "active")
+                .eq(Role::getStatus, CommonConstant.STATUS_ACTIVE)
                 .orderByAsc(Role::getCreatedAt);
         var roles = roleMapper.selectList(wrapper);
         return roleConverter.toVOList(roles);
@@ -137,7 +138,7 @@ public class RoleServiceImpl implements RoleService {
 
     @Override
     public void updateStatus(String id, String status) {
-        if (!Set.of("active", "inactive").contains(status)) {
+        if (!Set.of(CommonConstant.STATUS_ACTIVE, CommonConstant.STATUS_INACTIVE).contains(status)) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "无效的状态值，允许值: active, inactive");
         }
         entityValidator.requireExists(roleMapper, id, ResultCode.ROLE_NOT_FOUND);

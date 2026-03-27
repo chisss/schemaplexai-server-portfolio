@@ -30,6 +30,8 @@ public interface WorkspaceConverter {
     @Mapping(target = "createdAt", ignore = true)
     @Mapping(target = "updatedBy", ignore = true)
     @Mapping(target = "updatedAt", ignore = true)
+    @Mapping(target = "workspaceScope", constant = "PROJECT")
+    @Mapping(target = "retentionPolicy", constant = "retain")
     @Mapping(target = "deleted", ignore = true)
     Workspace fromCreateRequest(WorkspaceCreateRequest request);
 }

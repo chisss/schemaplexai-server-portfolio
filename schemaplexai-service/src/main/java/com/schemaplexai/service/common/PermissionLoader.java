@@ -1,6 +1,7 @@
 package com.schemaplexai.service.common;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.dao.mapper.PermissionMapper;
 import com.schemaplexai.dao.mapper.RoleMapper;
 import com.schemaplexai.dao.mapper.RolePermissionMapper;
@@ -53,8 +54,8 @@ public class PermissionLoader {
      * 加载用户的权限编码列表（SUPER_ADMIN 返回 ["*"]）
      */
     public List<String> loadPermissionCodes(String userId, List<String> roleCodes) {
-        if (roleCodes.contains("SUPER_ADMIN")) {
-            return List.of("*");
+        if (roleCodes.contains(CommonConstant.ROLE_SUPER_ADMIN)) {
+            return List.of(CommonConstant.PERMISSION_ALL);
         }
 
         var roleIds = loadRoleIds(userId);
@@ -71,9 +72,9 @@ public class PermissionLoader {
      */
     public Set<String> loadPermissionCodeSet(String userId) {
         var roles = loadRoles(userId);
-        boolean isSuperAdmin = roles.stream().anyMatch(r -> "SUPER_ADMIN".equals(r.getCode()));
+        boolean isSuperAdmin = roles.stream().anyMatch(r -> CommonConstant.ROLE_SUPER_ADMIN.equals(r.getCode()));
         if (isSuperAdmin) {
-            return Set.of("*");
+            return Set.of(CommonConstant.PERMISSION_ALL);
         }
 
         var roleIds = roles.stream().map(Role::getId).toList();

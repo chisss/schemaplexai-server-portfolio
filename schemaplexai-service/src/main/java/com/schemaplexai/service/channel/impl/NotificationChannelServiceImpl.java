@@ -2,6 +2,8 @@ package com.schemaplexai.service.channel.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.enums.NotificationChannelStatusEnum;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.NotificationChannelMapper;
@@ -136,12 +138,12 @@ public class NotificationChannelServiceImpl implements NotificationChannelServic
             log.info("通知渠道测试成功: channelId={}, type={}, result={}", id, channel.getChannelType(), result);
 
             channel.setLastTestAt(LocalDateTime.now());
-            channel.setStatus("active");
+            channel.setStatus(CommonConstant.STATUS_ACTIVE);
             channel.setErrorMessage(null);
         } catch (Exception e) {
             log.error("通知渠道测试失败: channelId={}, type={}", id, channel.getChannelType(), e);
             channel.setLastTestAt(LocalDateTime.now());
-            channel.setStatus("error");
+            channel.setStatus(NotificationChannelStatusEnum.ERROR.getCode());
             channel.setErrorMessage("测试发送失败: " + e.getMessage());
         }
 

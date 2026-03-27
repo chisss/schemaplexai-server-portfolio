@@ -82,7 +82,7 @@ knife4j:
 # 工作空间配置
 schemaplexai:
   workspace:
-    root-path: ${WORKSPACE_ROOT:/data/workspaces}
+    root-path: ${WORKSPACE_ROOT:${user.home}/.schemaplexai/workspaces}
     max-disk-usage-gb: 50
 
 # 邮件服务配置

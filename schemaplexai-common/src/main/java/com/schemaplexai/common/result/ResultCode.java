@@ -80,6 +80,11 @@ public enum ResultCode {
     ROUTE_NOT_FOUND(60009, "路由规则不存在"),
     ROUTE_NAME_DUPLICATE(60010, "路由规则名称已存在"),
     TEMPLATE_NOT_FOUND(60011, "团队模板不存在"),
+    MODEL_GROUP_NOT_FOUND(60012, "模型组不存在"),
+    MODEL_GROUP_NAME_DUPLICATE(60013, "模型组名称已存在"),
+    MODEL_GROUP_ALL_UNAVAILABLE(60014, "模型组内所有模型均不可用"),
+    TENANT_TEMPLATE_INIT_FAILED(60015, "租户模板初始化失败"),
+    TENANT_TEMPLATE_INIT_RUNNING(60016, "租户模板正在初始化，请勿重复触发"),
 
     // ========== 质量保障 70000~70999 ==========
     DEVIATION_DETECT_FAILED(70001, "偏离检测失败"),

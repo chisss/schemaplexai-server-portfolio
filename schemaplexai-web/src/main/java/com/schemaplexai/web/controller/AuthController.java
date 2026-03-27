@@ -6,6 +6,7 @@ import com.schemaplexai.model.dto.auth.LoginRequest;
 import com.schemaplexai.model.dto.auth.RefreshTokenRequest;
 import com.schemaplexai.model.vo.auth.LoginVO;
 import com.schemaplexai.model.vo.auth.TokenVO;
+import com.schemaplexai.model.vo.auth.WsTicketVO;
 import com.schemaplexai.service.auth.AuthService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.GetMapping;
 
 /**
  * 认证授权控制器
@@ -47,5 +49,14 @@ public class AuthController {
             authService.logout(userId);
         }
         return R.ok();
+    }
+
+    @GetMapping("/ws-ticket")
+    @Operation(summary = "签发 WebSocket 一次性 Ticket")
+    public R<WsTicketVO> issueWsTicket() {
+        return R.ok(authService.issueWsTicket(
+                SecurityUtil.getCurrentUserId(),
+                SecurityUtil.getCurrentTenantId()
+        ));
     }
 }

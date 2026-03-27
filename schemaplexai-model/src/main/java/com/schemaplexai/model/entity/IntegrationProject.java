@@ -33,6 +33,8 @@ public class IntegrationProject implements Serializable {
     private String updatedBy;
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updatedAt;
+    /** 本地项目路径（供Agent读取上下文） */
+    private String localPath;
     @TableLogic
     private Integer deleted;
 }

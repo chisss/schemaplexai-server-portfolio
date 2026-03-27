@@ -34,4 +34,7 @@ public class IntegrationProjectVO {
 
     /** 最近同步时间 */
     private LocalDateTime lastSyncAt;
+
+    /** 本地项目路径（供Agent读取） */
+    private String localPath;
 }

@@ -1,5 +1,6 @@
 package com.schemaplexai.model.converter;
 
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.model.dto.integration.IntegrationCreateRequest;
 import com.schemaplexai.model.entity.Integration;
 import com.schemaplexai.model.vo.integration.IntegrationVO;
@@ -12,7 +13,7 @@ import java.util.List;
 /**
  * 集成配置转换器
  */
-@Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE)
+@Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE, imports = {CommonConstant.class})
 public interface IntegrationConverter {
 
     /**
@@ -32,7 +33,7 @@ public interface IntegrationConverter {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
     @Mapping(target = "webhookSecret", ignore = true)
-    @Mapping(target = "status", constant = "active")
+    @Mapping(target = "status", expression = "java(CommonConstant.STATUS_ACTIVE)")
     @Mapping(target = "lastSyncAt", ignore = true)
     @Mapping(target = "errorMessage", ignore = true)
     @Mapping(target = "createdBy", ignore = true)

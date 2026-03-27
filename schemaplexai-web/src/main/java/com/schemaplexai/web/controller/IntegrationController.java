@@ -104,6 +104,12 @@ public class IntegrationController {
         return R.ok(integrationService.listImportedProjects(id));
     }
 
+    @GetMapping("/projects/all")
+    @Operation(summary = "获取当前租户下所有已导入的集成项目（跨所有集成）")
+    public R<List<IntegrationProjectVO>> listAllImportedProjects() {
+        return R.ok(integrationService.listAllImportedProjects());
+    }
+
     @GetMapping("/webhook-events")
     @Operation(summary = "分页查询Webhook事件")
     public R<PageResult<WebhookEventVO>> pageWebhookEvents(

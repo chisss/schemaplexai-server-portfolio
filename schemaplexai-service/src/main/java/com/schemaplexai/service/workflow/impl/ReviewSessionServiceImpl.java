@@ -2,6 +2,7 @@ package com.schemaplexai.service.workflow.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.enums.ReviewCommentLevelEnum;
+import com.schemaplexai.common.enums.ReviewSessionStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -24,8 +25,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 评审会话服务实现
@@ -56,18 +58,18 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                     Map<String, Object> reviewer = new HashMap<>();
                     reviewer.put("userId", r.get("userId"));
                     reviewer.put("role", r.get("role"));
-                    reviewer.put("status", "pending");
+                    reviewer.put("status", ReviewSessionStatusEnum.PENDING.getCode());
                     reviewer.put("submittedAt", null);
                     return (Object) reviewer;
                 })
-                .collect(Collectors.toList());
+                .toList();
         session.setReviewers(reviewers);
 
         // 计算截止时间
         int hours = request.getDeadlineHours() != null ? request.getDeadlineHours() : 48;
         session.setDeadline(LocalDateTime.now().plusHours(hours));
         session.setTimeoutStrategy(request.getTimeoutStrategy());
-        session.setStatus("pending");
+        session.setStatus(ReviewSessionStatusEnum.PENDING.getCode());
 
         sessionMapper.insert(session);
 
@@ -99,8 +101,8 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         updateReviewerStatus(session, SecurityUtil.getCurrentUserId(), "submitted");
 
         // 会话状态从 pending → in_progress
-        if ("pending".equals(session.getStatus())) {
-            session.setStatus("in_progress");
+        if (ReviewSessionStatusEnum.PENDING.getCode().equals(session.getStatus())) {
+            session.setStatus(ReviewSessionStatusEnum.IN_PROGRESS.getCode());
             session.setUpdatedAt(LocalDateTime.now());
             sessionMapper.updateById(session);
         }
@@ -126,7 +128,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         // 查询状态为 pending 或 in_progress 的会话
         var sessions = sessionMapper.selectList(
                 new LambdaQueryWrapper<ReviewSession>()
-                        .in(ReviewSession::getStatus, "pending", "in_progress")
+                        .in(ReviewSession::getStatus, ReviewSessionStatusEnum.PENDING.getCode(), ReviewSessionStatusEnum.IN_PROGRESS.getCode())
                         .orderByDesc(ReviewSession::getCreatedAt)
         );
 
@@ -134,21 +136,21 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         return sessions.stream()
                 .filter(s -> isReviewerInSession(s, currentUserId))
                 .map(this::enrichWithSummary)
-                .collect(Collectors.toList());
+                .toList();
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void checkAndCompleteSession(String sessionId) {
         var session = sessionMapper.selectById(sessionId);
-        if (session == null || "completed".equals(session.getStatus()) || "timeout".equals(session.getStatus())) {
+        if (session == null || ReviewSessionStatusEnum.COMPLETED.getCode().equals(session.getStatus()) || ReviewSessionStatusEnum.TIMEOUT.getCode().equals(session.getStatus())) {
             return;
         }
 
         // 检查所有评审人是否都已提交
         boolean allSubmitted = isAllReviewersSubmitted(session);
         if (allSubmitted) {
-            session.setStatus("completed");
+            session.setStatus(ReviewSessionStatusEnum.COMPLETED.getCode());
             sessionMapper.updateById(session);
             log.info("评审会话已完成: sessionId={}", sessionId);
 
@@ -162,7 +164,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         // 查询已超时但未完成的会话
         var timeoutSessions = sessionMapper.selectList(
                 new LambdaQueryWrapper<ReviewSession>()
-                        .in(ReviewSession::getStatus, "pending", "in_progress")
+                        .in(ReviewSession::getStatus, ReviewSessionStatusEnum.PENDING.getCode(), ReviewSessionStatusEnum.IN_PROGRESS.getCode())
                         .le(ReviewSession::getDeadline, LocalDateTime.now())
         );
 
@@ -171,7 +173,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
             switch (strategy != null ? strategy : "escalate") {
                 case "auto_pass":
                     // 自动通过：将会话标记为完成
-                    session.setStatus("completed");
+                    session.setStatus(ReviewSessionStatusEnum.COMPLETED.getCode());
                     sessionMapper.updateById(session);
                     log.info("评审会话超时自动通过: sessionId={}", session.getId());
                     break;
@@ -185,7 +187,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                 case "escalate":
                 default:
                     // 升级处理：标记为超时状态
-                    session.setStatus("timeout");
+                    session.setStatus(ReviewSessionStatusEnum.TIMEOUT.getCode());
                     sessionMapper.updateById(session);
                     log.info("评审会话超时升级: sessionId={}", session.getId());
                     // TODO: 对接通知服务 — 通知会话 owner 和管理员
@@ -252,7 +254,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         int totalReviewers = session.getReviewers() != null ? session.getReviewers().size() : 0;
         long submittedCount = session.getReviewers() != null
                 ? session.getReviewers().stream()
-                .filter(r -> r instanceof Map)
+                .filter(Map.class::isInstance)
                 .map(r -> (Map<String, Object>) r)
                 .filter(r -> "submitted".equals(r.get("status")))
                 .count()
@@ -275,8 +277,8 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
 
         List<Object> updatedReviewers = session.getReviewers().stream()
                 .map(r -> {
-                    if (r instanceof Map) {
-                        Map<String, Object> reviewer = new HashMap<>((Map<String, Object>) r);
+                    if (r instanceof Map<?, ?> rawMap) {
+                        Map<String, Object> reviewer = new HashMap<>((Map<String, Object>) rawMap);
                         if (userId.equals(reviewer.get("userId"))) {
                             reviewer.put("status", status);
                             reviewer.put("submittedAt", LocalDateTime.now().toString());
@@ -285,7 +287,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                     }
                     return r;
                 })
-                .collect(Collectors.toList());
+                .toList();
 
         session.setReviewers(updatedReviewers);
         sessionMapper.updateById(session);
@@ -300,7 +302,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
             return false;
         }
         return session.getReviewers().stream()
-                .filter(r -> r instanceof Map)
+                .filter(Map.class::isInstance)
                 .map(r -> (Map<String, Object>) r)
                 .anyMatch(r -> userId.equals(r.get("userId")));
     }
@@ -314,7 +316,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
             return false;
         }
         return session.getReviewers().stream()
-                .filter(r -> r instanceof Map)
+                .filter(Map.class::isInstance)
                 .map(r -> (Map<String, Object>) r)
                 .allMatch(r -> "submitted".equals(r.get("status")));
     }

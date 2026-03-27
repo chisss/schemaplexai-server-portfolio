@@ -23,6 +23,10 @@ public interface AgentConverter {
     @Mapping(target = "configs", ignore = true)
     @Mapping(target = "teamMembers", ignore = true)
     @Mapping(target = "contextBindings", ignore = true)
+    @Mapping(target = "builtin", ignore = true)
+    @Mapping(target = "builtinPositions", ignore = true)
+    @Mapping(target = "teamConfigDone", ignore = true)
+    @Mapping(target = "contextBindingDone", ignore = true)
     AgentVO toVO(Agent agent);
 
     List<AgentVO> toVOList(List<Agent> agents);

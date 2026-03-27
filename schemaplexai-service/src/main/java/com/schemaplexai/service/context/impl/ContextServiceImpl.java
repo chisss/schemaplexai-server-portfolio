@@ -2,6 +2,7 @@ package com.schemaplexai.service.context.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
@@ -23,8 +24,11 @@ import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.context.ContextService;
 import com.schemaplexai.service.context.handler.ContextItemHandler;
 import com.schemaplexai.service.context.validator.ContextValidator;
+import com.schemaplexai.service.vector.MilvusVectorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -54,6 +58,11 @@ public class ContextServiceImpl implements ContextService {
     private final EntityValidator entityValidator;
     private final ContextRelationMapper contextRelationMapper;
 
+    /** Milvus 可选注入（Milvus 未启动时为 null） */
+    @Lazy
+    @Autowired(required = false)
+    private MilvusVectorService milvusVectorService;
+
     // ===== 上下文 CRUD =====
 
     @Override
@@ -81,6 +90,33 @@ public class ContextServiceImpl implements ContextService {
                         contextRelationMapper.insert(relation);
                     });
             log.info("创建上下文关联关系: contextId={}, linkedCount={}", entity.getId(), request.getLinkedContextIds().size());
+        }
+
+        // 写入 Milvus 向量数据库（initialContent 作为初始条目向量）
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (milvusVectorService != null && StringUtils.hasText(request.getInitialContent())) {
+            try {
+                // 先创建初始条目
+                var item = new ContextItem();
+                item.setContextId(entity.getId());
+                item.setItemType("document");
+                item.setTitle(entity.getName());
+                item.setContent(request.getInitialContent());
+                item.setSortOrder(0);
+                contextItemMapper.insert(item);
+
+                // 再向量化写入 Milvus
+                milvusVectorService.upsertContextItem(
+                        item.getId(),
+                        tenantId,
+                        null,
+                        entity.getId(),
+                        request.getInitialContent()
+                );
+                log.info("上下文已写入 Milvus 向量库: contextId={}, itemId={}", entity.getId(), item.getId());
+            } catch (Exception e) {
+                log.warn("Milvus 写入失败（不影响主流程）: contextId={}, error={}", entity.getId(), e.getMessage());
+            }
         }
 
         return contextEntityConverter.toVO(entity);
@@ -195,6 +231,22 @@ public class ContextServiceImpl implements ContextService {
         item.setContextId(contextId);
         item.setTokenCount(contextItemHandler.calculateTokenCount(request.getContent()));
         contextItemMapper.insert(item);
+
+        // 同步写入 Milvus 向量库
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (milvusVectorService != null && StringUtils.hasText(request.getContent())) {
+            try {
+                milvusVectorService.upsertContextItem(
+                        item.getId(),
+                        tenantId,
+                        null,
+                        contextId,
+                        request.getContent()
+                );
+            } catch (Exception e) {
+                log.warn("Milvus 写入失败（不影响主流程）: itemId={}, error={}", item.getId(), e.getMessage());
+            }
+        }
 
         log.info("添加上下文条目: contextId={}, itemId={}, type={}",
                 contextId, item.getId(), item.getItemType());
@@ -401,7 +453,7 @@ public class ContextServiceImpl implements ContextService {
     private ContextResolvedVO.ContextLayer loadContextLayer(String level, String projectId, int tokenBudget) {
         var wrapper = new LambdaQueryWrapper<ContextEntity>()
                 .eq(ContextEntity::getContextLevel, level)
-                .eq(ContextEntity::getStatus, "active");
+                .eq(ContextEntity::getStatus, CommonConstant.STATUS_ACTIVE);
 
         if (projectId != null && !"global".equals(level)) {
             wrapper.eq(ContextEntity::getProjectId, projectId);

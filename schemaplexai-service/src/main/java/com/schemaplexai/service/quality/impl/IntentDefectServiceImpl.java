@@ -3,6 +3,7 @@ package com.schemaplexai.service.quality.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.enums.IntentDefectStatusEnum;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -21,8 +22,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
  * 意图缺陷分析服务实现
@@ -35,9 +41,12 @@ public class IntentDefectServiceImpl implements IntentDefectService {
     private final IntentDefectMapper intentDefectMapper;
     private final IntentDefectConverter intentDefectConverter;
     private final EntityValidator entityValidator;
+    private final RabbitTemplate rabbitTemplate;
 
     /** 合法的意图缺陷状态值 */
-    private static final Set<String> VALID_STATUSES = Set.of("open", "resolved", "accepted");
+    private static final Set<String> VALID_STATUSES = Arrays.stream(IntentDefectStatusEnum.values())
+            .map(IntentDefectStatusEnum::getCode)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
     @Override
     public AnalyzeTaskVO analyze(IntentDefectAnalyzeRequest request) {
@@ -45,7 +54,14 @@ public class IntentDefectServiceImpl implements IntentDefectService {
         log.info("提交意图缺陷分析任务: taskId={}, specId={}, docType={}",
                 taskId, request.getSpecId(), request.getDocType());
 
-        // TODO: 异步调用AI模型进行意图缺陷分析，将分析结果写入数据库
+        Map<String, Object> message = new HashMap<>();
+        message.put("taskId", taskId);
+        message.put("specId", request.getSpecId());
+        message.put("docType", request.getDocType());
+        message.put("type", "intent_defect_analyze");
+
+        rabbitTemplate.convertAndSend("sf.quality.check", message);
+        log.info("意图缺陷分析任务已发送到MQ: taskId={}", taskId);
 
         return new AnalyzeTaskVO(taskId, "submitted", "分析任务已提交");
     }

@@ -20,6 +20,12 @@ public class AiModelCreateRequest {
     @NotBlank(message = "提供商不能为空")
     private String provider;
 
+    /** 提供商编码 */
+    private String providerCode;
+
+    /** 模型用途分类 */
+    private String useCase;
+
     /** 模型标识 */
     @NotBlank(message = "模型标识不能为空")
     private String modelId;

@@ -48,4 +48,9 @@ public interface IntegrationService {
      * 获取已导入的集成项目列表
      */
     List<IntegrationProjectVO> listImportedProjects(String integrationId);
+
+    /**
+     * 获取当前租户下所有已导入的集成项目（跨所有集成）
+     */
+    List<IntegrationProjectVO> listAllImportedProjects();
 }

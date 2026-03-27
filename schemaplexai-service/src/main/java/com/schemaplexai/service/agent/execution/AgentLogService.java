@@ -2,6 +2,7 @@ package com.schemaplexai.service.agent.execution;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.dao.mapper.AgentExecutionLogMapper;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.model.entity.AgentExecution;
@@ -81,12 +82,13 @@ public class AgentLogService {
         }
 
         // 转为 running 时记录开始时间
-        if ("running".equals(status)) {
+        if (AgentExecutionStatusEnum.RUNNING.getCode().equals(status)) {
             update.setStartedAt(LocalDateTime.now());
         }
 
         // 终态记录完成时间
-        if (!"queued".equals(status) && !"running".equals(status)) {
+        if (!AgentExecutionStatusEnum.QUEUED.getCode().equals(status)
+                && !AgentExecutionStatusEnum.RUNNING.getCode().equals(status)) {
             update.setCompletedAt(LocalDateTime.now());
         }
 
@@ -94,7 +96,7 @@ public class AgentLogService {
         int affected = agentExecutionMapper.update(update,
                 new LambdaUpdateWrapper<AgentExecution>()
                         .eq(AgentExecution::getId, executionId)
-                        .ne(AgentExecution::getStatus, "stopped"));
+                        .ne(AgentExecution::getStatus, AgentExecutionStatusEnum.STOPPED.getCode()));
         if (affected == 0) {
             log.warn("执行状态未更新（可能已停止）: executionId={}, targetStatus={}", executionId, status);
         } else {

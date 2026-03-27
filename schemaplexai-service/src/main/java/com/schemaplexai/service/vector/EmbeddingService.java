@@ -6,8 +6,8 @@ package com.schemaplexai.service.vector;
  * <p>将文本转换为高维向量（浮点数组），用于 Milvus 向量检索。
  * 实现类：
  * <ul>
- *   <li>{@link impl.OpenAiEmbeddingServiceImpl} — 调用 OpenAI text-embedding-3-small</li>
- *   <li>{@link impl.MockEmbeddingServiceImpl}   — 确定性伪随机向量，用于测试/开发环境</li>
+ *   <li>{@link OpenAiEmbeddingServiceImpl} — 调用 OpenAI text-embedding-3-small</li>
+ *   <li>{@link MockEmbeddingServiceImpl}   — 确定性伪随机向量，用于测试/开发环境</li>
  * </ul>
  */
 public interface EmbeddingService {

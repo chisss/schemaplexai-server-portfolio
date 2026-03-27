@@ -3,6 +3,8 @@ package com.schemaplexai.model.vo.system;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 租户信息VO
@@ -27,6 +29,18 @@ public class TenantVO {
 
     /** 状态: active/inactive */
     private String status;
+
+    /** 行业类型 */
+    private String industry;
+
+    /** 使用场景列表 */
+    private List<String> scenarios;
+
+    /** 开通能力配置 */
+    private Map<String, Object> enabledCapabilities;
+
+    /** 模板初始化状态: pending/running/done/failed */
+    private String initStatus;
 
     /** 创建时间 */
     private LocalDateTime createdAt;

@@ -47,6 +47,7 @@
         <retrofit.version>2.11.0</retrofit.version>
         <redisson.version>3.37.0</redisson.version>
         <jgit.version>6.10.0.202406032230-r</jgit.version>
+        <langchain4j.version>1.12.2</langchain4j.version>
     </properties>
 
     <dependencyManagement>
@@ -195,6 +196,15 @@
                 <groupId>org.eclipse.jgit</groupId>
                 <artifactId>org.eclipse.jgit</artifactId>
                 <version>${jgit.version}</version>
+            </dependency>
+
+            <!-- LangChain4j BOM -->
+            <dependency>
+                <groupId>dev.langchain4j</groupId>
+                <artifactId>langchain4j-bom</artifactId>
+                <version>${langchain4j.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>

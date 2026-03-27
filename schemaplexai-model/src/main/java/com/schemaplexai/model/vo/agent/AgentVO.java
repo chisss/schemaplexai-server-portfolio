@@ -27,6 +27,12 @@ public class AgentVO {
     /** 默认AI模型 */
     private String aiModel;
 
+    /** 模型绑定类型: model/model_group */
+    private String aiModelType;
+
+    /** 当 aiModelType=model_group 时，绑定的模型组 ID */
+    private String aiModelGroupId;
+
     /** 状态: active/inactive/running/error */
     private String status;
 

@@ -1,6 +1,6 @@
 package com.schemaplexai.service.auth.impl;
 
-import com.schemaplexai.common.constants.CommonConstants;
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.UserMapper;
@@ -9,6 +9,7 @@ import com.schemaplexai.model.dto.auth.RefreshTokenRequest;
 import com.schemaplexai.model.entity.User;
 import com.schemaplexai.model.vo.auth.LoginVO;
 import com.schemaplexai.model.vo.auth.TokenVO;
+import com.schemaplexai.model.vo.auth.WsTicketVO;
 import com.schemaplexai.service.auth.assembler.AuthAssembler;
 import com.schemaplexai.service.auth.AuthService;
 import com.schemaplexai.service.auth.validator.AuthValidator;
@@ -17,6 +18,7 @@ import com.schemaplexai.service.common.PermissionLoader;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 
@@ -69,7 +71,7 @@ public class AuthServiceImpl implements AuthService {
 
         // 2. 校验用户状态
         var user = userMapper.selectById(userId);
-        if (user == null || !CommonConstants.STATUS_ACTIVE.equals(user.getStatus())) {
+        if (user == null || !CommonConstant.STATUS_ACTIVE.equals(user.getStatus())) {
             throw new BusinessException(ResultCode.REFRESH_TOKEN_INVALID);
         }
 
@@ -85,6 +87,15 @@ public class AuthServiceImpl implements AuthService {
     public void logout(String userId) {
         tokenHandler.revokeRefreshToken(userId);
         log.info("用户登出: userId={}", userId);
+    }
+
+    @Override
+    public WsTicketVO issueWsTicket(String userId, String tenantId) {
+        if (!StringUtils.hasText(userId) || !StringUtils.hasText(tenantId)) {
+            throw new BusinessException(ResultCode.UNAUTHORIZED, "未登录或租户上下文缺失");
+        }
+        String wsTicket = tokenHandler.generateWsTicket(userId, tenantId);
+        return new WsTicketVO(wsTicket);
     }
 
     private void updateLastLoginTime(String userId) {

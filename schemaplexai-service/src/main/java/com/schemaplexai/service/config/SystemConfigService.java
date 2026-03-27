@@ -5,7 +5,6 @@ import com.schemaplexai.model.dto.system.AiModelRouteCreateRequest;
 import com.schemaplexai.model.dto.system.AiModelRouteUpdateRequest;
 import com.schemaplexai.model.dto.system.AiModelUpdateRequest;
 import com.schemaplexai.model.entity.AiModel;
-import com.schemaplexai.model.entity.AiModelRoute;
 import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.vo.system.AiModelRouteVO;
 import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;

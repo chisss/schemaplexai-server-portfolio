@@ -2,6 +2,7 @@ package com.schemaplexai.service.mcp.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.enums.McpServerStatusEnum;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.McpServerMapper;
@@ -131,10 +132,10 @@ public class McpServerServiceImpl implements McpServerService {
 
         mcpServer.setLastHealthCheck(LocalDateTime.now());
         if (healthy) {
-            mcpServer.setStatus("active");
+            mcpServer.setStatus(McpServerStatusEnum.ACTIVE.getCode());
             log.info("MCP Server健康检查通过: mcpServerId={}", id);
         } else {
-            mcpServer.setStatus("error");
+            mcpServer.setStatus(McpServerStatusEnum.ERROR.getCode());
             log.warn("MCP Server健康检查失败: mcpServerId={}, url={}", id, mcpServer.getUrl());
         }
         mcpServerMapper.updateById(mcpServer);
