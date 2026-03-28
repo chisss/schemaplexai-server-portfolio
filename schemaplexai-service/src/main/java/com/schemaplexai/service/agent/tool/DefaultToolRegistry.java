@@ -2,12 +2,13 @@ package com.schemaplexai.service.agent.tool;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.service.agent.tool.executor.ToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
-import com.schemaplexai.service.agent.tool.model.ToolResult;
+import com.schemaplexai.common.model.ToolResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -92,7 +93,7 @@ public class DefaultToolRegistry implements ToolRegistry {
 
             String sourceType = StringUtils.hasText(binding.getSourceType())
                     ? binding.getSourceType().trim().toLowerCase()
-                    : "builtin";
+                    : SourceTypeEnum.BUILTIN.getCode();
             ToolExecutor executor = executorMap.get(sourceType);
             if (executor == null) {
                 results.add(failureResult(toolCall, "未找到工具执行器: sourceType=" + sourceType));

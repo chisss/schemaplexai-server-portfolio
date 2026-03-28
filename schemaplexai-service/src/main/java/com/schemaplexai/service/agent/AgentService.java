@@ -34,6 +34,11 @@ public interface AgentService {
     PageResult<AgentVO> listAgents(AgentQueryRequest request);
 
     /**
+     * 获取所有Agent列表（不分页，用于下拉选择等场景）
+     */
+    List<AgentVO> listAllAgents();
+
+    /**
      * 获取Agent详情（含配置）
      */
     AgentVO getAgentById(String id);

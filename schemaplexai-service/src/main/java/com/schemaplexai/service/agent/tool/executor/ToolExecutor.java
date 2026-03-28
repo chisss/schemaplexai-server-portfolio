@@ -2,7 +2,7 @@ package com.schemaplexai.service.agent.tool.executor;
 
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
-import com.schemaplexai.service.agent.tool.model.ToolResult;
+import com.schemaplexai.common.model.ToolResult;
 
 /**
  * 工具执行器 SPI

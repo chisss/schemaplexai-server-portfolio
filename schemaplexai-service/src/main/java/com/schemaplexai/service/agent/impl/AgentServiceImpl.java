@@ -177,6 +177,14 @@ public class AgentServiceImpl implements AgentService {
     }
 
     @Override
+    public List<AgentVO> listAllAgents() {
+        var wrapper = new LambdaQueryWrapper<Agent>()
+                .orderByDesc(Agent::getCreatedAt);
+        var agents = agentMapper.selectList(wrapper);
+        return agentConverter.toVOList(agents);
+    }
+
+    @Override
     public AgentVO getAgentById(String id) {
         var agent = entityValidator.requireExists(agentMapper, id, ResultCode.AGENT_NOT_FOUND);
         return enrichWithDetails(agent);

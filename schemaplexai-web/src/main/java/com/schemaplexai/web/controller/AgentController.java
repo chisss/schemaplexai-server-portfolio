@@ -64,6 +64,12 @@ public class AgentController {
         return R.ok(agentService.listAgents(request));
     }
 
+    @GetMapping("/all")
+    @Operation(summary = "获取所有Agent（不分页，用于下拉选择）")
+    public R<List<AgentVO>> listAll() {
+        return R.ok(agentService.listAllAgents());
+    }
+
     @GetMapping("/{id}")
     @Operation(summary = "获取Agent详情")
     public R<AgentVO> getById(@PathVariable String id) {

@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.SkillMapper;
 import com.schemaplexai.model.converter.SkillConverter;
 import com.schemaplexai.model.dto.skill.SkillCreateRequest;
@@ -51,6 +52,16 @@ public class SkillServiceImpl implements SkillService {
         var page = new Page<Skill>(request.getPage(), request.getSize());
         var wrapper = new LambdaQueryWrapper<Skill>();
 
+        // 获取当前租户ID，用于同时返回内置技能(tenant_id=NULL)和租户级技能
+        var tenantId = SecurityUtil.getCurrentTenantId();
+
+        // 租户过滤：返回内置技能(tenant_id IS NULL)或当前租户创建的技能
+        if (tenantId != null) {
+            wrapper.and(w -> w.isNull(Skill::getTenantId).or().eq(Skill::getTenantId, tenantId));
+        } else {
+            // 未登录场景返回所有技能
+        }
+
         if (StringUtils.hasText(request.getCategory())) {
             wrapper.eq(Skill::getCategory, request.getCategory());
         }
@@ -66,6 +77,10 @@ public class SkillServiceImpl implements SkillService {
 
         var result = skillMapper.selectPage(page, wrapper);
         var voList = skillConverter.toVOList(result.getRecords());
+        // 设置内置标识
+        for (var vo : voList) {
+            vo.setBuiltIn(vo.getTenantId() == null);
+        }
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
 
