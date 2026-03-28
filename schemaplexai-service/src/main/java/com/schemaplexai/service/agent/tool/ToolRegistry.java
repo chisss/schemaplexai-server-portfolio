@@ -2,7 +2,7 @@ package com.schemaplexai.service.agent.tool;
 
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
-import com.schemaplexai.service.agent.tool.model.ToolResult;
+import com.schemaplexai.common.model.ToolResult;
 
 import java.util.List;
 

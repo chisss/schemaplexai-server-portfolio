@@ -5,13 +5,14 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.enums.McpServerStatusEnum;
+import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.common.enums.ToolExecutionStatusEnum;
 import com.schemaplexai.dao.mapper.McpServerMapper;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.service.agent.tool.audit.ToolExecutionLogService;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
-import com.schemaplexai.service.agent.tool.model.ToolResult;
+import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,7 +35,7 @@ public class McpToolExecutor implements ToolExecutor {
 
     @Override
     public String sourceType() {
-        return "mcp";
+        return SourceTypeEnum.MCP.getCode();
     }
 
     @Override
@@ -44,13 +45,13 @@ public class McpToolExecutor implements ToolExecutor {
         try {
             if (binding == null || !StringUtils.hasText(binding.getSourceRefId())) {
                 logService.logExecution(tenantId, agentId, null, toolCall != null ? toolCall.getCallId() : null,
-                        "mcp", toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP 工具绑定缺少 sourceRefId");
+                        SourceTypeEnum.MCP.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP 工具绑定缺少 sourceRefId");
                 return failure(toolCall, "MCP 工具绑定缺少 sourceRefId");
             }
             String toolName = resolveToolName(binding, toolCall);
             if (!StringUtils.hasText(toolName)) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        "mcp", toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP 工具名为空");
+                        SourceTypeEnum.MCP.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP 工具名为空");
                 return failure(toolCall, "MCP 工具名为空");
             }
 
@@ -60,17 +61,17 @@ public class McpToolExecutor implements ToolExecutor {
                     .last("LIMIT 1"));
             if (mcpServer == null) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        "mcp", toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP Server 不存在");
+                        SourceTypeEnum.MCP.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP Server 不存在");
                 return failure(toolCall, "MCP Server 不存在: " + binding.getSourceRefId());
             }
             if (!McpServerStatusEnum.ACTIVE.getCode().equalsIgnoreCase(mcpServer.getStatus())) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        "mcp", toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP Server 非 active 状态");
+                        SourceTypeEnum.MCP.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP Server 非 active 状态");
                 return failure(toolCall, "MCP Server 非 active 状态: " + mcpServer.getName());
             }
             if (!containsTool(mcpServer, toolName)) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        "mcp", toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP Server 未发现工具");
+                        SourceTypeEnum.MCP.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "MCP Server 未发现工具");
                 return failure(toolCall, "MCP Server 未发现工具: " + toolName);
             }
 
@@ -84,13 +85,13 @@ public class McpToolExecutor implements ToolExecutor {
             );
             LocalDateTime endAt = LocalDateTime.now();
             logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                    "mcp", toolCode,  ToolExecutionStatusEnum.SUCCESS.getCode(), startAt, endAt, args, output, null);
+                    SourceTypeEnum.MCP.getCode(), toolCode,  ToolExecutionStatusEnum.SUCCESS.getCode(), startAt, endAt, args, output, null);
             return success(toolCall, output);
         } catch (Exception exception) {
             log.error("MCP 工具执行异常: tenantId={}, agentId={}, toolCode={}",
                     tenantId, agentId, toolCode, exception);
             logService.logExecution(tenantId, agentId, null, toolCall != null ? toolCall.getCallId() : null,
-                    "mcp", toolCode,  ToolExecutionStatusEnum.ERROR.getCode(), startAt, LocalDateTime.now(), null, null, exception.getMessage());
+                    SourceTypeEnum.MCP.getCode(), toolCode,  ToolExecutionStatusEnum.ERROR.getCode(), startAt, LocalDateTime.now(), null, null, exception.getMessage());
             return failure(toolCall, "MCP 工具执行异常: " + exception.getMessage());
         }
     }

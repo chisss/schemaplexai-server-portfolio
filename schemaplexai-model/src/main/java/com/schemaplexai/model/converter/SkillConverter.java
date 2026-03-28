@@ -21,6 +21,7 @@ public interface SkillConverter {
      * Skill -> SkillVO
      */
     @Mapping(target = "createdByName", ignore = true)
+    @Mapping(target = "tenantId", source = "tenantId")
     SkillVO toVO(Skill entity);
 
     /**

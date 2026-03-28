@@ -60,7 +60,11 @@ public class MyBatisPlusConfig {
             "sf_plugin_catalog",
             // 模型组子表（通过 group_id 关联父表，父表已做租户隔离）
             "sf_ai_model_group_item",
-            "sf_builtin_tool"
+            "sf_builtin_tool",
+            // 技能表（tenant_id=NULL 表示系统内置，需手动处理租户逻辑）
+            "sf_skill",
+            // MCP Server 表（同上）
+            "sf_mcp_server"
     );
 
     @Bean

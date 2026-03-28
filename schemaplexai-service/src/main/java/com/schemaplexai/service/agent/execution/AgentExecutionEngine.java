@@ -11,7 +11,7 @@ import com.schemaplexai.service.ai.LangChain4jToolSpecProvider;
 import com.schemaplexai.service.agent.tool.ToolRegistry;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
-import com.schemaplexai.service.agent.tool.model.ToolResult;
+import com.schemaplexai.common.model.ToolResult;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;

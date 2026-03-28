@@ -30,6 +30,12 @@ public class SkillVO {
     /** 分类: builtin/custom/mcp */
     private String category;
 
+    /** 租户ID，NULL表示系统内置 */
+    private String tenantId;
+
+    /** 是否内置技能(系统预置) */
+    private Boolean builtIn;
+
     /** 参数定义 */
     private List<Object> parameters;
 
