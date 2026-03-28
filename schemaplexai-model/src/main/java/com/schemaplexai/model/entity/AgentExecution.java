@@ -34,6 +34,9 @@ public class AgentExecution implements Serializable {
     /** 关联 Spec ID（可选） */
     private String specId;
 
+    /** 会话标识，支持多轮对话 */
+    private String conversationId;
+
     /** 执行指令（可选补充说明） */
     private String instruction;
 

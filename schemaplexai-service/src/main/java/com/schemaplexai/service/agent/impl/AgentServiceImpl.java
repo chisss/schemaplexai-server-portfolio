@@ -18,6 +18,7 @@ import com.schemaplexai.dao.mapper.AgentTeamMemberMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
+import com.schemaplexai.dao.mapper.ChatMessageMapper;
 import com.schemaplexai.dao.mapper.ContextEntityMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.dao.mapper.McpServerMapper;
@@ -54,6 +55,7 @@ import com.schemaplexai.model.entity.AgentExecutionLog;
 import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.AgentTeamMemberToolBinding;
+import com.schemaplexai.model.entity.ChatMessageEntity;
 import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
 import com.schemaplexai.model.vo.agent.AgentExecuteResultVO;
@@ -65,6 +67,7 @@ import com.schemaplexai.model.vo.agent.AgentTeamMemberToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentVO;
 import com.schemaplexai.model.vo.agent.AvailableToolVO;
+import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
 import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.validator.AgentValidator;
@@ -102,6 +105,7 @@ public class AgentServiceImpl implements AgentService {
     private final AgentContextBindingMapper agentContextBindingMapper;
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentExecutionLogMapper agentExecutionLogMapper;
+    private final ChatMessageMapper chatMessageMapper;
     private final BuiltinToolMapper builtinToolMapper;
     private final SkillMapper skillMapper;
     private final McpServerMapper mcpServerMapper;
@@ -871,6 +875,7 @@ public class AgentServiceImpl implements AgentService {
         execution.setInputPrompt(dto.getPrompt());
         execution.setInputContext(dto.getContext());
         execution.setAiModel(StringUtils.hasText(dto.getModel()) ? dto.getModel() : agent.getAiModel());
+        execution.setConversationId(dto.getConversationId());
         execution.setStatus(QUEUED);
         agentExecutionMapper.insert(execution);
         executionEventStreamService.publish(AgentExecutionEvent.builder()
@@ -890,12 +895,14 @@ public class AgentServiceImpl implements AgentService {
                 .agentModelType(agent.getAiModelType())
                 .agentModelGroupId(agent.getAiModelGroupId())
                 .inputContext(dto.getContext())
+                .conversationId(execution.getConversationId())
                 .stream(Boolean.TRUE.equals(dto.getStream()))
                 .build());
 
         log.info("Agent执行任务已入队: agentId={}, executionId={}", agentId, execution.getId());
         return AgentExecuteResultVO.builder()
                 .executionId(execution.getId())
+                .conversationId(execution.getConversationId())
                 .status(QUEUED)
                 .queuedAt(execution.getCreatedAt())
                 .message("执行任务已提交，等待调度")
@@ -970,6 +977,31 @@ public class AgentServiceImpl implements AgentService {
                 .timestamp(Instant.now())
                 .build());
         log.info("停止Agent执行: agentId={}, executionId={}", agentId, executionId);
+    }
+
+    @Override
+    public List<ConversationMessageVO> getConversationHistory(String conversationId) {
+        if (!StringUtils.hasText(conversationId)) {
+            return List.of();
+        }
+        List<ChatMessageEntity> entities = chatMessageMapper.selectList(
+                new LambdaQueryWrapper<ChatMessageEntity>()
+                        .eq(ChatMessageEntity::getConversationId, conversationId)
+                        .orderByAsc(ChatMessageEntity::getMessageIndex));
+        return entities.stream()
+                .map(this::toConversationMessageVO)
+                .toList();
+    }
+
+    private ConversationMessageVO toConversationMessageVO(ChatMessageEntity entity) {
+        return ConversationMessageVO.builder()
+                .messageType(entity.getMessageType())
+                .textContent(entity.getTextContent())
+                .toolCallId(entity.getToolCallId())
+                .toolName(entity.getToolName())
+                .messageIndex(entity.getMessageIndex())
+                .createdAt(entity.getCreatedAt())
+                .build();
     }
 
     private AgentExecutionVO toExecutionVO(AgentExecution execution) {

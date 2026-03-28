@@ -17,6 +17,9 @@ public class AgentExecutionResult {
     /** 最终输出文本 */
     private String outputResult;
 
+    /** 会话 ID */
+    private String conversationId;
+
     /** 错误信息（status=failed 时填充） */
     private String errorMessage;
 

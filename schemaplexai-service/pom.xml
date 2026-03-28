@@ -137,5 +137,20 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-google-ai-gemini</artifactId>
         </dependency>
+        <!-- LangChain4j Milvus EmbeddingStore 集成 -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-milvus</artifactId>
+        </dependency>
+        <!-- LangChain4j Easy RAG（含 DocumentSplitters + 默认嵌入模型） -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-easy-rag</artifactId>
+        </dependency>
+        <!-- LangChain4j Apache Tika 文档解析（PDF/Word/Excel/HTML） -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-document-parser-apache-tika</artifactId>
+        </dependency>
     </dependencies>
 </project>

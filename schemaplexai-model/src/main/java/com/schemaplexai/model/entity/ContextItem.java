@@ -51,6 +51,15 @@ public class ContextItem implements Serializable {
     /** 是否为 Agent 专属指令文件（对应 CLAUDE.md/AGENTS.md） */
     private Boolean isAgentInstructions;
 
+    /** 向量化状态: pending/processing/completed/failed */
+    private String vectorStatus;
+
+    /** 向量化更新时间 */
+    private LocalDateTime vectorUpdatedAt;
+
+    /** 文本分块数量 */
+    private Integer chunkCount;
+
     /** 创建人 */
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;

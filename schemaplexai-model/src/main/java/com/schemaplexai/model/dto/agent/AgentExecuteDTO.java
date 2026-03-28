@@ -23,4 +23,7 @@ public class AgentExecuteDTO {
 
     /** 是否流式输出 */
     private Boolean stream = false;
+
+    /** 会话标识（传入已有 conversationId 可续接多轮对话，为空则自动生成新会话） */
+    private String conversationId;
 }

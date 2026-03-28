@@ -101,6 +101,7 @@ public class AgentExecuteDispatcher {
                 .model(execution.getAiModel())
                 .agentModelType(agent.getAiModelType())
                 .agentModelGroupId(agent.getAiModelGroupId())
+                .conversationId(execution.getConversationId())
                 .stream(false)
                 .build();
 

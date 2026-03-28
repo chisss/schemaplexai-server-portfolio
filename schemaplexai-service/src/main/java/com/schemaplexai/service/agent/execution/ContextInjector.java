@@ -9,7 +9,11 @@ import com.schemaplexai.model.entity.AgentContextBinding;
 import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextItem;
 import com.schemaplexai.service.context.ContextCacheService;
+import com.schemaplexai.service.memory.rag.RagContentRetrieverFactory;
 import com.schemaplexai.service.vector.MilvusVectorService;
+import dev.langchain4j.rag.content.Content;
+import dev.langchain4j.rag.content.retriever.ContentRetriever;
+import dev.langchain4j.rag.query.Query;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -62,10 +66,15 @@ public class ContextInjector {
     private final ContextItemMapper contextItemMapper;
     private final ContextCacheService contextCacheService;
 
-    /** Milvus 可选注入（Milvus 未启动时为 null） */
+    /** Milvus 可选注入（Milvus 未启动时为 null，作为 fallback） */
     @Lazy
     @Autowired(required = false)
     private MilvusVectorService milvusVectorService;
+
+    /** LangChain4J RAG ContentRetriever 工厂（Milvus 未启动时为 null） */
+    @Lazy
+    @Autowired(required = false)
+    private RagContentRetrieverFactory ragContentRetrieverFactory;
 
     // =========================================================================
     //  公开方法
@@ -149,20 +158,13 @@ public class ContextInjector {
                                     String teamAgentId, String extraContext) {
         List<String> sections = new ArrayList<>();
 
-        // L2.5: Milvus 语义检索（可选，需 tenantId 和 extraContext 作为 query）
-        if (milvusVectorService != null
-                && StringUtils.hasText(tenantId)
-                && StringUtils.hasText(extraContext)) {
-            try {
-                List<String> semanticHits = milvusVectorService.searchSimilarContext(
-                        tenantId, agentId, extraContext, 5);
-                if (!semanticHits.isEmpty()) {
-                    String semanticText = String.join("\n\n", semanticHits);
-                    sections.add("## 相关背景知识（语义检索）\n" + truncate(semanticText, BUDGET_L2_5));
-                    log.debug("Milvus 语义检索命中 {} 条: agentId={}", semanticHits.size(), agentId);
-                }
-            } catch (Exception e) {
-                log.debug("Milvus 语义检索跳过: {}", e.getMessage());
+        // L2.5: 语义检索（优先使用 LangChain4J ContentRetriever，fallback 到原始 Milvus）
+        if (StringUtils.hasText(tenantId) && StringUtils.hasText(extraContext)) {
+            List<String> semanticHits = retrieveSemanticContext(tenantId, agentId, extraContext);
+            if (!semanticHits.isEmpty()) {
+                String semanticText = String.join("\n\n", semanticHits);
+                sections.add("## 相关背景知识（语义检索）\n" + truncate(semanticText, BUDGET_L2_5));
+                log.debug("语义检索命中 {} 条: agentId={}", semanticHits.size(), agentId);
             }
         }
 
@@ -232,6 +234,41 @@ public class ContextInjector {
                 .map(ContextItem::getContent)
                 .filter(c -> c != null && !c.isBlank())
                 .toList();
+    }
+
+    /**
+     * 语义检索：优先使用 LangChain4J ContentRetriever，fallback 到原始 MilvusVectorService
+     */
+    private List<String> retrieveSemanticContext(String tenantId, String agentId, String query) {
+        // 优先使用 LangChain4J RAG ContentRetriever
+        if (ragContentRetrieverFactory != null) {
+            try {
+                ContentRetriever retriever = ragContentRetrieverFactory.createRetriever(tenantId);
+                if (retriever != null) {
+                    List<Content> contents = retriever.retrieve(Query.from(query));
+                    List<String> results = contents.stream()
+                            .map(c -> c.textSegment().text())
+                            .filter(t -> t != null && !t.isBlank())
+                            .toList();
+                    if (!results.isEmpty()) {
+                        return results;
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("LangChain4J RAG 检索异常，尝试 fallback: {}", e.getMessage());
+            }
+        }
+
+        // Fallback: 原始 MilvusVectorService
+        if (milvusVectorService != null) {
+            try {
+                return milvusVectorService.searchSimilarContext(tenantId, agentId, query, 5);
+            } catch (Exception e) {
+                log.debug("Milvus 语义检索跳过: {}", e.getMessage());
+            }
+        }
+
+        return List.of();
     }
 
     /**
