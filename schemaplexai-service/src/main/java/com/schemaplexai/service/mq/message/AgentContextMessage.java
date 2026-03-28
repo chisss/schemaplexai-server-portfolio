@@ -39,6 +39,9 @@ public class AgentContextMessage implements Serializable {
     /** 节点标签（用于日志可读性） */
     private String nodeLabel;
 
+    /** 会话 ID（多轮对话标识） */
+    private String conversationId;
+
     /**
      * 消息类型：
      * - {@code agent_output}   — Sub-Agent 产出（主要类型）

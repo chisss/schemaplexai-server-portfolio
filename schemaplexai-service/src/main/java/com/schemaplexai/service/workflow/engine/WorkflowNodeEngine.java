@@ -294,6 +294,7 @@ public class WorkflowNodeEngine {
                     String callbackStatus = result != null && StringUtils.hasText(result.getStatus())
                             ? result.getStatus() : AgentExecutionStatusEnum.FAILED.getCode();
                     String callbackResult = result != null ? result.getOutputResult() : "Agent执行返回空结果";
+                    String callbackConversationId = result != null ? result.getConversationId() : null;
                     try {
                         onAgentNodeCompleted(instanceId, nodeId, callbackStatus, callbackResult);
                     } catch (Exception callbackException) {
@@ -304,7 +305,7 @@ public class WorkflowNodeEngine {
                     }
                     agentContextPublisher.publishAgentOutput(
                             teamAgentId, agentId, executionId, instanceId,
-                            nodeId, nodeLabel, callbackStatus, callbackResult, tenantId);
+                            nodeId, nodeLabel, callbackStatus, callbackResult, tenantId, callbackConversationId);
                 })
                 .exceptionally(ex -> {
                     String errorMessage = resolveThrowableMessage(ex);

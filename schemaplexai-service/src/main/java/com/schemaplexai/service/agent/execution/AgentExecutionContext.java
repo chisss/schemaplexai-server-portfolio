@@ -37,6 +37,13 @@ public class AgentExecutionContext {
     /** 附加上下文变量（键值对） */
     private Map<String, Object> inputContext;
 
+    /** 会话标识（前端传入或自动生成，支持多轮对话） */
+    private String conversationId;
+
+    /** 短期记忆最大消息数（默认100） */
+    @Builder.Default
+    private int maxMessages = 100;
+
     /** 是否启用流式输出（当前阶段预留） */
     private boolean stream;
 }

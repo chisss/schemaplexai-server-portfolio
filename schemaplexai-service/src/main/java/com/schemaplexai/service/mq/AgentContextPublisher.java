@@ -33,21 +33,22 @@ public class AgentContextPublisher {
     /**
      * 发布 Agent 产出消息（Agent 节点执行完成时调用）
      *
-     * @param teamAgentId  Team Agent ID（Solo Agent 场景也可传 agentId，Consumer 会处理）
-     * @param subAgentId   执行的 Agent ID
-     * @param executionId  Agent 执行记录 ID
-     * @param instanceId   工作流实例 ID
-     * @param nodeId       节点 ID
-     * @param nodeLabel    节点标签
-     * @param agentStatus  执行状态
-     * @param outputText   原始产出文本（自动截断到2000字符）
-     * @param tenantId     租户 ID
+     * @param teamAgentId    Team Agent ID（Solo Agent 场景也可传 agentId，Consumer 会处理）
+     * @param subAgentId     执行的 Agent ID
+     * @param executionId    Agent 执行记录 ID
+     * @param instanceId     工作流实例 ID
+     * @param nodeId         节点 ID
+     * @param nodeLabel      节点标签
+     * @param agentStatus    执行状态
+     * @param outputText     原始产出文本（自动截断到2000字符）
+     * @param tenantId       租户 ID
+     * @param conversationId 会话 ID
      */
     public void publishAgentOutput(String teamAgentId, String subAgentId,
                                    String executionId, String instanceId,
                                    String nodeId, String nodeLabel,
                                    String agentStatus, String outputText,
-                                   String tenantId) {
+                                   String tenantId, String conversationId) {
         try {
             String summary = outputText != null && outputText.length() > 2000
                     ? outputText.substring(0, 2000) + "...[截断]"
@@ -60,6 +61,7 @@ public class AgentContextPublisher {
                     .instanceId(instanceId)
                     .nodeId(nodeId)
                     .nodeLabel(nodeLabel)
+                    .conversationId(conversationId)
                     .messageType("agent_output")
                     .outputSummary(summary)
                     .agentStatus(agentStatus)

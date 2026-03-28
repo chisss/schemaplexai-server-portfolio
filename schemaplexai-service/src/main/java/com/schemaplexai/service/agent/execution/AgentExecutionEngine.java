@@ -12,6 +12,7 @@ import com.schemaplexai.service.agent.tool.ToolRegistry;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
 import com.schemaplexai.common.model.ToolResult;
+import com.schemaplexai.service.memory.CompositeChatMemoryStore;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -19,6 +20,8 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +35,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -66,6 +70,7 @@ public class AgentExecutionEngine {
     private final ExecutionEventStreamService executionEventStreamService;
     private final ToolRegistry                toolRegistry;
     private final LangChain4jToolSpecProvider toolSpecProvider;
+    private final CompositeChatMemoryStore compositeChatMemoryStore;
 
     // =========================================================================
     //  公开入口
@@ -105,9 +110,21 @@ public class AgentExecutionEngine {
                 "System Prompt 构建完成（" + systemPrompt.length() + " chars），model=" + ctx.getModel(), startMs);
         publishEvent(executionId, "CONTEXT_INJECT", 0, "正在注入上下文", null, startMs);
 
-        // 初始化对话历史（SystemMessage 在每次请求时动态注入，不存入 history）
-        List<ChatMessage> history = new ArrayList<>();
-        history.add(UserMessage.from(buildUserMessage(ctx.getInputPrompt(), ctx.getInputContext())));
+        // 解析 conversationId（前端传入或自动生成），并持久化到执行记录
+        String conversationId = resolveConversationId(ctx);
+        persistConversationId(executionId, conversationId);
+
+        // 构建持久化 ChatMemory（Redis L1 + PostgreSQL L2）
+        ChatMemory chatMemory = MessageWindowChatMemory.builder()
+                .id(conversationId)
+                .maxMessages(ctx.getMaxMessages())
+                .chatMemoryStore(compositeChatMemoryStore)
+                .build();
+
+        // 追加本轮用户消息
+        chatMemory.add(UserMessage.from(buildUserMessage(ctx.getInputPrompt(), ctx.getInputContext())));
+
+        log.info("ChatMemory 初始化完成: conversationId={}, 历史消息数={}", conversationId, chatMemory.messages().size());
 
         LangChain4jResolution resolution;
         if ("model_group".equals(ctx.getAgentModelType()) && StringUtils.hasText(ctx.getAgentModelGroupId())) {
@@ -118,7 +135,7 @@ public class AgentExecutionEngine {
         appendLog(executionId, agentId, tenantId, "DEBUG", "MODEL_RESOLVED", 0,
                 "provider=" + resolution.config().getProvider() + ", modelId=" + resolution.config().getModelId(), startMs);
 
-        return runAgenticLoop(ctx, systemPrompt, history, resolution, startMs);
+        return runAgenticLoop(ctx, systemPrompt, chatMemory, resolution, startMs, conversationId);
     }
 
     // =========================================================================
@@ -126,7 +143,7 @@ public class AgentExecutionEngine {
     // =========================================================================
 
     private AgentExecutionResult runAgenticLoop(AgentExecutionContext ctx,
-            String systemPrompt, List<ChatMessage> history, LangChain4jResolution resolution, long startMs) {
+            String systemPrompt, ChatMemory chatMemory, LangChain4jResolution resolution, long startMs, String conversationId) {
 
         String executionId = ctx.getExecutionId();
         String agentId     = ctx.getAgentId();
@@ -151,14 +168,15 @@ public class AgentExecutionEngine {
                 return AgentExecutionResult.builder().status(STATUS_STOPPED).rounds(round).build();
             }
 
+            List<ChatMessage> memoryMessages = chatMemory.messages();
             appendLog(executionId, agentId, tenantId, "INFO", "ROUND_START", round,
-                    "第 " + round + " 轮开始，history=" + history.size() + " msgs", startMs);
+                    "第 " + round + " 轮开始，history=" + memoryMessages.size() + " msgs", startMs);
             publishEvent(executionId, "ROUND_START", round, "第 " + round + " 轮推理开始", null, startMs);
 
-            // 构建请求：SystemMessage 固定首位，后跟对话历史
+            // 构建请求：SystemMessage 固定首位（不存入 ChatMemory），后跟对话历史
             List<ChatMessage> messages = new ArrayList<>();
             messages.add(SystemMessage.from(systemPrompt));
-            messages.addAll(history);
+            messages.addAll(memoryMessages);
 
             ChatRequest request = ChatRequest.builder()
                     .messages(messages)
@@ -212,11 +230,13 @@ public class AgentExecutionEngine {
                     // 输出被 maxTokens 截断，追加截断提示并继续下一轮
                     appendLog(executionId, agentId, tenantId, "WARN", "OUTPUT_TRUNCATED",
                             round, "模型输出被 maxTokens 截断，追加继续提示并继续执行", startMs);
-                    history.add(aiMsg);
-                    history.add(UserMessage.from(
+                    chatMemory.add(aiMsg);
+                    chatMemory.add(UserMessage.from(
                             "请继续完成上一条消息中被截断的内容，直接输出完整内容，不需要解释。"));
                     continue;
                 }
+                // 正常结束，将最终 AI 回复存入记忆
+                chatMemory.add(aiMsg);
                 loopCompleted = true;
                 break;
             }
@@ -224,7 +244,7 @@ public class AgentExecutionEngine {
             // 执行工具调用
             List<ToolExecutionRequest> toolExecRequests = aiMsg.toolExecutionRequests();
             if (toolExecRequests == null || toolExecRequests.isEmpty()) {
-                // content 为 null 时 toolExecutionRequests 返回空，直接结束
+                chatMemory.add(aiMsg);
                 loopCompleted = true;
                 break;
             }
@@ -239,12 +259,12 @@ public class AgentExecutionEngine {
             publishEvent(executionId, "TOOL_CALL", round, "开始执行工具调用(" + toolCalls.size() + "个)", null, startMs);
             List<ToolResult> toolResults = toolRegistry.executeAll(tenantId, agentId, toolCalls);
 
-            // 追加 AI 消息（含工具调用请求）和工具执行结果到历史
-            history.add(aiMsg);
+            // 追加 AI 消息（含工具调用请求）和工具执行结果到 ChatMemory
+            chatMemory.add(aiMsg);
             for (int i = 0; i < toolExecRequests.size(); i++) {
                 ToolExecutionRequest req = toolExecRequests.get(i);
                 ToolResult result = i < toolResults.size() ? toolResults.get(i) : null;
-                history.add(ToolExecutionResultMessage.from(req.id(), req.name(), serializeResult(result)));
+                chatMemory.add(ToolExecutionResultMessage.from(req.id(), req.name(), serializeResult(result)));
             }
 
             publishEvent(executionId, "TOOL_RESULT", round, "工具调用完成(" + toolResults.size() + "个)", null, startMs);
@@ -263,7 +283,7 @@ public class AgentExecutionEngine {
         }
 
         return buildCompletedResult(executionId, agentId, tenantId,
-                lastContent, totalTokenInput, totalTokenOutput, lastRound, startMs);
+                lastContent, totalTokenInput, totalTokenOutput, lastRound, startMs, conversationId);
     }
 
     // =========================================================================
@@ -271,7 +291,7 @@ public class AgentExecutionEngine {
     // =========================================================================
 
     private AgentExecutionResult buildCompletedResult(String executionId, String agentId, String tenantId,
-            String content, long tokenInput, long tokenOutput, int rounds, long startMs) {
+            String content, long tokenInput, long tokenOutput, int rounds, long startMs, String conversationId) {
         agentLogService.updateExecutionStatus(executionId, STATUS_COMPLETED, null, tokenInput, tokenOutput, content);
         appendLog(executionId, agentId, tenantId, "INFO", "EXECUTION_COMPLETED", rounds,
                 "执行完成，轮次=" + rounds + " inputTokens=" + tokenInput + " outputTokens=" + tokenOutput, startMs);
@@ -284,6 +304,7 @@ public class AgentExecutionEngine {
         return AgentExecutionResult.builder()
                 .status(STATUS_COMPLETED)
                 .outputResult(content)
+                .conversationId(conversationId)
                 .tokenInput(tokenInput)
                 .tokenOutput(tokenOutput)
                 .rounds(rounds)
@@ -302,6 +323,34 @@ public class AgentExecutionEngine {
     // =========================================================================
     //  工具方法
     // =========================================================================
+
+    /**
+     * 解析 conversationId：优先使用前端传入的值，否则自动生成
+     */
+    private String resolveConversationId(AgentExecutionContext ctx) {
+        if (StringUtils.hasText(ctx.getConversationId())) {
+            return ctx.getConversationId();
+        }
+        String generated = UUID.randomUUID().toString().replace("-", "");
+        ctx.setConversationId(generated);
+        log.info("自动生成 conversationId: {}", generated);
+        return generated;
+    }
+
+    /**
+     * 将 conversationId 持久化到执行记录
+     */
+    private void persistConversationId(String executionId, String conversationId) {
+        try {
+            AgentExecution execution = agentExecutionMapper.selectById(executionId);
+            if (execution != null) {
+                execution.setConversationId(conversationId);
+                agentExecutionMapper.updateById(execution);
+            }
+        } catch (Exception e) {
+            log.warn("持久化 conversationId 失败: executionId={}, error={}", executionId, e.getMessage());
+        }
+    }
 
     private String buildExtraContext(String inputPrompt, Map<String, Object> inputContext) {
         if (inputContext == null || inputContext.isEmpty()) return inputPrompt;

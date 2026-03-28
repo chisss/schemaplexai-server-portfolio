@@ -22,6 +22,7 @@ import com.schemaplexai.model.vo.agent.AgentTeamMemberVO;
 import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentVO;
 import com.schemaplexai.model.vo.agent.AvailableToolVO;
+import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
@@ -215,6 +216,13 @@ public class AgentController {
     public R<Void> stopExecution(@PathVariable String id, @PathVariable String execId) {
         agentService.stopExecution(id, execId);
         return R.ok();
+    }
+
+    @GetMapping("/conversations/{conversationId}/history")
+    @Operation(summary = "查询对话历史消息")
+    public R<List<ConversationMessageVO>> getConversationHistory(
+            @PathVariable String conversationId) {
+        return R.ok(agentService.getConversationHistory(conversationId));
     }
 
     @GetMapping(value = "/{id}/executions/{execId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

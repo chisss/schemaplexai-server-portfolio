@@ -24,6 +24,7 @@ import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.context.ContextService;
 import com.schemaplexai.service.context.handler.ContextItemHandler;
 import com.schemaplexai.service.context.validator.ContextValidator;
+import com.schemaplexai.service.memory.rag.DocumentIngestionService;
 import com.schemaplexai.service.vector.MilvusVectorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -63,6 +64,11 @@ public class ContextServiceImpl implements ContextService {
     @Autowired(required = false)
     private MilvusVectorService milvusVectorService;
 
+    /** RAG 文档摄入服务（Milvus 未启动时为 null） */
+    @Lazy
+    @Autowired(required = false)
+    private DocumentIngestionService documentIngestionService;
+
     // ===== 上下文 CRUD =====
 
     @Override
@@ -92,31 +98,18 @@ public class ContextServiceImpl implements ContextService {
             log.info("创建上下文关联关系: contextId={}, linkedCount={}", entity.getId(), request.getLinkedContextIds().size());
         }
 
-        // 写入 Milvus 向量数据库（initialContent 作为初始条目向量）
+        // 创建初始条目并向量化写入 RAG 管线
         String tenantId = SecurityUtil.getCurrentTenantId();
-        if (milvusVectorService != null && StringUtils.hasText(request.getInitialContent())) {
-            try {
-                // 先创建初始条目
-                var item = new ContextItem();
-                item.setContextId(entity.getId());
-                item.setItemType("document");
-                item.setTitle(entity.getName());
-                item.setContent(request.getInitialContent());
-                item.setSortOrder(0);
-                contextItemMapper.insert(item);
+        if (StringUtils.hasText(request.getInitialContent())) {
+            var item = new ContextItem();
+            item.setContextId(entity.getId());
+            item.setItemType("document");
+            item.setTitle(entity.getName());
+            item.setContent(request.getInitialContent());
+            item.setSortOrder(0);
+            contextItemMapper.insert(item);
 
-                // 再向量化写入 Milvus
-                milvusVectorService.upsertContextItem(
-                        item.getId(),
-                        tenantId,
-                        null,
-                        entity.getId(),
-                        request.getInitialContent()
-                );
-                log.info("上下文已写入 Milvus 向量库: contextId={}, itemId={}", entity.getId(), item.getId());
-            } catch (Exception e) {
-                log.warn("Milvus 写入失败（不影响主流程）: contextId={}, error={}", entity.getId(), e.getMessage());
-            }
+            vectorizeContextItem(item.getId(), tenantId, entity.getId(), request.getInitialContent());
         }
 
         return contextEntityConverter.toVO(entity);
@@ -232,20 +225,10 @@ public class ContextServiceImpl implements ContextService {
         item.setTokenCount(contextItemHandler.calculateTokenCount(request.getContent()));
         contextItemMapper.insert(item);
 
-        // 同步写入 Milvus 向量库
+        // 向量化写入 RAG 管线
         String tenantId = SecurityUtil.getCurrentTenantId();
-        if (milvusVectorService != null && StringUtils.hasText(request.getContent())) {
-            try {
-                milvusVectorService.upsertContextItem(
-                        item.getId(),
-                        tenantId,
-                        null,
-                        contextId,
-                        request.getContent()
-                );
-            } catch (Exception e) {
-                log.warn("Milvus 写入失败（不影响主流程）: itemId={}, error={}", item.getId(), e.getMessage());
-            }
+        if (StringUtils.hasText(request.getContent())) {
+            vectorizeContextItem(item.getId(), tenantId, contextId, request.getContent());
         }
 
         log.info("添加上下文条目: contextId={}, itemId={}, type={}",
@@ -505,6 +488,34 @@ public class ContextServiceImpl implements ContextService {
             }
         }
         return sb.toString();
+    }
+
+    // ===== 向量化辅助 =====
+
+    /**
+     * 向量化上下文条目：优先使用 RAG 管线（DocumentIngestionService），fallback 到原始 MilvusVectorService
+     */
+    private void vectorizeContextItem(String itemId, String tenantId, String contextId, String content) {
+        // 优先使用 LangChain4J RAG 管线
+        if (documentIngestionService != null) {
+            try {
+                int chunks = documentIngestionService.ingestText(itemId, tenantId, contextId, content);
+                log.info("RAG 管线向量化完成: itemId={}, chunks={}", itemId, chunks);
+                return;
+            } catch (Exception e) {
+                log.warn("RAG 管线向量化失败，尝试 fallback: itemId={}, error={}", itemId, e.getMessage());
+            }
+        }
+
+        // Fallback: 原始 MilvusVectorService
+        if (milvusVectorService != null) {
+            try {
+                milvusVectorService.upsertContextItem(itemId, tenantId, null, contextId, content);
+                log.info("Milvus 向量化完成: itemId={}", itemId);
+            } catch (Exception e) {
+                log.warn("Milvus 写入失败（不影响主流程）: itemId={}, error={}", itemId, e.getMessage());
+            }
+        }
     }
 
     // ===== 关联关系管理 =====

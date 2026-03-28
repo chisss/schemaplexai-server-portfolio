@@ -20,6 +20,7 @@ import com.schemaplexai.model.vo.agent.AgentTeamMemberVO;
 import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentVO;
 import com.schemaplexai.model.vo.agent.AvailableToolVO;
+import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 
 import java.util.List;
 
@@ -144,6 +145,11 @@ public interface AgentService {
      * 停止执行
      */
     void stopExecution(String agentId, String executionId);
+
+    /**
+     * 查询对话历史消息
+     */
+    List<ConversationMessageVO> getConversationHistory(String conversationId);
 
     // ==================== Agent 专属指令 ====================
 
