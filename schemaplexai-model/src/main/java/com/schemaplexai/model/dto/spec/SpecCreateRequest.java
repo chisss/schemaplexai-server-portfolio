@@ -22,6 +22,9 @@ public class SpecCreateRequest {
     /** 描述 */
     private String description;
 
+    /** 优先级 */
+    private String priority;
+
     /** 标签 */
     private List<String> tags;
 
@@ -34,4 +37,10 @@ public class SpecCreateRequest {
 
     /** 关联工作流模板ID */
     private String workflowId;
+
+    /** Jira 或需求单号 */
+    private String jiraTicket;
+
+    /** 目标研发分支 */
+    private String targetBranch;
 }

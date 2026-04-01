@@ -25,10 +25,11 @@ public class EmbeddingModelProvider {
     /**
      * 获取适配后的 EmbeddingModel
      *
+     * @param tenantId 租户 ID
      * @return EmbeddingModel 实例
      */
-    public EmbeddingModel getEmbeddingModel() {
-        return new EmbeddingServiceAdapter(embeddingService);
+    public EmbeddingModel getEmbeddingModel(String tenantId) {
+        return new EmbeddingServiceAdapter(embeddingService, tenantId);
     }
 
     /**
@@ -37,14 +38,16 @@ public class EmbeddingModelProvider {
     private static class EmbeddingServiceAdapter implements EmbeddingModel {
 
         private final EmbeddingService embeddingService;
+        private final String tenantId;
 
-        EmbeddingServiceAdapter(EmbeddingService embeddingService) {
+        EmbeddingServiceAdapter(EmbeddingService embeddingService, String tenantId) {
             this.embeddingService = embeddingService;
+            this.tenantId = tenantId;
         }
 
         @Override
         public Response<Embedding> embed(String text) {
-            float[] vector = embeddingService.embed(text);
+            float[] vector = embeddingService.embed(tenantId, text);
             return Response.from(Embedding.from(vector));
         }
 
@@ -57,7 +60,7 @@ public class EmbeddingModelProvider {
         public Response<java.util.List<Embedding>> embedAll(java.util.List<TextSegment> textSegments) {
             java.util.List<Embedding> embeddings = textSegments.stream()
                     .map(segment -> {
-                        float[] vector = embeddingService.embed(segment.text());
+                        float[] vector = embeddingService.embed(tenantId, segment.text());
                         return Embedding.from(vector);
                     })
                     .toList();
@@ -66,7 +69,7 @@ public class EmbeddingModelProvider {
 
         @Override
         public int dimension() {
-            return embeddingService.dimension();
+            return embeddingService.dimension(tenantId);
         }
     }
 }

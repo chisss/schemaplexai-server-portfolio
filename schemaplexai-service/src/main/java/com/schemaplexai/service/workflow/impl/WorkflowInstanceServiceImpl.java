@@ -3,25 +3,31 @@ package com.schemaplexai.service.workflow.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
 import com.schemaplexai.model.converter.WorkflowInstanceConverter;
+import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.dto.workflow.WorkflowInstanceCreateRequest;
 import com.schemaplexai.model.dto.workflow.WorkflowInstanceQueryRequest;
 import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.entity.WorkflowNodeExecution;
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
 import com.schemaplexai.model.vo.workflow.WorkflowNodeExecutionVO;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
 import com.schemaplexai.service.workflow.engine.WorkflowNodeEngine;
 import com.schemaplexai.service.workflow.validator.WorkflowValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -45,6 +51,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     private final WorkflowInstanceConverter instanceConverter;
     private final WorkflowValidator workflowValidator;
     private final WorkflowNodeEngine workflowNodeEngine;
+    private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -56,6 +63,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         }
 
         var instance = instanceConverter.fromCreateRequest(request);
+        instance.setTenantId(resolveTenantId(request));
         instance.setDefinition(template.getDefinition());
         instanceMapper.insert(instance);
 
@@ -70,12 +78,31 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         var instance = requireExists(id);
         workflowValidator.validateCanStart(instance);
 
+        SecurityCheckDecisionVO securityDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
+                buildStartSecurityCheckRequest(instance),
+                null
+        );
+        Map<String, Object> variables = appendSecurityDecision(instance.getVariables(), securityDecision);
+        if (securityDecision != null && SecurityComplianceConstant.DECISION_BLOCK.equals(securityDecision.getDecision())) {
+            instance.setVariables(variables);
+            instance.setUpdatedAt(LocalDateTime.now());
+            instanceMapper.updateById(instance);
+            return enrichWithNodeExecutions(instance);
+        }
+        if (securityDecision != null && SecurityComplianceConstant.DECISION_PAUSE.equals(securityDecision.getDecision())) {
+            instance.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+            instance.setVariables(variables);
+            instance.setUpdatedAt(LocalDateTime.now());
+            instanceMapper.updateById(instance);
+            return enrichWithNodeExecutions(instance);
+        }
+
         instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
         instance.setStartedAt(LocalDateTime.now());
+        instance.setVariables(variables);
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
-        // 初始化节点执行记录并驱动第一个节点
         workflowNodeEngine.initAndDriveWorkflow(instance);
 
         log.info("启动工作流实例: instanceId={}", id);
@@ -110,7 +137,19 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
-        // TODO: 对接 Flowable — runtimeService.activateProcessInstanceById
+        boolean pendingStart = instance.getVariables() != null
+                && Boolean.TRUE.equals(instance.getVariables().get("securityPendingStart"));
+        long nodeCount = nodeExecutionMapper.selectCount(
+                new LambdaQueryWrapper<WorkflowNodeExecution>()
+                        .eq(WorkflowNodeExecution::getInstanceId, instance.getId())
+        );
+        if (pendingStart || nodeCount == 0) {
+            Map<String, Object> variables = new HashMap<>(instance.getVariables() == null ? Map.of() : instance.getVariables());
+            variables.remove("securityPendingStart");
+            instance.setVariables(variables);
+            instanceMapper.updateById(instance);
+            workflowNodeEngine.initAndDriveWorkflow(instance);
+        }
 
         log.info("恢复工作流实例: instanceId={}", id);
         return enrichWithNodeExecutions(instance);
@@ -165,7 +204,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     @Override
     public List<WorkflowNodeExecutionVO> getNodeExecutions(String instanceId) {
         requireExists(instanceId);
-        var executions = nodeExecutionMapper.selectByInstanceId(instanceId);
+        var executions = listNodeExecutions(instanceId);
         return executions.stream().map(this::toNodeExecutionVO).toList();
     }
 
@@ -256,18 +295,60 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     }
 
     private WorkflowNodeExecution findNodeExecution(String instanceId, String nodeId) {
-        var executions = nodeExecutionMapper.selectByInstanceId(instanceId);
+        var executions = listNodeExecutions(instanceId);
         return executions.stream()
                 .filter(e -> nodeId.equals(e.getNodeId()))
                 .findFirst()
                 .orElseThrow(() -> new BusinessException(ResultCode.WORKFLOW_NODE_NOT_FOUND));
     }
 
+    private String resolveTenantId(WorkflowInstanceCreateRequest request) {
+        if (request != null && StringUtils.hasText(request.getTenantId())) {
+            return request.getTenantId().trim();
+        }
+        String securityTenantId = SecurityUtil.getCurrentTenantId();
+        if (StringUtils.hasText(securityTenantId)) {
+            return securityTenantId.trim();
+        }
+        throw new BusinessException(ResultCode.FAIL, "工作流实例缺少租户信息");
+    }
+
+    private SecurityRuntimeCheckRequest buildStartSecurityCheckRequest(WorkflowInstance instance) {
+        var request = new SecurityRuntimeCheckRequest();
+        request.setScene(SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_START);
+        request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+        request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_INSTANCE);
+        request.setResourceId(instance.getId());
+        request.setResourceName(instance.getName());
+        request.setWorkflowInstanceId(instance.getId());
+        request.setContent(instance.getName());
+        request.setContext(instance.getVariables());
+        return request;
+    }
+
+    private Map<String, Object> appendSecurityDecision(Map<String, Object> original, SecurityCheckDecisionVO decision) {
+        Map<String, Object> variables = new HashMap<>(original == null ? Map.of() : original);
+        if (decision == null) {
+            return variables;
+        }
+        variables.put("securityDecision", decision);
+        if (SecurityComplianceConstant.DECISION_PAUSE.equals(decision.getDecision())) {
+            variables.put("securityPendingStart", true);
+        }
+        return variables;
+    }
+
     private WorkflowInstanceVO enrichWithNodeExecutions(WorkflowInstance instance) {
         var vo = instanceConverter.toVO(instance);
-        var executions = nodeExecutionMapper.selectByInstanceId(instance.getId());
+        var executions = listNodeExecutions(instance.getId());
         vo.setNodeExecutions(executions.stream().map(this::toNodeExecutionVO).toList());
         return vo;
+    }
+
+    private List<WorkflowNodeExecution> listNodeExecutions(String instanceId) {
+        return nodeExecutionMapper.selectList(new LambdaQueryWrapper<WorkflowNodeExecution>()
+                .eq(WorkflowNodeExecution::getInstanceId, instanceId)
+                .orderByAsc(WorkflowNodeExecution::getCreatedAt));
     }
 
     private WorkflowNodeExecutionVO toNodeExecutionVO(WorkflowNodeExecution execution) {

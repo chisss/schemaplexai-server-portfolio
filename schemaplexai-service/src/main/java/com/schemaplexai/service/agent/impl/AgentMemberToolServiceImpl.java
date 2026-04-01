@@ -89,9 +89,6 @@ public class AgentMemberToolServiceImpl implements AgentMemberToolService {
                 binding.setEnabled(item.getEnabled() == null || item.getEnabled());
                 binding.setPriority(item.getPriority() == null ? 100 : item.getPriority());
                 binding.setConfigOverride(item.getConfigOverride());
-                String tenantId = StringUtils.hasText(SecurityUtil.getCurrentTenantId())
-                        ? SecurityUtil.getCurrentTenantId() : null;
-                binding.setTenantId(tenantId);
                 agentTeamMemberToolBindingMapper.insert(binding);
                 insertedCount++;
             }

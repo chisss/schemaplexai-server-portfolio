@@ -3,6 +3,8 @@ package com.schemaplexai.service.knowledge;
 import com.schemaplexai.model.vo.knowledge.KnowledgeDocumentVO;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.List;
+
 /**
  * 知识文档管理服务
  */
@@ -16,6 +18,14 @@ public interface KnowledgeDocumentService {
      * @return 文档记录 VO
      */
     KnowledgeDocumentVO uploadDocument(String contextId, MultipartFile file);
+
+    /**
+     * 查询上下文下的知识文档列表
+     *
+     * @param contextId 上下文 ID
+     * @return 文档记录列表
+     */
+    List<KnowledgeDocumentVO> listByContextId(String contextId);
 
     /**
      * 查询文档处理状态

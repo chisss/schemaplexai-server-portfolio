@@ -6,15 +6,19 @@ import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.AiModelGroupItemMapper;
 import com.schemaplexai.dao.mapper.AiModelMapper;
+import com.schemaplexai.dao.mapper.AiModelRouteMapper;
 import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AiModelGroupItem;
+import com.schemaplexai.model.entity.AiModelRoute;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -30,6 +34,7 @@ public class AIModelRouter {
 
     private final LangChain4jModelFactory modelFactory;
     private final AiModelMapper aiModelMapper;
+    private final AiModelRouteMapper aiModelRouteMapper;
     private final AiModelGroupItemMapper groupItemMapper;
     private final ModelLoadBalancer modelLoadBalancer;
 
@@ -44,6 +49,48 @@ public class AIModelRouter {
     }
 
     /**
+     * 解析 Agent 的候选模型链路
+     * model_group: 组内顺序降级
+     * model: 按路由规则降级
+     */
+    public List<LangChain4jResolution> resolveChainForAgent(Agent agent) {
+        if ("model_group".equals(agent.getAiModelType()) && StringUtils.hasText(agent.getAiModelGroupId())) {
+            return resolveGroupChain(agent.getAiModelGroupId());
+        }
+        return resolveRouteChain(agent.getAiModel());
+    }
+
+    /**
+     * 解析单模型的降级链路
+     */
+    public List<LangChain4jResolution> resolveRouteChain(String modelDisplayName) {
+        AiModel primaryModel = requireActiveModelByName(modelDisplayName);
+        LinkedHashSet<String> modelIds = new LinkedHashSet<>();
+        modelIds.add(primaryModel.getId());
+
+        AiModelRoute route = aiModelRouteMapper.selectOne(new LambdaQueryWrapper<AiModelRoute>()
+                .eq(AiModelRoute::getPrimaryModelId, primaryModel.getId())
+                .eq(AiModelRoute::getStatus, CommonConstant.STATUS_ACTIVE)
+                .orderByAsc(AiModelRoute::getPriority)
+                .last("LIMIT 1"));
+        if (route != null) {
+            if (StringUtils.hasText(route.getSecondaryModelId())) {
+                modelIds.add(route.getSecondaryModelId());
+            }
+            if (StringUtils.hasText(route.getTertiaryModelId())) {
+                modelIds.add(route.getTertiaryModelId());
+            }
+        }
+
+        List<LangChain4jResolution> chain = new ArrayList<>();
+        for (String modelId : modelIds) {
+            AiModel model = requireActiveModelById(modelId);
+            chain.add(buildResolution(model));
+        }
+        return chain;
+    }
+
+    /**
      * 按模型显示名称解析 ChatModel 和运行时连接配置
      *
      * @param modelDisplayName Agent.aiModel 中存储的 AiModel 显示名称（如 "Claude 3.5 Sonnet"）
@@ -51,33 +98,24 @@ public class AIModelRouter {
      * @throws BusinessException 若未找到激活状态的模型配置
      */
     public LangChain4jResolution resolveByModelName(String modelDisplayName) {
-        if (!StringUtils.hasText(modelDisplayName)) {
-            throw new BusinessException(ResultCode.AGENT_CONFIG_ERROR);
-        }
-
-        AiModel aiModel = aiModelMapper.selectOne(
-                new LambdaQueryWrapper<AiModel>()
-                        .eq(AiModel::getName, modelDisplayName)
-                        .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
-                        .last("LIMIT 1")
-        );
-
-        if (aiModel == null) {
-            log.error("未找到激活的 AI 模型配置: displayName={}", modelDisplayName);
-            throw new BusinessException(ResultCode.AGENT_CONFIG_ERROR);
-        }
-
-        AiModelConfig config = AiModelConfig.from(aiModel);
-        log.info("AI 模型解析成功: displayName={}, provider={}, modelId={}",
-                modelDisplayName, config.getProvider(), config.getModelId());
-
-        return new LangChain4jResolution(modelFactory.getOrCreate(config), config);
+        return buildResolution(requireActiveModelByName(modelDisplayName));
     }
 
     /**
      * 从模型组按 sort_order 顺序降级解析，所有模型均失败则抛异常
      */
     public LangChain4jResolution resolveFromGroup(String groupId) {
+        List<LangChain4jResolution> chain = resolveGroupChain(groupId);
+        if (CollectionUtils.isEmpty(chain)) {
+            throw new BusinessException(ResultCode.MODEL_GROUP_ALL_UNAVAILABLE);
+        }
+        return chain.getFirst();
+    }
+
+    /**
+     * 从模型组按 sort_order 顺序解析为降级链路
+     */
+    public List<LangChain4jResolution> resolveGroupChain(String groupId) {
         List<AiModelGroupItem> items = groupItemMapper.selectList(
                 new LambdaQueryWrapper<AiModelGroupItem>()
                         .eq(AiModelGroupItem::getGroupId, groupId)
@@ -88,26 +126,21 @@ public class AIModelRouter {
             throw new BusinessException(ResultCode.MODEL_GROUP_ALL_UNAVAILABLE);
         }
 
+        List<LangChain4jResolution> chain = new ArrayList<>();
         for (AiModelGroupItem item : items) {
             try {
-                AiModel model = aiModelMapper.selectOne(new LambdaQueryWrapper<AiModel>()
-                        .eq(AiModel::getId, item.getModelId())
-                        .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE));
-                if (model == null) {
-                    log.warn("模型组降级：模型不可用（inactive或不存在）: groupId={}, modelId={}", groupId, item.getModelId());
-                    continue;
-                }
-                AiModelConfig config = AiModelConfig.from(model);
-                log.info("模型组解析成功: groupId={}, modelId={}, sortOrder={}, provider={}",
-                        groupId, item.getModelId(), item.getSortOrder(), config.getProvider());
-                return new LangChain4jResolution(modelFactory.getOrCreate(config), config);
+                AiModel model = requireActiveModelById(item.getModelId());
+                chain.add(buildResolution(model));
             } catch (Exception e) {
                 log.warn("模型组降级，跳过: groupId={}, modelId={}, error={}", groupId, item.getModelId(), e.getMessage());
             }
         }
 
-        log.error("模型组内所有模型均不可用: groupId={}", groupId);
-        throw new BusinessException(ResultCode.MODEL_GROUP_ALL_UNAVAILABLE);
+        if (CollectionUtils.isEmpty(chain)) {
+            log.error("模型组内所有模型均不可用: groupId={}", groupId);
+            throw new BusinessException(ResultCode.MODEL_GROUP_ALL_UNAVAILABLE);
+        }
+        return chain;
     }
 
     /**
@@ -163,6 +196,43 @@ public class AIModelRouter {
         log.info("模型组负载均衡解析成功: groupId={}, selectedModelId={}, shardKey={}, provider={}",
                 groupId, selectedModelId, shardKey, config.getProvider());
 
+        return new LangChain4jResolution(modelFactory.getOrCreate(config), config);
+    }
+
+    private AiModel requireActiveModelByName(String modelDisplayName) {
+        if (!StringUtils.hasText(modelDisplayName)) {
+            throw new BusinessException(ResultCode.AGENT_CONFIG_ERROR);
+        }
+        AiModel aiModel = aiModelMapper.selectOne(
+                new LambdaQueryWrapper<AiModel>()
+                        .eq(AiModel::getName, modelDisplayName)
+                        .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
+                        .last("LIMIT 1")
+        );
+        if (aiModel == null) {
+            log.error("未找到激活的 AI 模型配置: displayName={}", modelDisplayName);
+            throw new BusinessException(ResultCode.AGENT_CONFIG_ERROR);
+        }
+        return aiModel;
+    }
+
+    private AiModel requireActiveModelById(String modelId) {
+        AiModel aiModel = aiModelMapper.selectOne(
+                new LambdaQueryWrapper<AiModel>()
+                        .eq(AiModel::getId, modelId)
+                        .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
+                        .last("LIMIT 1")
+        );
+        if (aiModel == null) {
+            throw new BusinessException(ResultCode.AGENT_CONFIG_ERROR);
+        }
+        return aiModel;
+    }
+
+    private LangChain4jResolution buildResolution(AiModel aiModel) {
+        AiModelConfig config = AiModelConfig.from(aiModel);
+        log.info("AI 模型解析成功: modelName={}, provider={}, modelId={}",
+                aiModel.getName(), config.getProvider(), config.getModelId());
         return new LangChain4jResolution(modelFactory.getOrCreate(config), config);
     }
 }

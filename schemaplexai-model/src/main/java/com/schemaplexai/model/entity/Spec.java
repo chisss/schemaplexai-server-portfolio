@@ -34,6 +34,9 @@ public class Spec extends BaseEntity {
     /** 生命周期状态: draft/requirements_review/requirements_approved/design_review/design_approved/tasks_review/ready/in_progress/completed/acceptance/archived */
     private String status;
 
+    /** 优先级: low/medium/high/critical */
+    private String priority;
+
     /** Spec拥有者 */
     private String owner;
 
@@ -49,4 +52,16 @@ public class Spec extends BaseEntity {
 
     /** 关联工作流模板ID */
     private String workflowId;
+
+    /** 关联工作流实例ID */
+    private String workflowInstanceId;
+
+    /** Jira 或需求单号 */
+    private String jiraTicket;
+
+    /** 目标研发分支 */
+    private String targetBranch;
+
+    /** 工作流产出的文档路径 */
+    private String artifactDocPath;
 }

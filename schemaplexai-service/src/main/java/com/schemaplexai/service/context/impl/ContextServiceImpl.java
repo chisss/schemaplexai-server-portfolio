@@ -7,7 +7,9 @@ import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.ContextRelationMapper;
+import com.schemaplexai.dao.mapper.KnowledgeDocumentMapper;
 import com.schemaplexai.model.entity.ContextRelation;
+import com.schemaplexai.model.entity.KnowledgeDocument;
 import com.schemaplexai.model.vo.context.ContextRelationVO;
 import com.schemaplexai.dao.mapper.ContextEntityMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
@@ -36,6 +38,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +61,7 @@ public class ContextServiceImpl implements ContextService {
     private final ContextItemHandler contextItemHandler;
     private final EntityValidator entityValidator;
     private final ContextRelationMapper contextRelationMapper;
+    private final KnowledgeDocumentMapper knowledgeDocumentMapper;
 
     /** Milvus 可选注入（Milvus 未启动时为 null） */
     @Lazy
@@ -144,6 +148,7 @@ public class ContextServiceImpl implements ContextService {
         voList.forEach(vo -> {
             vo.setItemCount(contextItemHandler.countItems(vo.getId()));
             vo.setTotalTokens(contextItemHandler.sumTokens(vo.getId()));
+            enrichVectorSummary(vo, contextItemHandler.loadItems(vo.getId()));
         });
 
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
@@ -171,6 +176,7 @@ public class ContextServiceImpl implements ContextService {
         detailVO.setTotalTokens(items.stream()
                 .mapToInt(item -> item.getTokenCount() != null ? item.getTokenCount() : 0)
                 .sum());
+        enrichVectorSummary(detailVO, items);
 
         return detailVO;
     }
@@ -204,6 +210,10 @@ public class ContextServiceImpl implements ContextService {
     @Transactional(rollbackFor = Exception.class)
     public void delete(String id) {
         entityValidator.requireExists(contextEntityMapper, id, ResultCode.CONTEXT_NOT_FOUND);
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (documentIngestionService != null) {
+            documentIngestionService.removeByContextId(tenantId, id);
+        }
         contextItemHandler.deleteAllItems(id);
         contextSnapshotMapper.delete(
                 new LambdaQueryWrapper<ContextSnapshot>()
@@ -233,7 +243,7 @@ public class ContextServiceImpl implements ContextService {
 
         log.info("添加上下文条目: contextId={}, itemId={}, type={}",
                 contextId, item.getId(), item.getItemType());
-        return contextItemConverter.toVO(item);
+        return contextItemConverter.toVO(contextItemMapper.selectById(item.getId()));
     }
 
     @Override
@@ -274,6 +284,20 @@ public class ContextServiceImpl implements ContextService {
         updateItem.setUpdatedAt(LocalDateTime.now());
         contextItemMapper.updateById(updateItem);
 
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (request.getContent() != null) {
+            if (StringUtils.hasText(request.getContent())) {
+                vectorizeContextItem(itemId, tenantId, contextId, request.getContent());
+            } else {
+                if (documentIngestionService != null) {
+                    documentIngestionService.removeByItemId(tenantId, itemId);
+                } else if (milvusVectorService != null) {
+                    milvusVectorService.deleteContextItem(tenantId, itemId);
+                }
+                updateContextItemVectorState(itemId, "none", 0);
+            }
+        }
+
         log.info("更新上下文条目: contextId={}, itemId={}", contextId, itemId);
         return contextItemConverter.toVO(contextItemMapper.selectById(itemId));
     }
@@ -285,6 +309,12 @@ public class ContextServiceImpl implements ContextService {
         var item = contextItemMapper.selectById(itemId);
         if (item == null || !contextId.equals(item.getContextId())) {
             throw new BusinessException(ResultCode.CONTEXT_ITEM_NOT_FOUND);
+        }
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (documentIngestionService != null) {
+            documentIngestionService.removeByItemId(tenantId, itemId);
+        } else if (milvusVectorService != null) {
+            milvusVectorService.deleteContextItem(tenantId, itemId);
         }
         contextItemMapper.deleteById(itemId);
         log.info("删除上下文条目: contextId={}, itemId={}", contextId, itemId);
@@ -498,24 +528,46 @@ public class ContextServiceImpl implements ContextService {
     private void vectorizeContextItem(String itemId, String tenantId, String contextId, String content) {
         // 优先使用 LangChain4J RAG 管线
         if (documentIngestionService != null) {
-            try {
-                int chunks = documentIngestionService.ingestText(itemId, tenantId, contextId, content);
-                log.info("RAG 管线向量化完成: itemId={}, chunks={}", itemId, chunks);
+            DocumentIngestionService.TextIngestionResult result =
+                    documentIngestionService.ingestText(itemId, tenantId, contextId, content);
+            if (result.isSuccess()) {
+                updateContextItemVectorState(itemId, "completed", result.getChunkCount());
+                log.info("RAG 管线向量化完成: itemId={}, chunks={}", itemId, result.getChunkCount());
                 return;
-            } catch (Exception e) {
-                log.warn("RAG 管线向量化失败，尝试 fallback: itemId={}, error={}", itemId, e.getMessage());
             }
+            updateContextItemVectorState(itemId,
+                    "skipped".equalsIgnoreCase(result.getStatus()) ? "none" : "failed", 0);
+            log.warn("RAG 管线向量化未完成: itemId={}, status={}, error={}",
+                    itemId, result.getStatus(), result.getErrorMessage());
+            return;
         }
 
         // Fallback: 原始 MilvusVectorService
         if (milvusVectorService != null) {
-            try {
-                milvusVectorService.upsertContextItem(itemId, tenantId, null, contextId, content);
+            boolean success = milvusVectorService.upsertContextItem(itemId, tenantId, null, contextId, content);
+            if (success) {
+                updateContextItemVectorState(itemId, "completed", 1);
                 log.info("Milvus 向量化完成: itemId={}", itemId);
-            } catch (Exception e) {
-                log.warn("Milvus 写入失败（不影响主流程）: itemId={}, error={}", itemId, e.getMessage());
+                return;
             }
+            updateContextItemVectorState(itemId, "failed", 0);
+            log.warn("Milvus 写入失败（不影响主流程）: itemId={}", itemId);
+            return;
         }
+
+        updateContextItemVectorState(itemId, "none", 0);
+    }
+
+    private void updateContextItemVectorState(String itemId, String vectorStatus, int chunkCount) {
+        if (!StringUtils.hasText(itemId)) {
+            return;
+        }
+        ContextItem updateItem = new ContextItem();
+        updateItem.setId(itemId);
+        updateItem.setVectorStatus(vectorStatus);
+        updateItem.setChunkCount(chunkCount);
+        updateItem.setVectorUpdatedAt(LocalDateTime.now());
+        contextItemMapper.updateById(updateItem);
     }
 
     // ===== 关联关系管理 =====
@@ -554,5 +606,105 @@ public class ContextServiceImpl implements ContextService {
             vo.setCreatedAt(r.getCreatedAt());
             return vo;
         }).collect(java.util.stream.Collectors.toList());
+    }
+
+    private void enrichVectorSummary(ContextVO contextVO, List<ContextItem> items) {
+        if (contextVO == null) {
+            return;
+        }
+        List<KnowledgeDocument> documents = knowledgeDocumentMapper.selectList(
+                new LambdaQueryWrapper<KnowledgeDocument>()
+                        .eq(KnowledgeDocument::getContextId, contextVO.getId())
+                        .orderByDesc(KnowledgeDocument::getUpdatedAt)
+        );
+
+        int itemChunkCount = items == null ? 0 : items.stream()
+                .map(ContextItem::getChunkCount)
+                .filter(count -> count != null && count > 0)
+                .mapToInt(Integer::intValue)
+                .sum();
+        int documentChunkCount = documents.stream()
+                .map(KnowledgeDocument::getChunkCount)
+                .filter(count -> count != null && count > 0)
+                .mapToInt(Integer::intValue)
+                .sum();
+
+        boolean hasCompleted = hasCompletedItems(items) || hasCompletedDocuments(documents);
+        boolean hasProcessing = hasProcessingItems(items) || hasProcessingDocuments(documents);
+        boolean hasFailed = hasFailedItems(items) || hasFailedDocuments(documents);
+
+        contextVO.setVectorized(hasCompleted);
+        contextVO.setVectorChunkCount(itemChunkCount + documentChunkCount);
+        contextVO.setKnowledgeDocumentCount(documents.size());
+        contextVO.setVectorStatus(resolveVectorStatus(hasCompleted, hasProcessing, hasFailed));
+        contextVO.setVectorUpdatedAt(resolveLatestVectorUpdatedAt(items, documents));
+    }
+
+    private boolean hasCompletedItems(List<ContextItem> items) {
+        return items != null && items.stream().anyMatch(item ->
+                (item.getChunkCount() != null && item.getChunkCount() > 0)
+                        || "completed".equalsIgnoreCase(item.getVectorStatus()));
+    }
+
+    private boolean hasProcessingItems(List<ContextItem> items) {
+        return items != null && items.stream().anyMatch(item ->
+                "processing".equalsIgnoreCase(item.getVectorStatus())
+                        || ("pending".equalsIgnoreCase(item.getVectorStatus())
+                        && item.getVectorUpdatedAt() != null));
+    }
+
+    private boolean hasFailedItems(List<ContextItem> items) {
+        return items != null && items.stream().anyMatch(item ->
+                "failed".equalsIgnoreCase(item.getVectorStatus()));
+    }
+
+    private boolean hasCompletedDocuments(List<KnowledgeDocument> documents) {
+        return documents.stream().anyMatch(document ->
+                (document.getChunkCount() != null && document.getChunkCount() > 0)
+                        || "completed".equalsIgnoreCase(document.getStatus()));
+    }
+
+    private boolean hasProcessingDocuments(List<KnowledgeDocument> documents) {
+        return documents.stream().anyMatch(document ->
+                "processing".equalsIgnoreCase(document.getStatus())
+                        || "pending".equalsIgnoreCase(document.getStatus()));
+    }
+
+    private boolean hasFailedDocuments(List<KnowledgeDocument> documents) {
+        return documents.stream().anyMatch(document ->
+                "failed".equalsIgnoreCase(document.getStatus()));
+    }
+
+    private String resolveVectorStatus(boolean hasCompleted, boolean hasProcessing, boolean hasFailed) {
+        if (hasProcessing) {
+            return "processing";
+        }
+        if (hasCompleted) {
+            return "completed";
+        }
+        if (hasFailed) {
+            return "failed";
+        }
+        return "none";
+    }
+
+    private LocalDateTime resolveLatestVectorUpdatedAt(List<ContextItem> items, List<KnowledgeDocument> documents) {
+        LocalDateTime latestItemUpdate = items == null ? null : items.stream()
+                .map(ContextItem::getVectorUpdatedAt)
+                .filter(java.util.Objects::nonNull)
+                .max(Comparator.naturalOrder())
+                .orElse(null);
+        LocalDateTime latestDocumentUpdate = documents.stream()
+                .map(KnowledgeDocument::getUpdatedAt)
+                .filter(java.util.Objects::nonNull)
+                .max(Comparator.naturalOrder())
+                .orElse(null);
+        if (latestItemUpdate == null) {
+            return latestDocumentUpdate;
+        }
+        if (latestDocumentUpdate == null) {
+            return latestItemUpdate;
+        }
+        return latestItemUpdate.isAfter(latestDocumentUpdate) ? latestItemUpdate : latestDocumentUpdate;
     }
 }

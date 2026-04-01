@@ -8,11 +8,17 @@ import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.QualityDeviationMapper;
+import com.schemaplexai.dao.mapper.SpecMapper;
+import com.schemaplexai.dao.mapper.UserMapper;
+import com.schemaplexai.dao.mapper.WorkspaceMapper;
 import com.schemaplexai.model.converter.DeviationConverter;
 import com.schemaplexai.model.dto.quality.DeviationDetectRequest;
 import com.schemaplexai.model.dto.quality.DeviationQueryRequest;
 import com.schemaplexai.model.dto.quality.DeviationStatusUpdateRequest;
 import com.schemaplexai.model.entity.QualityDeviation;
+import com.schemaplexai.model.entity.Spec;
+import com.schemaplexai.model.entity.User;
+import com.schemaplexai.model.entity.Workspace;
 import com.schemaplexai.model.vo.quality.DeviationStatisticsVO;
 import com.schemaplexai.model.vo.quality.DeviationVO;
 import com.schemaplexai.model.vo.quality.DetectTaskVO;
@@ -26,9 +32,15 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
@@ -45,6 +57,9 @@ public class DeviationServiceImpl implements DeviationService {
     private final DeviationValidator deviationValidator;
     private final EntityValidator entityValidator;
     private final RabbitTemplate rabbitTemplate;
+    private final SpecMapper specMapper;
+    private final WorkspaceMapper workspaceMapper;
+    private final UserMapper userMapper;
 
     @Override
     public DetectTaskVO detect(DeviationDetectRequest request) {
@@ -67,43 +82,16 @@ public class DeviationServiceImpl implements DeviationService {
     @Override
     public PageResult<DeviationVO> page(DeviationQueryRequest request) {
         var page = new Page<QualityDeviation>(request.getPage(), request.getSize());
-        var wrapper = new LambdaQueryWrapper<QualityDeviation>();
-
-        // 按specId过滤
-        if (StringUtils.hasText(request.getSpecId())) {
-            wrapper.eq(QualityDeviation::getSpecId, request.getSpecId());
-        }
-        // 按偏离类型过滤
-        if (StringUtils.hasText(request.getDeviationType())) {
-            wrapper.eq(QualityDeviation::getDeviationType, request.getDeviationType());
-        }
-        // 按严重程度过滤
-        if (StringUtils.hasText(request.getSeverity())) {
-            wrapper.eq(QualityDeviation::getSeverity, request.getSeverity());
-        }
-        // 按状态过滤
-        if (StringUtils.hasText(request.getStatus())) {
-            wrapper.eq(QualityDeviation::getStatus, request.getStatus());
-        }
-        // 关键词搜索：标题或描述
-        if (StringUtils.hasText(request.getKeyword())) {
-            wrapper.and(w -> w
-                    .like(QualityDeviation::getTitle, request.getKeyword())
-                    .or()
-                    .like(QualityDeviation::getDescription, request.getKeyword())
-            );
-        }
-        wrapper.orderByDesc(QualityDeviation::getCreatedAt);
-
+        var wrapper = buildWrapper(request);
         var result = qualityDeviationMapper.selectPage(page, wrapper);
-        var voList = deviationConverter.toVOList(result.getRecords());
+        List<DeviationVO> voList = enrich(result.getRecords());
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
 
     @Override
     public DeviationVO getById(String id) {
         var entity = entityValidator.requireExists(qualityDeviationMapper, id, ResultCode.DEVIATION_NOT_FOUND);
-        return deviationConverter.toVO(entity);
+        return enrich(List.of(entity)).stream().findFirst().orElseGet(() -> deviationConverter.toVO(entity));
     }
 
     @Override
@@ -137,52 +125,162 @@ public class DeviationServiceImpl implements DeviationService {
     @Override
     public DeviationStatisticsVO statistics(String specId, String startDate, String endDate) {
         var statisticsVO = new DeviationStatisticsVO();
-
-        // 基础查询条件：按specId过滤
-        var baseWrapper = new LambdaQueryWrapper<QualityDeviation>()
+        var wrapper = new LambdaQueryWrapper<QualityDeviation>()
                 .eq(StringUtils.hasText(specId), QualityDeviation::getSpecId, specId);
-
-        // 总数
-        Long totalCount = qualityDeviationMapper.selectCount(baseWrapper);
-        statisticsVO.setTotalCount(totalCount.intValue());
-
-        // 按状态统计
-        Long openCount = qualityDeviationMapper.selectCount(
-                new LambdaQueryWrapper<QualityDeviation>()
-                        .eq(StringUtils.hasText(specId), QualityDeviation::getSpecId, specId)
-                        .eq(QualityDeviation::getStatus, DeviationStatusEnum.OPEN.getCode())
-        );
-        statisticsVO.setOpenCount(openCount.intValue());
-
-        Long resolvedCount = qualityDeviationMapper.selectCount(
-                new LambdaQueryWrapper<QualityDeviation>()
-                        .eq(StringUtils.hasText(specId), QualityDeviation::getSpecId, specId)
-                        .eq(QualityDeviation::getStatus, DeviationStatusEnum.RESOLVED.getCode())
-        );
-        statisticsVO.setResolvedCount(resolvedCount.intValue());
-
-        // 按严重程度统计
-        Long criticalCount = qualityDeviationMapper.selectCount(
-                new LambdaQueryWrapper<QualityDeviation>()
-                        .eq(StringUtils.hasText(specId), QualityDeviation::getSpecId, specId)
-                        .eq(QualityDeviation::getSeverity, DeviationSeverityEnum.CRITICAL.getCode())
-        );
-        statisticsVO.setCriticalCount(criticalCount.intValue());
-
-        Long warningCount = qualityDeviationMapper.selectCount(
-                new LambdaQueryWrapper<QualityDeviation>()
-                        .eq(StringUtils.hasText(specId), QualityDeviation::getSpecId, specId)
-                        .eq(QualityDeviation::getSeverity, DeviationSeverityEnum.WARNING.getCode())
-        );
-        statisticsVO.setWarningCount(warningCount.intValue());
-
-        Long infoCount = qualityDeviationMapper.selectCount(
-                new LambdaQueryWrapper<QualityDeviation>()
-                        .eq(StringUtils.hasText(specId), QualityDeviation::getSpecId, specId)
-                        .eq(QualityDeviation::getSeverity, DeviationSeverityEnum.INFO.getCode())
-        );
-        statisticsVO.setInfoCount(infoCount.intValue());
-
+        List<QualityDeviation> records = qualityDeviationMapper.selectList(wrapper);
+        statisticsVO.setTotalCount(records.size());
+        statisticsVO.setOpenCount((int) records.stream().filter(item -> DeviationStatusEnum.OPEN.getCode().equals(item.getStatus())).count());
+        statisticsVO.setResolvedCount((int) records.stream().filter(item -> DeviationStatusEnum.RESOLVED.getCode().equals(item.getStatus())).count());
+        statisticsVO.setAcknowledgedCount((int) records.stream().filter(item -> DeviationStatusEnum.ACKNOWLEDGED.getCode().equals(item.getStatus())).count());
+        statisticsVO.setIgnoredCount((int) records.stream().filter(item -> DeviationStatusEnum.IGNORED.getCode().equals(item.getStatus())).count());
+        statisticsVO.setCriticalCount((int) records.stream().filter(item -> DeviationSeverityEnum.CRITICAL.getCode().equals(item.getSeverity())).count());
+        statisticsVO.setWarningCount((int) records.stream().filter(item -> DeviationSeverityEnum.WARNING.getCode().equals(item.getSeverity())).count());
+        statisticsVO.setInfoCount((int) records.stream().filter(item -> DeviationSeverityEnum.INFO.getCode().equals(item.getSeverity())).count());
+        statisticsVO.setTypeDistribution(buildDistribution(records, QualityDeviation::getDeviationType));
+        statisticsVO.setStatusDistribution(buildDistribution(records, QualityDeviation::getStatus));
+        statisticsVO.setProjectDistribution(buildProjectDistribution(records));
         return statisticsVO;
+    }
+
+    private LambdaQueryWrapper<QualityDeviation> buildWrapper(DeviationQueryRequest request) {
+        var wrapper = new LambdaQueryWrapper<QualityDeviation>();
+        if (StringUtils.hasText(request.getSpecId())) {
+            wrapper.eq(QualityDeviation::getSpecId, request.getSpecId());
+        }
+        if (StringUtils.hasText(request.getWorkspaceId())) {
+            List<String> specIds = specMapper.selectList(new LambdaQueryWrapper<Spec>()
+                            .eq(Spec::getProjectId, request.getWorkspaceId())
+                            .or()
+                            .apply("workspace_ids::text like {0}", "%" + request.getWorkspaceId() + "%"))
+                    .stream()
+                    .map(Spec::getId)
+                    .filter(StringUtils::hasText)
+                    .toList();
+            if (specIds.isEmpty()) {
+                wrapper.eq(QualityDeviation::getId, "__none__");
+            } else {
+                wrapper.in(QualityDeviation::getSpecId, specIds);
+            }
+        }
+        if (StringUtils.hasText(request.getDeviationType())) {
+            wrapper.eq(QualityDeviation::getDeviationType, request.getDeviationType());
+        }
+        if (StringUtils.hasText(request.getSeverity())) {
+            wrapper.eq(QualityDeviation::getSeverity, request.getSeverity());
+        }
+        if (StringUtils.hasText(request.getStatus())) {
+            wrapper.eq(QualityDeviation::getStatus, request.getStatus());
+        }
+        if (StringUtils.hasText(request.getKeyword())) {
+            wrapper.and(w -> w.like(QualityDeviation::getTitle, request.getKeyword())
+                    .or().like(QualityDeviation::getDescription, request.getKeyword()));
+        }
+        wrapper.orderByDesc(QualityDeviation::getCreatedAt);
+        return wrapper;
+    }
+
+    private List<DeviationVO> enrich(List<QualityDeviation> entities) {
+        List<DeviationVO> result = deviationConverter.toVOList(entities);
+        Map<String, Spec> specMap = loadSpecMap(entities.stream().map(QualityDeviation::getSpecId).toList());
+        Map<String, Workspace> workspaceMap = loadWorkspaceMap(specMap.values().stream()
+                .map(Spec::getProjectId)
+                .filter(StringUtils::hasText)
+                .toList());
+        Map<String, User> userMap = loadUserMap(entities.stream().map(QualityDeviation::getResolvedBy).toList());
+        for (DeviationVO vo : result) {
+            Spec spec = specMap.get(vo.getSpecId());
+            if (spec != null) {
+                vo.setSpecName(spec.getName());
+                vo.setWorkspaceId(spec.getProjectId());
+                Workspace workspace = workspaceMap.get(spec.getProjectId());
+                if (workspace != null) {
+                    vo.setProjectName(workspace.getName());
+                }
+            }
+            if (StringUtils.hasText(vo.getResolvedByName())) {
+                continue;
+            }
+            QualityDeviation entity = entities.stream().filter(item -> Objects.equals(item.getId(), vo.getId())).findFirst().orElse(null);
+            if (entity != null) {
+                vo.setSourceType(entity.getSourceType());
+                vo.setTaskId(entity.getTaskId());
+                if (StringUtils.hasText(entity.getResolvedBy())) {
+                    User user = userMap.get(entity.getResolvedBy());
+                    vo.setResolvedByName(user != null && StringUtils.hasText(user.getRealName()) ? user.getRealName() : entity.getResolvedBy());
+                }
+            }
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> buildDistribution(List<QualityDeviation> records,
+                                                        java.util.function.Function<QualityDeviation, String> keyExtractor) {
+        return records.stream()
+                .collect(Collectors.groupingBy(keyExtractor, LinkedHashMap::new, Collectors.counting()))
+                .entrySet()
+                .stream()
+                .map(entry -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("key", entry.getKey());
+                    item.put("count", entry.getValue());
+                    return item;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private List<Map<String, Object>> buildProjectDistribution(List<QualityDeviation> records) {
+        Map<String, Spec> specMap = loadSpecMap(records.stream().map(QualityDeviation::getSpecId).toList());
+        Map<String, Workspace> workspaceMap = loadWorkspaceMap(specMap.values().stream()
+                .map(Spec::getProjectId)
+                .filter(StringUtils::hasText)
+                .toList());
+        Map<String, Long> grouped = new LinkedHashMap<>();
+        for (QualityDeviation record : records) {
+            Spec spec = specMap.get(record.getSpecId());
+            String projectName = "未关联项目";
+            if (spec != null && StringUtils.hasText(spec.getProjectId())) {
+                Workspace workspace = workspaceMap.get(spec.getProjectId());
+                if (workspace != null) {
+                    projectName = workspace.getName();
+                }
+            }
+            grouped.merge(projectName, 1L, Long::sum);
+        }
+        List<Map<String, Object>> distribution = new ArrayList<>();
+        grouped.forEach((key, value) -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("key", key);
+            item.put("count", value);
+            distribution.add(item);
+        });
+        return distribution;
+    }
+
+    private Map<String, Spec> loadSpecMap(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Map.of();
+        }
+        return specMapper.selectBatchIds(new ArrayList<>(ids)).stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toMap(Spec::getId, item -> item, (left, right) -> left, LinkedHashMap::new));
+    }
+
+    private Map<String, Workspace> loadWorkspaceMap(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Map.of();
+        }
+        return workspaceMapper.selectBatchIds(new ArrayList<>(ids)).stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toMap(Workspace::getId, item -> item, (left, right) -> left, LinkedHashMap::new));
+    }
+
+    private Map<String, User> loadUserMap(Collection<String> ids) {
+        List<String> userIds = ids == null ? List.of() : ids.stream().filter(StringUtils::hasText).toList();
+        if (userIds.isEmpty()) {
+            return Map.of();
+        }
+        return userMapper.selectBatchIds(new ArrayList<>(userIds)).stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toMap(User::getId, item -> item, (left, right) -> left, LinkedHashMap::new));
     }
 }

@@ -46,6 +46,15 @@ public class GitWorkspaceOrchestrator {
                                                                              String userId,
                                                                              String executionId,
                                                                              String baseBranch) {
+        return prepareIsolatedWorkspace(tenantId, workspaceId, userId, executionId, baseBranch, null);
+    }
+
+    public WorkspaceSessionService.WorkspaceSession prepareIsolatedWorkspace(String tenantId,
+                                                                             String workspaceId,
+                                                                             String userId,
+                                                                             String executionId,
+                                                                             String baseBranch,
+                                                                             String preferredBranch) {
         if (!StringUtils.hasText(tenantId) || !StringUtils.hasText(workspaceId) || !StringUtils.hasText(executionId)) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "隔离工作空间参数不完整");
         }
@@ -53,7 +62,9 @@ public class GitWorkspaceOrchestrator {
         Path workspaceRoot = workspacePathResolver.resolveWorkspacePath(tenantId, workspaceId);
         Path mirrorPath = workspaceRoot.resolve(".mirror.git");
         Path worktreePath = workspaceRoot.resolve(".worktrees").resolve(executionId);
-        String branchName = buildExecutionBranch(userId, executionId);
+        String branchName = StringUtils.hasText(preferredBranch)
+                ? preferredBranch.trim()
+                : buildExecutionBranch(userId, executionId);
         String startBranch = StringUtils.hasText(baseBranch) ? baseBranch : defaultBaseBranch;
 
         try {

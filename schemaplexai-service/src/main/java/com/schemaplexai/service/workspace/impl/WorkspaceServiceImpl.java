@@ -100,6 +100,7 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         wrapper.orderByDesc(Workspace::getCreatedAt);
 
         var result = workspaceMapper.selectPage(page, wrapper);
+        result.getRecords().forEach(this::refreshDiskUsage);
         return new PageResult<>(workspaceConverter.toVOList(result.getRecords()),
                 result.getTotal(), result.getCurrent(), result.getSize());
     }
@@ -107,6 +108,7 @@ public class WorkspaceServiceImpl implements WorkspaceService {
     @Override
     public WorkspaceVO getById(String id) {
         Workspace workspace = entityValidator.requireExists(workspaceMapper, id, ResultCode.WORKSPACE_NOT_FOUND);
+        refreshDiskUsage(workspace);
         return workspaceConverter.toVO(workspace);
     }
 
@@ -239,6 +241,25 @@ public class WorkspaceServiceImpl implements WorkspaceService {
 
         log.info("创建本地工作空间成功: workspaceId={}, path={}", workspace.getId(), localPath);
         return getById(workspace.getId());
+    }
+
+    private void refreshDiskUsage(Workspace workspace) {
+        if (!StringUtils.hasText(workspace.getLocalPath())) {
+            return;
+        }
+        try {
+            Path localPath = resolveAndValidateSyncPath(workspace);
+            long diskUsageMb = gitOperationService.calculateDiskUsageMb(localPath.toString());
+            if (!java.util.Objects.equals(workspace.getDiskUsageMb(), diskUsageMb)) {
+                Workspace patch = new Workspace();
+                patch.setId(workspace.getId());
+                patch.setDiskUsageMb(diskUsageMb);
+                workspaceMapper.updateById(patch);
+                workspace.setDiskUsageMb(diskUsageMb);
+            }
+        } catch (Exception ex) {
+            log.warn("实时计算工作空间磁盘占用失败: workspaceId={}", workspace.getId(), ex);
+        }
     }
 
     private Path resolveAndValidateSyncPath(Workspace workspace) {

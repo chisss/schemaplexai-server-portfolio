@@ -1,5 +1,6 @@
 package com.schemaplexai.service.knowledge.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -10,12 +11,13 @@ import com.schemaplexai.service.knowledge.KnowledgeDocumentService;
 import com.schemaplexai.service.memory.rag.DocumentIngestionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.InputStream;
+import java.io.ByteArrayInputStream;
+import java.util.List;
 
 /**
  * 知识文档管理服务实现
@@ -27,6 +29,7 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
 
     private final KnowledgeDocumentMapper documentMapper;
     private final DocumentIngestionService documentIngestionService;
+    private final TaskExecutor taskExecutor;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -50,16 +53,32 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         document.setCreatedBy(SecurityUtil.getCurrentUserId());
         documentMapper.insert(document);
 
-        asyncIngestDocument(document.getId(), document.getTenantId(), contextId, file);
+        byte[] fileBytes;
+        try {
+            fileBytes = file.getBytes();
+        } catch (Exception e) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "读取上传文件失败");
+        }
+        String originalFilename = file.getOriginalFilename();
+        taskExecutor.execute(() -> ingestDocumentAsync(document.getId(), document.getTenantId(), contextId, fileBytes, originalFilename));
 
         return toVO(document);
     }
 
-    @Async
-    protected void asyncIngestDocument(String documentId, String tenantId, String contextId, MultipartFile file) {
-        try (InputStream inputStream = file.getInputStream()) {
+    @Override
+    public List<KnowledgeDocumentVO> listByContextId(String contextId) {
+        return documentMapper.selectList(new LambdaQueryWrapper<KnowledgeDocument>()
+                        .eq(KnowledgeDocument::getContextId, contextId)
+                        .orderByDesc(KnowledgeDocument::getCreatedAt))
+                .stream()
+                .map(this::toVO)
+                .toList();
+    }
+
+    protected void ingestDocumentAsync(String documentId, String tenantId, String contextId, byte[] fileBytes, String fileName) {
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(fileBytes)) {
             documentIngestionService.ingestDocument(
-                    documentId, tenantId, contextId, inputStream, file.getOriginalFilename()
+                    documentId, tenantId, contextId, inputStream, fileName
             );
         } catch (Exception e) {
             log.error("异步摄入文档失败: documentId={}, error={}", documentId, e.getMessage(), e);
@@ -92,6 +111,8 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         vo.setFileSize(entity.getFileSize());
         vo.setStatus(entity.getStatus());
         vo.setChunkCount(entity.getChunkCount());
+        vo.setTotalTokens(entity.getTotalTokens());
+        vo.setEmbeddingModel(entity.getEmbeddingModel());
         vo.setErrorMessage(entity.getErrorMessage());
         vo.setCreatedAt(entity.getCreatedAt());
         vo.setUpdatedAt(entity.getUpdatedAt());

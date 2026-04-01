@@ -27,6 +27,7 @@ public class QualityTask extends BaseEntity {
     private String agentExecutionId;
     private String profileId;
     private String profileCode;
+    private String workflowTemplateId;
     private String status;
     private Integer progress;
     private Integer totalItems;

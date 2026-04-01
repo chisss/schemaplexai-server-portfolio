@@ -1,30 +1,44 @@
 package com.schemaplexai.service.workflow.engine;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.NodeTypeEnum;
+import com.schemaplexai.common.enums.SpecStatusEnum;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
+import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
+import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
+import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.entity.WorkflowNodeExecution;
+import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.mq.AgentContextPublisher;
+import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import com.schemaplexai.service.mq.message.ApprovalNotificationMessage;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import com.schemaplexai.service.workflow.engine.assembler.WorkflowNodeContextAssembler;
 import com.schemaplexai.service.workflow.engine.handler.DeviationAnalysisHandler;
 import com.schemaplexai.service.workflow.engine.handler.QualityReportHandler;
+import com.schemaplexai.service.workflow.runtime.WorkflowArtifactService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -56,12 +70,17 @@ public class WorkflowNodeEngine {
     private final WorkflowInstanceMapper instanceMapper;
     private final WorkflowNodeExecutionMapper nodeExecutionMapper;
     private final AgentExecutionMapper agentExecutionMapper;
-    private final AgentExecutionEngine agentExecutionEngine;
+    private final AgentMapper agentMapper;
+    private final SpecMapper specMapper;
+    private final ObjectProvider<AgentExecutionEngine> agentExecutionEngineProvider;
     private final AgentContextPublisher agentContextPublisher;
     private final RabbitTemplate rabbitTemplate;
     private final DeviationAnalysisHandler deviationAnalysisHandler;
     private final QualityReportHandler qualityReportHandler;
     private final WorkflowNodeContextAssembler contextAssembler;
+    private final WorkflowArtifactService workflowArtifactService;
+    private final BuiltinQualityAssuranceService builtinQualityAssuranceService;
+    private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
 
     /**
      * 自注入自身代理，用于让 @Async 注解在同类方法调用时生效（绕过 Spring AOP 自调用限制）
@@ -90,7 +109,7 @@ public class WorkflowNodeEngine {
 
         if (nodes.isEmpty()) {
             log.warn("工作流节点为空: instanceId={}", instance.getId());
-            completeWorkflowInstance(instance, WorkflowInstanceStatusEnum.COMPLETED.getCode());
+            completeWorkflowInstance(instance.getId(), WorkflowInstanceStatusEnum.COMPLETED.getCode(), null);
             return;
         }
 
@@ -103,7 +122,7 @@ public class WorkflowNodeEngine {
         }
 
         updateCurrentNode(instance.getId(), startNodeId);
-        self.driveNode(instance, startNodeId, nodes, edges, new HashMap<>());
+        driveNodeAfterCommit(instance, startNodeId, nodes, edges, new HashMap<>());
     }
 
     /**
@@ -130,13 +149,13 @@ public class WorkflowNodeEngine {
         List<String> nextNodeIds = findNextNodes(completedNodeId, edges);
         if (nextNodeIds.isEmpty()) {
             log.info("节点 {} 没有后继节点，工作流自然结束: instanceId={}", completedNodeId, instanceId);
-            completeWorkflowInstance(instance, WorkflowInstanceStatusEnum.COMPLETED.getCode());
+            completeWorkflowInstance(instance.getId(), WorkflowInstanceStatusEnum.COMPLETED.getCode(), completedNodeId);
             return;
         }
 
         for (String nextNodeId : nextNodeIds) {
             updateCurrentNode(instanceId, nextNodeId);
-            self.driveNode(instance, nextNodeId, nodes, edges, outputData);
+            driveNodeAfterCommit(instance, nextNodeId, nodes, edges, outputData);
         }
     }
 
@@ -152,6 +171,7 @@ public class WorkflowNodeEngine {
 
         Map<String, Object> outputData = new HashMap<>();
         outputData.put("agentStatus", agentExecutionStatus);
+        outputData.put("result", result);
         outputData.put("agentResult", result);
         outputData.put("completedAt", LocalDateTime.now().toString());
 
@@ -159,6 +179,11 @@ public class WorkflowNodeEngine {
                 || AgentExecutionStatusEnum.STOPPED.getCode().equals(agentExecutionStatus);
 
         if (agentSucceeded) {
+            WorkflowInstance instance = instanceMapper.selectById(instanceId);
+            if (instance != null) {
+                outputData.putAll(workflowArtifactService.persistAgentArtifactIfNecessary(instance, nodeExec, result));
+                outputData.putAll(builtinQualityAssuranceService.analyzeAgentNode(instance, nodeExec, result));
+            }
             completeNodeExecution(nodeExec, outputData);
             advanceWorkflow(instanceId, nodeId, outputData);
         } else {
@@ -167,6 +192,7 @@ public class WorkflowNodeEngine {
             nodeExec.setCompletedAt(LocalDateTime.now());
             nodeExec.setOutputData(outputData);
             nodeExecutionMapper.updateById(nodeExec);
+            failWorkflowInstance(instanceId, nodeId, "Agent执行失败: " + agentExecutionStatus);
             log.error("Agent节点执行失败: instanceId={}, nodeId={}, agentStatus={}", instanceId, nodeId, agentExecutionStatus);
         }
     }
@@ -228,6 +254,7 @@ public class WorkflowNodeEngine {
             nodeExec.setErrorMessage(e.getMessage());
             nodeExec.setCompletedAt(LocalDateTime.now());
             nodeExecutionMapper.updateById(nodeExec);
+            failWorkflowInstance(instance.getId(), nodeId, e.getMessage());
         }
     }
 
@@ -258,15 +285,37 @@ public class WorkflowNodeEngine {
             return;
         }
 
+        Agent agent = agentMapper.selectById(agentId);
+        if (agent == null) {
+            throw new IllegalStateException("Agent不存在: " + agentId);
+        }
+
         String contextStr = contextAssembler.buildAgentContextStr(instance, nodeExec.getInputData());
         String fullInstruction = StringUtils.hasText(taskInstruction)
                 ? taskInstruction + "\n\n## 当前流程上下文\n" + contextStr
                 : "执行任务：" + nodeExec.getNodeLabel() + "\n\n## 当前流程上下文\n" + contextStr;
 
+        SecurityCheckDecisionVO securityDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
+                buildNodeSecurityCheckRequest(instance, nodeExec, agentId, fullInstruction),
+                null
+        );
+        if (securityDecision != null && SecurityComplianceConstant.DECISION_BLOCK.equals(securityDecision.getDecision())) {
+            nodeExec.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
+            nodeExec.setErrorMessage(securityDecision.getMessage());
+            nodeExec.setOutputData(Map.of("securityDecision", securityDecision));
+            nodeExec.setCompletedAt(LocalDateTime.now());
+            nodeExecutionMapper.updateById(nodeExec);
+            failWorkflowInstance(instance.getId(), nodeExec.getNodeId(), securityDecision.getMessage());
+            return;
+        }
+
         AgentExecution agentExecution = new AgentExecution();
         agentExecution.setAgentId(agentId);
         agentExecution.setTenantId(instance.getTenantId());
         agentExecution.setInputPrompt(fullInstruction);
+        agentExecution.setInputContext(nodeExec.getInputData());
+        agentExecution.setSpecId(instance.getSpecId());
+        agentExecution.setAiModel(agent.getAiModel());
         agentExecution.setStatus(AgentExecutionStatusEnum.QUEUED.getCode());
         agentExecution.setCreatedAt(LocalDateTime.now());
         agentExecutionMapper.insert(agentExecution);
@@ -287,9 +336,16 @@ public class WorkflowNodeEngine {
                 .agentId(agentId)
                 .tenantId(tenantId)
                 .inputPrompt(fullInstruction)
+                .model(agent.getAiModel())
+                .agentModelType(agent.getAiModelType())
+                .agentModelGroupId(agent.getAiModelGroupId())
+                .inputContext(nodeExec.getInputData())
+                .maxMessages(18)
+                .maxRounds(6)
+                .maxToolCallsPerRound(4)
                 .build();
 
-        agentExecutionEngine.execute(ctx)
+        agentExecutionEngineProvider.getObject().execute(ctx)
                 .thenAccept(result -> {
                     String callbackStatus = result != null && StringUtils.hasText(result.getStatus())
                             ? result.getStatus() : AgentExecutionStatusEnum.FAILED.getCode();
@@ -317,6 +373,24 @@ public class WorkflowNodeEngine {
 
         log.info("Agent节点已触发异步执行: instanceId={}, nodeId={}, agentId={}, executionId={}",
                 instance.getId(), nodeId, agentId, executionId);
+    }
+
+    private SecurityRuntimeCheckRequest buildNodeSecurityCheckRequest(WorkflowInstance instance,
+                                                                      WorkflowNodeExecution nodeExec,
+                                                                      String agentId,
+                                                                      String content) {
+        var request = new SecurityRuntimeCheckRequest();
+        request.setScene(SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_NODE);
+        request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+        request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_NODE);
+        request.setResourceId(nodeExec.getId());
+        request.setResourceName(nodeExec.getNodeLabel());
+        request.setWorkflowInstanceId(instance.getId());
+        request.setWorkflowNodeId(nodeExec.getNodeId());
+        request.setAgentId(agentId);
+        request.setContent(content);
+        request.setContext(nodeExec.getInputData());
+        return request;
     }
 
     @SuppressWarnings("unchecked")
@@ -363,7 +437,7 @@ public class WorkflowNodeEngine {
     }
 
     private void handleEndNode(WorkflowInstance instance, WorkflowNodeExecution nodeExec) {
-        List<WorkflowNodeExecution> allExecs = nodeExecutionMapper.selectByInstanceId(instance.getId());
+        List<WorkflowNodeExecution> allExecs = listNodeExecutions(instance.getId());
         boolean hasQualityReport = allExecs.stream()
                 .anyMatch(e -> NodeTypeEnum.QUALITY_REPORT.getCode().equals(e.getNodeType())
                         && WorkflowInstanceStatusEnum.COMPLETED.getCode().equals(e.getStatus()));
@@ -377,7 +451,8 @@ public class WorkflowNodeEngine {
 
         completeNodeExecution(nodeExec, output);
         saveNodeOutput(instance, nodeExec.getNodeId(), output);
-        completeWorkflowInstance(instance, WorkflowInstanceStatusEnum.COMPLETED.getCode());
+        completeWorkflowInstance(instance.getId(), WorkflowInstanceStatusEnum.COMPLETED.getCode(), nodeExec.getNodeId());
+        archiveSpecAfterWorkflow(instance);
 
         log.info("工作流已完成: instanceId={}", instance.getId());
     }
@@ -434,11 +509,31 @@ public class WorkflowNodeEngine {
         }
     }
 
-    private void completeWorkflowInstance(WorkflowInstance instance, String status) {
-        instance.setStatus(status);
+    private void completeWorkflowInstance(String instanceId, String status, String finalNodeId) {
+        WorkflowInstance update = new WorkflowInstance();
+        update.setId(instanceId);
+        update.setStatus(status);
+        update.setCurrentNodeId(finalNodeId);
+        update.setCompletedAt(LocalDateTime.now());
+        update.setUpdatedAt(LocalDateTime.now());
+        instanceMapper.updateById(update);
+    }
+
+    private void failWorkflowInstance(String instanceId, String nodeId, String errorMessage) {
+        WorkflowInstance instance = instanceMapper.selectById(instanceId);
+        if (instance == null) {
+            return;
+        }
+        instance.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
         instance.setCompletedAt(LocalDateTime.now());
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
+
+        broadcastWorkflowEvent(instance.getTenantId(), "WORKFLOW_FAILED", Map.of(
+                "instanceId", instanceId,
+                "nodeId", nodeId,
+                "errorMessage", StringUtils.hasText(errorMessage) ? errorMessage : "unknown error"
+        ));
     }
 
     private void updateCurrentNode(String instanceId, String nodeId) {
@@ -447,6 +542,23 @@ public class WorkflowNodeEngine {
         update.setCurrentNodeId(nodeId);
         update.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(update);
+    }
+
+    private void archiveSpecAfterWorkflow(WorkflowInstance instance) {
+        if (instance == null || !StringUtils.hasText(instance.getSpecId())) {
+            return;
+        }
+        String triggerType = instance.getVariables() != null
+                ? str(instance.getVariables(), "triggerType") : null;
+        if (!"spec-review".equalsIgnoreCase(triggerType)) {
+            return;
+        }
+
+        Spec update = new Spec();
+        update.setId(instance.getSpecId());
+        update.setStatus(SpecStatusEnum.ARCHIVED.getCode());
+        update.setUpdatedAt(LocalDateTime.now());
+        specMapper.updateById(update);
     }
 
     private void saveNodeOutput(WorkflowInstance instance, String nodeId, Map<String, Object> outputData) {
@@ -490,16 +602,37 @@ public class WorkflowNodeEngine {
     }
 
     private WorkflowNodeExecution findNodeExecution(String instanceId, String nodeId) {
-        return nodeExecutionMapper.selectByInstanceId(instanceId).stream()
+        return listNodeExecutions(instanceId).stream()
                 .filter(e -> nodeId.equals(e.getNodeId()))
                 .findFirst()
                 .orElse(null);
     }
 
+    private List<WorkflowNodeExecution> listNodeExecutions(String instanceId) {
+        return nodeExecutionMapper.selectList(new LambdaQueryWrapper<WorkflowNodeExecution>()
+                .eq(WorkflowNodeExecution::getInstanceId, instanceId)
+                .orderByAsc(WorkflowNodeExecution::getCreatedAt));
+    }
+
+    private void driveNodeAfterCommit(WorkflowInstance instance, String nodeId,
+                                      List<Map<String, Object>> nodes, List<Map<String, Object>> edges,
+                                      Map<String, Object> previousOutput) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            self.driveNode(instance, nodeId, nodes, edges, previousOutput);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                self.driveNode(instance, nodeId, nodes, edges, previousOutput);
+            }
+        });
+    }
+
     private void broadcastWorkflowEvent(String tenantId, String eventType, Map<String, Object> data) {
         try {
             Map<String, Object> message = Map.of("type", eventType, "tenantId", tenantId, "data", data);
-            rabbitTemplate.convertAndSend("sf.workflow.events", "", message);
+            rabbitTemplate.convertAndSend("sf.workflow", "workflow.event." + eventType.toLowerCase(), message);
             log.debug("发送工作流事件到MQ: type={}, tenantId={}", eventType, tenantId);
         } catch (Exception e) {
             log.warn("发送工作流事件失败: {}", e.getMessage());

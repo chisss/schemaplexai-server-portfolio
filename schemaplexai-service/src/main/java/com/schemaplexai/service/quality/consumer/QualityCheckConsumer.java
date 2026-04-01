@@ -1,10 +1,11 @@
 package com.schemaplexai.service.quality.consumer;
 
-import com.schemaplexai.service.quality.orchestrator.QualityOrchestrator;
+import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.util.Map;
 
@@ -16,7 +17,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class QualityCheckConsumer {
 
-    private final QualityOrchestrator qualityOrchestrator;
+    private final BuiltinQualityAssuranceService builtinQualityAssuranceService;
 
     @RabbitListener(queues = "sf.quality.check")
     public void handleQualityCheck(Map<String, Object> message) {
@@ -43,19 +44,22 @@ public class QualityCheckConsumer {
     }
 
     private void handleDeviationDetect(Map<String, Object> message) {
+        String taskId = (String) message.get("taskId");
         String specId = (String) message.get("specId");
         String agentExecutionId = (String) message.get("agentExecutionId");
+        String targetContent = (String) message.get("targetContent");
 
-        log.info("执行偏离检测: specId={}, agentExecutionId={}", specId, agentExecutionId);
-        qualityOrchestrator.executeDetection(specId, "structural", "");
+        log.info("执行偏离检测: taskId={}, specId={}, agentExecutionId={}", taskId, specId, agentExecutionId);
+        builtinQualityAssuranceService.handleDeviationMessage(taskId, specId, agentExecutionId, targetContent);
     }
 
     private void handleIntentDefectAnalyze(Map<String, Object> message) {
+        String taskId = (String) message.get("taskId");
         String specId = (String) message.get("specId");
         String docType = (String) message.get("docType");
 
-        log.info("执行意图缺陷分析: specId={}, docType={}", specId, docType);
-        qualityOrchestrator.executeDetection(specId, "intent", "");
+        log.info("执行意图缺陷分析: taskId={}, specId={}, docType={}", taskId, specId, docType);
+        builtinQualityAssuranceService.handleIntentMessage(taskId, specId, docType);
     }
 
     private void handleCrossReview(Map<String, Object> message) {
@@ -63,6 +67,8 @@ public class QualityCheckConsumer {
         String specId = (String) message.get("specId");
 
         log.info("执行交叉审查: reviewId={}, specId={}", reviewId, specId);
-        qualityOrchestrator.executeDetection(specId, "cross_review", "");
+        if (!StringUtils.hasText(reviewId)) {
+            log.warn("交叉审查消息缺少 reviewId，跳过");
+        }
     }
 }

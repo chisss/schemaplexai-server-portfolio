@@ -29,7 +29,8 @@ public enum ModelProviderEnum {
     ZHUPU("glm", "ZhuPu"),
     MINIMAX("minimax", "Minimax"),
     DEEPSEEK("deepseek", "DeepSeek"),
-    CHATGPT("chatgpt", "ChatGPT");
+    CHATGPT("chatgpt", "ChatGPT"),
+    DOUBAO("doubao", "Doubao");
 
     private final String code;
     private final String description;

@@ -41,7 +41,11 @@ public class DeviationAnalysisHandler {
         String specId = instance.getSpecId();
         Map<String, Object> variables = instance.getVariables();
 
-        List<WorkflowNodeExecution> allExecs = nodeExecutionMapper.selectByInstanceId(instance.getId());
+        List<WorkflowNodeExecution> allExecs = nodeExecutionMapper.selectList(
+                new LambdaQueryWrapper<WorkflowNodeExecution>()
+                        .eq(WorkflowNodeExecution::getInstanceId, instance.getId())
+                        .orderByAsc(WorkflowNodeExecution::getCreatedAt)
+        );
         List<String> agentOutputs = allExecs.stream()
                 .filter(e -> NodeTypeEnum.AGENT.getCode().equals(e.getNodeType())
                         && AgentExecutionStatusEnum.COMPLETED.getCode().equals(e.getStatus()))

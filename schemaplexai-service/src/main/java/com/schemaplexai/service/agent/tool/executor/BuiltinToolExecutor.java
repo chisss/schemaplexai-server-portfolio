@@ -9,6 +9,7 @@ import com.schemaplexai.service.agent.tool.executor.os.CommandValidator;
 import com.schemaplexai.service.agent.tool.executor.os.ShellCommandAdapter;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.common.model.ToolResult;
+import com.schemaplexai.service.workspace.WorkspacePathResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -17,6 +18,7 @@ import org.springframework.util.StringUtils;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,6 +46,7 @@ public class BuiltinToolExecutor implements ToolExecutor {
     private final List<ShellCommandAdapter> adapters;
     private final CommandValidator commandValidator;
     private final ToolExecutionLogService logService;
+    private final WorkspacePathResolver workspacePathResolver;
 
     @Override
     public String sourceType() {
@@ -93,6 +96,10 @@ public class BuiltinToolExecutor implements ToolExecutor {
             }
 
             ProcessBuilder processBuilder = new ProcessBuilder(adapter.wrapShellCommand(command));
+            Path workingDirectory = resolveWorkingDirectory(args);
+            if (workingDirectory != null) {
+                processBuilder.directory(workingDirectory.toFile());
+            }
             processBuilder.redirectErrorStream(true);
             Process process = processBuilder.start();
             FutureTask<String> outputTask = new FutureTask<>(() -> readProcessOutput(process));
@@ -170,6 +177,17 @@ public class BuiltinToolExecutor implements ToolExecutor {
             copy.put("command", "[REDACTED]");
         }
         return copy;
+    }
+
+    private Path resolveWorkingDirectory(Map<String, Object> args) {
+        if (args == null || !args.containsKey("workdir")) {
+            return null;
+        }
+        String workdir = String.valueOf(args.get("workdir")).trim();
+        if (!StringUtils.hasText(workdir)) {
+            return null;
+        }
+        return workspacePathResolver.validateWithinWorkspaceRoot(workdir);
     }
 
     private ToolResult failure(ToolCall toolCall, String message) {

@@ -24,8 +24,11 @@ public class Budget implements Serializable {
     /** 预算周期: daily/monthly/quarterly */
     private String budgetCycle;
     private BigDecimal budgetAmount;
+    @TableField("alert_threshold_50")
     private Boolean alertThreshold50;
+    @TableField("alert_threshold_80")
     private Boolean alertThreshold80;
+    @TableField("alert_threshold_100")
     private Boolean alertThreshold100;
     /** 超限策略: alert/downgrade/block */
     private String overLimitStrategy;

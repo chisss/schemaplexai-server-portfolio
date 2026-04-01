@@ -6,10 +6,13 @@ import com.schemaplexai.common.enums.SpecStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.SpecDocumentMapper;
 import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.dao.mapper.SpecVersionMapper;
+import com.schemaplexai.dao.mapper.UserMapper;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
+import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
 import com.schemaplexai.model.converter.SpecConverter;
 import com.schemaplexai.model.converter.SpecDocumentConverter;
 import com.schemaplexai.model.dto.spec.SpecCreateRequest;
@@ -20,17 +23,19 @@ import com.schemaplexai.model.dto.spec.SpecUpdateRequest;
 import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.entity.SpecDocument;
 import com.schemaplexai.model.entity.SpecVersion;
+import com.schemaplexai.model.entity.User;
 import com.schemaplexai.model.entity.WorkflowInstance;
+import com.schemaplexai.model.entity.WorkflowTemplate;
 import com.schemaplexai.model.vo.spec.SpecDiffVO;
 import com.schemaplexai.model.vo.spec.SpecDocumentVO;
 import com.schemaplexai.model.vo.spec.SpecVO;
 import com.schemaplexai.model.vo.spec.SpecVersionVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
-import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.service.common.EntityValidator;
+import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import com.schemaplexai.service.spec.SpecService;
-import com.schemaplexai.service.spec.validator.SpecStatusValidator;
 import com.schemaplexai.service.spec.handler.SpecVersionHandler;
+import com.schemaplexai.service.spec.validator.SpecStatusValidator;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
 import com.schemaplexai.service.mq.message.WorkflowTriggerMessage;
 import lombok.RequiredArgsConstructor;
@@ -38,13 +43,19 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Spec管理服务实现 — 编排器模式
@@ -62,8 +73,11 @@ public class SpecServiceImpl implements SpecService {
     private final SpecStatusValidator specStatusValidator;
     private final SpecVersionHandler specVersionHandler;
     private final EntityValidator entityValidator;
+    private final UserMapper userMapper;
     private final WorkflowInstanceMapper workflowInstanceMapper;
+    private final WorkflowTemplateMapper workflowTemplateMapper;
     private final WorkflowInstanceService workflowInstanceService;
+    private final BuiltinQualityAssuranceService builtinQualityAssuranceService;
     private final RabbitTemplate rabbitTemplate;
 
     @Override
@@ -84,6 +98,9 @@ public class SpecServiceImpl implements SpecService {
         if (StringUtils.hasText(request.getCategory())) {
             wrapper.eq(Spec::getCategory, request.getCategory());
         }
+        if (StringUtils.hasText(request.getPriority())) {
+            wrapper.eq(Spec::getPriority, request.getPriority());
+        }
         if (StringUtils.hasText(request.getOwner())) {
             wrapper.eq(Spec::getOwner, request.getOwner());
         }
@@ -93,7 +110,7 @@ public class SpecServiceImpl implements SpecService {
         wrapper.orderByDesc(Spec::getCreatedAt);
 
         var result = specMapper.selectPage(page, wrapper);
-        var voList = specConverter.toVOList(result.getRecords());
+        var voList = enrichSpecVOs(specConverter.toVOList(result.getRecords()));
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
 
@@ -108,6 +125,9 @@ public class SpecServiceImpl implements SpecService {
     public SpecVO createSpec(SpecCreateRequest request) {
         var spec = specConverter.fromCreateRequest(request);
         spec.setOwner(SecurityUtil.getCurrentUserId());
+        spec.setPriority(StringUtils.hasText(request.getPriority()) ? request.getPriority() : "medium");
+        spec.setProjectId(resolvePrimaryWorkspaceId(request));
+        spec.setTargetBranch(resolveTargetBranch(request.getJiraTicket(), request.getTargetBranch()));
         specMapper.insert(spec);
 
         log.info("创建Spec成功: specId={}, name={}", spec.getId(), spec.getName());
@@ -124,9 +144,14 @@ public class SpecServiceImpl implements SpecService {
         updateEntity.setId(id);
         updateEntity.setName(request.getName());
         updateEntity.setCategory(request.getCategory());
+        if (StringUtils.hasText(request.getPriority())) {
+            updateEntity.setPriority(request.getPriority());
+        }
         updateEntity.setDescription(request.getDescription());
         updateEntity.setTags(request.getTags());
         updateEntity.setWorkflowId(request.getWorkflowId());
+        updateEntity.setJiraTicket(request.getJiraTicket());
+        updateEntity.setTargetBranch(resolveTargetBranch(request.getJiraTicket(), request.getTargetBranch()));
         specMapper.updateById(updateEntity);
 
         log.info("更新Spec成功: specId={}", id);
@@ -157,24 +182,12 @@ public class SpecServiceImpl implements SpecService {
     public void submitForReview(String id, String docType) {
         var spec = entityValidator.requireExists(specMapper, id, ResultCode.SPEC_NOT_FOUND);
         specVersionHandler.requireDocumentExists(id, docType);
+        var qualitySummary = builtinQualityAssuranceService.analyzeIntentDefects(id, docType);
         var targetStatus = specStatusValidator.resolveReviewStatus(docType);
         specStatusValidator.validateTransition(spec.getStatus(), targetStatus);
         updateSpecStatus(id, targetStatus);
-        log.info("Spec提交审批: specId={}, docType={}, newStatus={}", id, docType, targetStatus);
-
-        String requestId = UUID.randomUUID().toString();
-        WorkflowTriggerMessage message = WorkflowTriggerMessage.builder()
-                .specId(id)
-                .docType(docType)
-                .triggerType("spec-review")
-                .workflowTemplateId(spec.getWorkflowId())
-                .triggerBy(SecurityUtil.getCurrentUserId())
-                .tenantId(SecurityUtil.getCurrentTenantId())
-                .triggeredAt(LocalDateTime.now())
-                .requestId(requestId)
-                .build();
-        rabbitTemplate.convertAndSend("sf.workflow", "workflow.trigger.spec-review", message);
-        log.info("已发送工作流触发消息: specId={}, triggerType=spec-review, requestId={}", id, requestId);
+        log.info("Spec提交审批: specId={}, docType={}, newStatus={}, qualitySummary={}",
+                id, docType, targetStatus, qualitySummary.get("qualitySummary"));
     }
 
     @Override
@@ -185,6 +198,9 @@ public class SpecServiceImpl implements SpecService {
         specStatusValidator.validateTransition(spec.getStatus(), targetStatus);
         updateSpecStatus(id, targetStatus);
         log.info("Spec审批通过: specId={}, newStatus={}", id, targetStatus);
+        if (SpecStatusEnum.REQUIREMENTS_APPROVED.getCode().equals(targetStatus)) {
+            triggerWorkflow(spec);
+        }
     }
 
     @Override
@@ -303,11 +319,27 @@ public class SpecServiceImpl implements SpecService {
         specMapper.updateById(updateEntity);
     }
 
+    private void triggerWorkflow(Spec spec) {
+        String requestId = UUID.randomUUID().toString();
+        WorkflowTriggerMessage message = WorkflowTriggerMessage.builder()
+                .specId(spec.getId())
+                .docType("requirements")
+                .triggerType("spec-review")
+                .workflowTemplateId(spec.getWorkflowId())
+                .triggerBy(SecurityUtil.getCurrentUserId())
+                .tenantId(SecurityUtil.getCurrentTenantId())
+                .triggeredAt(LocalDateTime.now())
+                .requestId(requestId)
+                .build();
+        rabbitTemplate.convertAndSend("sf.workflow", "workflow.trigger.spec-review", message);
+        log.info("需求审批通过后已发送工作流触发消息: specId={}, requestId={}", spec.getId(), requestId);
+    }
+
     private SpecVO enrichWithDocuments(Spec spec) {
         var vo = specConverter.toVO(spec);
         var documents = specVersionHandler.getAllDocuments(spec.getId());
         vo.setDocuments(specDocumentConverter.toVOList(documents));
-        return vo;
+        return enrichSpecVOs(List.of(vo)).stream().findFirst().orElse(vo);
     }
 
     /**
@@ -362,5 +394,68 @@ public class SpecServiceImpl implements SpecService {
             result.add(tempList.get(k));
         }
         return result;
+    }
+
+    private String resolveTargetBranch(String jiraTicket, String targetBranch) {
+        if (StringUtils.hasText(targetBranch)) {
+            return targetBranch.trim();
+        }
+        if (StringUtils.hasText(jiraTicket)) {
+            return "feature/" + jiraTicket.trim().toUpperCase();
+        }
+        return null;
+    }
+
+    private String resolvePrimaryWorkspaceId(SpecCreateRequest request) {
+        if (request == null) {
+            return null;
+        }
+        if (!CollectionUtils.isEmpty(request.getWorkspaceIds())) {
+            return request.getWorkspaceIds().get(0);
+        }
+        return request.getProjectId();
+    }
+
+    private List<SpecVO> enrichSpecVOs(List<SpecVO> specs) {
+        if (specs == null || specs.isEmpty()) {
+            return List.of();
+        }
+        Map<String, User> ownerMap = loadUserMap(specs.stream()
+                .map(SpecVO::getOwner)
+                .filter(StringUtils::hasText)
+                .toList());
+        Map<String, WorkflowTemplate> workflowMap = loadWorkflowTemplateMap(specs.stream()
+                .map(SpecVO::getWorkflowId)
+                .filter(StringUtils::hasText)
+                .toList());
+        for (SpecVO spec : specs) {
+            User owner = ownerMap.get(spec.getOwner());
+            if (owner != null) {
+                spec.setOwnerName(StringUtils.hasText(owner.getRealName()) ? owner.getRealName() : owner.getUsername());
+            }
+            WorkflowTemplate workflowTemplate = workflowMap.get(spec.getWorkflowId());
+            if (workflowTemplate != null) {
+                spec.setWorkflowName(workflowTemplate.getName());
+            }
+        }
+        return specs;
+    }
+
+    private Map<String, User> loadUserMap(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Map.of();
+        }
+        return userMapper.selectBatchIds(new ArrayList<>(ids)).stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toMap(User::getId, item -> item, (left, right) -> left, LinkedHashMap::new));
+    }
+
+    private Map<String, WorkflowTemplate> loadWorkflowTemplateMap(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Map.of();
+        }
+        return workflowTemplateMapper.selectBatchIds(new ArrayList<>(ids)).stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toMap(WorkflowTemplate::getId, item -> item, (left, right) -> left, LinkedHashMap::new));
     }
 }

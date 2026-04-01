@@ -23,8 +23,14 @@ public class SpecVO {
     /** 生命周期状态 */
     private String status;
 
+    /** 优先级 */
+    private String priority;
+
     /** Spec拥有者 */
     private String owner;
+
+    /** Spec拥有者名称 */
+    private String ownerName;
 
     /** 分类 */
     private String category;
@@ -50,6 +56,18 @@ public class SpecVO {
 
     /** 工作流模板名称 */
     private String workflowName;
+
+    /** 关联工作流实例ID */
+    private String workflowInstanceId;
+
+    /** Jira 或需求单号 */
+    private String jiraTicket;
+
+    /** 目标研发分支 */
+    private String targetBranch;
+
+    /** 工作流产出的文档路径 */
+    private String artifactDocPath;
 
     /** 创建时间 */
     private LocalDateTime createdAt;

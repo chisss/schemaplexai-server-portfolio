@@ -1,5 +1,6 @@
 package com.schemaplexai.model.vo.agent;
 
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -22,7 +23,7 @@ public class AgentExecuteResultVO {
     /** 会话 ID（用于多轮对话续接） */
     private String conversationId;
 
-    /** 提交状态: queued/failed */
+    /** 提交状态: queued/failed/blocked/paused */
     private String status;
 
     /** 入队时间 */
@@ -30,4 +31,7 @@ public class AgentExecuteResultVO {
 
     /** 结果消息 */
     private String message;
+
+    /** 安全检查决策 */
+    private SecurityCheckDecisionVO securityDecision;
 }

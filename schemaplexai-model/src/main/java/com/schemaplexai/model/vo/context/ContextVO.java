@@ -33,6 +33,21 @@ public class ContextVO {
     /** Token总量（汇总字段） */
     private Integer totalTokens;
 
+    /** 当前上下文是否已经完成过向量化 */
+    private Boolean vectorized;
+
+    /** 向量状态: none/processing/failed/completed */
+    private String vectorStatus;
+
+    /** 向量分块总数 */
+    private Integer vectorChunkCount;
+
+    /** 已上传知识文档数量 */
+    private Integer knowledgeDocumentCount;
+
+    /** 最近一次向量更新时间 */
+    private LocalDateTime vectorUpdatedAt;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

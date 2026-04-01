@@ -39,5 +39,7 @@ public interface SpecConverter {
     @Mapping(target = "updatedBy", ignore = true)
     @Mapping(target = "updatedAt", ignore = true)
     @Mapping(target = "deleted", ignore = true)
+    @Mapping(target = "workflowInstanceId", ignore = true)
+    @Mapping(target = "artifactDocPath", ignore = true)
     Spec fromCreateRequest(SpecCreateRequest request);
 }

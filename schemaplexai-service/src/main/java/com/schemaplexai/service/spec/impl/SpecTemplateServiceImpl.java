@@ -30,6 +30,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * Spec模板管理服务实现
@@ -38,6 +39,8 @@ import java.time.LocalDateTime;
 @Service
 @RequiredArgsConstructor
 public class SpecTemplateServiceImpl implements SpecTemplateService {
+
+    private static final String DEFAULT_PRIORITY = "medium";
 
     private final SpecTemplateMapper specTemplateMapper;
     private final SpecMapper specMapper;
@@ -119,11 +122,16 @@ public class SpecTemplateServiceImpl implements SpecTemplateService {
         spec.setName(request.getName());
         spec.setCategory(request.getCategory() != null ? request.getCategory() : template.getCategory());
         spec.setDescription(request.getDescription());
+        spec.setPriority(StringUtils.hasText(request.getPriority()) ? request.getPriority() : DEFAULT_PRIORITY);
         spec.setTags(request.getTags());
-        spec.setProjectId(request.getProjectId());
+        spec.setWorkspaceIds(request.getWorkspaceIds());
+        spec.setProjectId(resolvePrimaryWorkspaceId(request.getProjectId(), request.getWorkspaceIds()));
         spec.setVersion(CommonConstant.SPEC_INITIAL_VERSION);
         spec.setStatus(SpecStatusEnum.DRAFT.getCode());
         spec.setOwner(SecurityUtil.getCurrentUserId());
+        spec.setWorkflowId(request.getWorkflowId());
+        spec.setJiraTicket(request.getJiraTicket());
+        spec.setTargetBranch(resolveTargetBranch(request.getJiraTicket(), request.getTargetBranch()));
         specMapper.insert(spec);
 
         // 用模板内容创建对应类型的文档
@@ -146,5 +154,22 @@ public class SpecTemplateServiceImpl implements SpecTemplateService {
 
         log.info("从模板创建Spec: specId={}, templateId={}", spec.getId(), templateId);
         return specConverter.toVO(spec);
+    }
+
+    private String resolvePrimaryWorkspaceId(String projectId, List<String> workspaceIds) {
+        if (workspaceIds != null && !workspaceIds.isEmpty() && StringUtils.hasText(workspaceIds.getFirst())) {
+            return workspaceIds.getFirst();
+        }
+        return projectId;
+    }
+
+    private String resolveTargetBranch(String jiraTicket, String targetBranch) {
+        if (StringUtils.hasText(targetBranch)) {
+            return targetBranch.trim();
+        }
+        if (StringUtils.hasText(jiraTicket)) {
+            return "feature/" + jiraTicket.trim().toUpperCase();
+        }
+        return null;
     }
 }

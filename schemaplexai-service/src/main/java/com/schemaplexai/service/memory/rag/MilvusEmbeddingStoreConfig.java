@@ -5,7 +5,6 @@ import io.milvus.common.clientenum.ConsistencyLevelEnum;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
@@ -17,7 +16,7 @@ import org.springframework.context.annotation.Configuration;
  */
 @Slf4j
 @Configuration
-@ConditionalOnProperty(prefix = "milvus", name = "enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(prefix = "milvus", name = "legacy-store-enabled", havingValue = "true")
 public class MilvusEmbeddingStoreConfig {
 
     @Value("${milvus.host:localhost}")
@@ -32,7 +31,6 @@ public class MilvusEmbeddingStoreConfig {
     /** 向量维度，与 OpenAI text-embedding-3-small 一致 */
     private static final int DIMENSION = 1536;
 
-    @Bean(name = "milvusEmbeddingStore")
     public MilvusEmbeddingStore milvusEmbeddingStore() {
         String uri = String.format("http://%s:%d", host, port);
         log.info("初始化 LangChain4J MilvusEmbeddingStore: uri={}, collection={}", uri, COLLECTION_NAME);

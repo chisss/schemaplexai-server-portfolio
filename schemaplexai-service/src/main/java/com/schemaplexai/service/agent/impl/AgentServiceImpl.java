@@ -3,6 +3,7 @@ package com.schemaplexai.service.agent.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentStatusEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
@@ -17,17 +18,21 @@ import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
+import com.schemaplexai.dao.mapper.AiModelGroupItemMapper;
+import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.ChatMessageMapper;
 import com.schemaplexai.dao.mapper.ContextEntityMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.dao.mapper.McpServerMapper;
 import com.schemaplexai.dao.mapper.SkillMapper;
+import com.schemaplexai.dao.mapper.TeamTemplateMapper;
 import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.entity.Skill;
 import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextItem;
+import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.converter.AgentConfigConverter;
 import com.schemaplexai.model.converter.AgentContextBindingConverter;
 import com.schemaplexai.model.converter.AgentConverter;
@@ -43,6 +48,7 @@ import com.schemaplexai.model.dto.agent.AgentQueryRequest;
 import com.schemaplexai.model.dto.agent.AgentTeamMemberBatchRequest;
 import com.schemaplexai.model.dto.agent.AgentToolBindingBatchRequest;
 import com.schemaplexai.model.dto.agent.AgentUpdateRequest;
+import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
@@ -52,6 +58,8 @@ import com.schemaplexai.model.entity.AgentConfig;
 import com.schemaplexai.model.entity.AgentContextBinding;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentExecutionLog;
+import com.schemaplexai.model.entity.AiModel;
+import com.schemaplexai.model.entity.AiModelGroupItem;
 import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.AgentTeamMemberToolBinding;
@@ -68,10 +76,12 @@ import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentVO;
 import com.schemaplexai.model.vo.agent.AvailableToolVO;
 import com.schemaplexai.model.vo.agent.ConversationMessageVO;
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
 import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.validator.AgentValidator;
 import com.schemaplexai.service.common.EntityValidator;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -83,6 +93,7 @@ import java.time.LocalDateTime;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -106,9 +117,12 @@ public class AgentServiceImpl implements AgentService {
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentExecutionLogMapper agentExecutionLogMapper;
     private final ChatMessageMapper chatMessageMapper;
+    private final AiModelMapper aiModelMapper;
+    private final AiModelGroupItemMapper aiModelGroupItemMapper;
     private final BuiltinToolMapper builtinToolMapper;
     private final SkillMapper skillMapper;
     private final McpServerMapper mcpServerMapper;
+    private final TeamTemplateMapper teamTemplateMapper;
     private final AgentTeamMemberToolBindingMapper agentTeamMemberToolBindingMapper;
     private final AgentToolBindingMapper agentToolBindingMapper;
     private final AgentConverter agentConverter;
@@ -123,6 +137,7 @@ public class AgentServiceImpl implements AgentService {
     private final ContextItemMapper contextItemMapper;
     private final AgentExecutionEngine agentExecutionEngine;
     private final ExecutionEventStreamService executionEventStreamService;
+    private final SecurityRuntimeGuardService securityRuntimeGuardService;
 
     @Override
     public PageResult<AgentVO> listAgents(AgentQueryRequest request) {
@@ -177,6 +192,7 @@ public class AgentServiceImpl implements AgentService {
 
         var result = agentMapper.selectPage(page, wrapper);
         var voList = agentConverter.toVOList(result.getRecords());
+        fillTemplateNames(voList);
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
 
@@ -185,7 +201,9 @@ public class AgentServiceImpl implements AgentService {
         var wrapper = new LambdaQueryWrapper<Agent>()
                 .orderByDesc(Agent::getCreatedAt);
         var agents = agentMapper.selectList(wrapper);
-        return agentConverter.toVOList(agents);
+        var voList = agentConverter.toVOList(agents);
+        fillTemplateNames(voList);
+        return voList;
     }
 
     @Override
@@ -198,6 +216,7 @@ public class AgentServiceImpl implements AgentService {
     @Transactional(rollbackFor = Exception.class)
     public AgentVO createAgent(AgentCreateRequest request) {
         agentValidator.validateNameUnique(request.getName());
+        validateAgentModelBinding(request.getAiModelType(), request.getAiModel(), request.getAiModelGroupId());
 
         var agent = agentConverter.fromCreateRequest(request);
         agent.setAgentTag(request.getAgentTag());
@@ -217,6 +236,7 @@ public class AgentServiceImpl implements AgentService {
     public AgentVO updateAgent(String id, AgentUpdateRequest request) {
         var agent = entityValidator.requireExists(agentMapper, id, ResultCode.AGENT_NOT_FOUND);
         agentValidator.validateNotBusy(agent);
+        validateAgentModelBinding(request.getAiModelType(), request.getAiModel(), request.getAiModelGroupId());
 
         // 名称变更时校验唯一性（排除自身）
         if (StringUtils.hasText(request.getName()) && !request.getName().equals(agent.getName())) {
@@ -379,11 +399,11 @@ public class AgentServiceImpl implements AgentService {
             }
         }
 
-        // 同步更新 workType
-        if (StringUtils.hasText(request.getWorkType())) {
+        // 同步更新团队模板编码；允许显式清空
+        if (request.getWorkType() != null) {
             var updateAgent = new Agent();
             updateAgent.setId(agentId);
-            updateAgent.setWorkType(request.getWorkType());
+            updateAgent.setWorkType(StringUtils.hasText(request.getWorkType()) ? request.getWorkType() : null);
             agentMapper.updateById(updateAgent);
         }
         // 回算配置完成状态（team 类型需同时满足团队成员和上下文绑定）
@@ -817,6 +837,7 @@ public class AgentServiceImpl implements AgentService {
      */
     private AgentVO enrichWithDetails(Agent agent) {
         var vo = agentConverter.toVO(agent);
+        fillTemplateNames(List.of(vo));
         // 附加配置
         var configs = agentConfigHandler.loadConfigs(agent.getId());
         vo.setConfigs(agentConfigConverter.toVOList(configs));
@@ -860,6 +881,80 @@ public class AgentServiceImpl implements AgentService {
         return vo;
     }
 
+    private void fillTemplateNames(List<AgentVO> agentVOs) {
+        if (CollectionUtils.isEmpty(agentVOs)) {
+            return;
+        }
+
+        List<String> templateCodes = agentVOs.stream()
+                .map(AgentVO::getWorkType)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
+        if (CollectionUtils.isEmpty(templateCodes)) {
+            return;
+        }
+
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        LambdaQueryWrapper<TeamTemplate> wrapper = new LambdaQueryWrapper<TeamTemplate>()
+                .in(TeamTemplate::getCode, templateCodes)
+                .eq(TeamTemplate::getStatus, CommonConstant.STATUS_ACTIVE);
+        if (StringUtils.hasText(tenantId)) {
+            wrapper.and(w -> w.isNull(TeamTemplate::getTenantId).or().eq(TeamTemplate::getTenantId, tenantId));
+        }
+
+        Map<String, String> templateNameMap = teamTemplateMapper.selectList(wrapper).stream()
+                .sorted(Comparator.comparing((TeamTemplate template) ->
+                        StringUtils.hasText(tenantId) && tenantId.equals(template.getTenantId()) ? 0 : 1))
+                .collect(Collectors.toMap(
+                        TeamTemplate::getCode,
+                        TeamTemplate::getName,
+                        (first, second) -> first,
+                        LinkedHashMap::new
+                ));
+
+        agentVOs.forEach(vo -> vo.setTemplateName(templateNameMap.get(vo.getWorkType())));
+    }
+
+    private void validateAgentModelBinding(String aiModelType, String aiModelName, String aiModelGroupId) {
+        if ("model_group".equals(aiModelType)) {
+            if (!StringUtils.hasText(aiModelGroupId)) {
+                return;
+            }
+            List<AiModelGroupItem> items = aiModelGroupItemMapper.selectList(new LambdaQueryWrapper<AiModelGroupItem>()
+                    .eq(AiModelGroupItem::getGroupId, aiModelGroupId));
+            if (CollectionUtils.isEmpty(items)) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "模型组内暂无可用模型");
+            }
+            List<String> modelIds = items.stream().map(AiModelGroupItem::getModelId).toList();
+            List<AiModel> models = aiModelMapper.selectList(new LambdaQueryWrapper<AiModel>()
+                    .in(AiModel::getId, modelIds));
+            boolean containsEmbeddingModel = models.stream()
+                    .anyMatch(model -> isEmbeddingUseCase(model.getUseCase()));
+            if (containsEmbeddingModel) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "Agent 不允许绑定向量模型组");
+            }
+            return;
+        }
+
+        if (!StringUtils.hasText(aiModelName)) {
+            return;
+        }
+        AiModel model = aiModelMapper.selectOne(new LambdaQueryWrapper<AiModel>()
+                .eq(AiModel::getName, aiModelName)
+                .last("LIMIT 1"));
+        if (model != null && isEmbeddingUseCase(model.getUseCase())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "Agent 不允许绑定向量模型");
+        }
+    }
+
+    private boolean isEmbeddingUseCase(String useCase) {
+        return StringUtils.hasText(useCase)
+                && ("embedding".equalsIgnoreCase(useCase)
+                || useCase.toLowerCase().contains("embedding")
+                || useCase.contains("向量"));
+    }
+
     // ==================== Agent 执行 ====================
 
     @Override
@@ -869,7 +964,6 @@ public class AgentServiceImpl implements AgentService {
             throw new BusinessException(ResultCode.AGENT_INACTIVE);
         }
 
-        // 先提交插入，再触发异步引擎，避免 @Transactional 未提交时异步线程读不到记录
         var execution = new AgentExecution();
         execution.setAgentId(agentId);
         execution.setInputPrompt(dto.getPrompt());
@@ -878,6 +972,55 @@ public class AgentServiceImpl implements AgentService {
         execution.setConversationId(dto.getConversationId());
         execution.setStatus(QUEUED);
         agentExecutionMapper.insert(execution);
+
+        SecurityCheckDecisionVO securityDecision = securityRuntimeGuardService.evaluate(
+                buildSecurityCheckRequest(agent, execution, dto),
+                null
+        );
+        if (securityDecision != null && "block".equals(securityDecision.getDecision())) {
+            var update = new AgentExecution();
+            update.setId(execution.getId());
+            update.setStatus(AgentExecutionStatusEnum.FAILED.getCode());
+            update.setErrorMessage("执行已被安全策略阻断");
+            update.setCompletedAt(LocalDateTime.now());
+            agentExecutionMapper.updateById(update);
+            executionEventStreamService.publish(AgentExecutionEvent.builder()
+                    .eventType("BLOCKED")
+                    .executionId(execution.getId())
+                    .message("执行已被安全策略阻断")
+                    .timestamp(Instant.now())
+                    .build());
+            return AgentExecuteResultVO.builder()
+                    .executionId(execution.getId())
+                    .conversationId(execution.getConversationId())
+                    .status("blocked")
+                    .queuedAt(execution.getCreatedAt())
+                    .message("执行已被安全策略阻断")
+                    .securityDecision(securityDecision)
+                    .build();
+        }
+        if (securityDecision != null && "pause".equals(securityDecision.getDecision())) {
+            var update = new AgentExecution();
+            update.setId(execution.getId());
+            update.setStatus(AgentExecutionStatusEnum.PAUSED.getCode());
+            update.setErrorMessage("执行因安全策略暂停，等待人工处理");
+            agentExecutionMapper.updateById(update);
+            executionEventStreamService.publish(AgentExecutionEvent.builder()
+                    .eventType("PAUSED")
+                    .executionId(execution.getId())
+                    .message("执行因安全策略暂停")
+                    .timestamp(Instant.now())
+                    .build());
+            return AgentExecuteResultVO.builder()
+                    .executionId(execution.getId())
+                    .conversationId(execution.getConversationId())
+                    .status("paused")
+                    .queuedAt(execution.getCreatedAt())
+                    .message("执行因安全策略暂停，等待人工处理")
+                    .securityDecision(securityDecision)
+                    .build();
+        }
+
         executionEventStreamService.publish(AgentExecutionEvent.builder()
                 .eventType("QUEUED")
                 .executionId(execution.getId())
@@ -885,7 +1028,6 @@ public class AgentServiceImpl implements AgentService {
                 .timestamp(Instant.now())
                 .build());
 
-        // 入队后立即异步触发执行引擎（insert 已自动提交，异步线程可直接读到该记录）
         agentExecutionEngine.execute(AgentExecutionContext.builder()
                 .executionId(execution.getId())
                 .agentId(agentId)
@@ -905,8 +1047,24 @@ public class AgentServiceImpl implements AgentService {
                 .conversationId(execution.getConversationId())
                 .status(QUEUED)
                 .queuedAt(execution.getCreatedAt())
-                .message("执行任务已提交，等待调度")
+                .message(securityDecision != null && "warn".equals(securityDecision.getDecision())
+                        ? "执行任务已提交，但命中安全告警，请关注风险提示"
+                        : "执行任务已提交，等待调度")
+                .securityDecision(securityDecision)
                 .build();
+    }
+
+    private SecurityRuntimeCheckRequest buildSecurityCheckRequest(Agent agent, AgentExecution execution, AgentExecuteDTO dto) {
+        var request = new SecurityRuntimeCheckRequest();
+        request.setScene(SecurityComplianceConstant.CHECK_SCENE_AGENT_EXECUTE);
+        request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+        request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION);
+        request.setResourceId(execution.getId());
+        request.setResourceName(agent.getName());
+        request.setAgentId(agent.getId());
+        request.setContent(dto.getPrompt());
+        request.setContext(dto.getContext());
+        return request;
     }
 
     @Override
@@ -1082,7 +1240,23 @@ public class AgentServiceImpl implements AgentService {
                         .isNotNull(AgentContextBinding::getContextId)
                         .last("LIMIT 1"));
         if (binding == null) {
-            throw new BusinessException(ResultCode.CONTEXT_NOT_FOUND);
+            // 自动创建上下文和绑定
+            var context = new ContextEntity();
+            context.setName("Agent 专属指令上下文");
+            context.setContextLevel("agent");
+            context.setProjectId(agentId);
+            context.setStatus(CommonConstant.STATUS_ACTIVE);
+            contextEntityMapper.insert(context);
+
+            binding = new AgentContextBinding();
+            binding.setAgentId(agentId);
+            binding.setContextId(context.getId());
+            binding.setSourceType("manual");
+            binding.setTitle("Agent 专属指令");
+            binding.setSortOrder(0);
+            binding.setStatus(CommonConstant.STATUS_ACTIVE);
+            agentContextBindingMapper.insert(binding);
+            log.info("自动创建Agent上下文绑定: agentId={}, contextId={}", agentId, context.getId());
         }
         String contextId = binding.getContextId();
         String title = org.springframework.util.StringUtils.hasText(dto.getTitle())

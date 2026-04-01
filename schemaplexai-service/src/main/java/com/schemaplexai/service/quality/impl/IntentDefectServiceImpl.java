@@ -3,13 +3,17 @@ package com.schemaplexai.service.quality.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.enums.IntentDefectTypeEnum;
 import com.schemaplexai.common.enums.IntentDefectStatusEnum;
+import com.schemaplexai.common.enums.SpecDocTypeEnum;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.IntentDefectMapper;
+import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.model.converter.IntentDefectConverter;
 import com.schemaplexai.model.dto.quality.IntentDefectAnalyzeRequest;
+import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.dto.quality.IntentDefectQueryRequest;
 import com.schemaplexai.model.entity.IntentDefect;
 import com.schemaplexai.model.vo.quality.AnalyzeTaskVO;
@@ -23,10 +27,15 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
@@ -42,6 +51,7 @@ public class IntentDefectServiceImpl implements IntentDefectService {
     private final IntentDefectConverter intentDefectConverter;
     private final EntityValidator entityValidator;
     private final RabbitTemplate rabbitTemplate;
+    private final SpecMapper specMapper;
 
     /** 合法的意图缺陷状态值 */
     private static final Set<String> VALID_STATUSES = Arrays.stream(IntentDefectStatusEnum.values())
@@ -102,14 +112,16 @@ public class IntentDefectServiceImpl implements IntentDefectService {
         wrapper.orderByDesc(IntentDefect::getCreatedAt);
 
         var result = intentDefectMapper.selectPage(page, wrapper);
-        var voList = intentDefectConverter.toVOList(result.getRecords());
+        var voList = enrich(result.getRecords());
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
 
     @Override
     public IntentDefectVO getById(String id) {
         var entity = entityValidator.requireExists(intentDefectMapper, id, ResultCode.INTENT_DEFECT_NOT_FOUND);
-        return intentDefectConverter.toVO(entity);
+        return enrich(List.of(entity)).stream()
+                .findFirst()
+                .orElseGet(() -> intentDefectConverter.toVO(entity));
     }
 
     @Override
@@ -129,5 +141,37 @@ public class IntentDefectServiceImpl implements IntentDefectService {
 
         intentDefectMapper.updateById(updateEntity);
         log.info("更新意图缺陷状态: defectId={}, newStatus={}", id, status);
+    }
+
+    private List<IntentDefectVO> enrich(List<IntentDefect> entities) {
+        List<IntentDefectVO> result = intentDefectConverter.toVOList(entities);
+        Map<String, Spec> specMap = loadSpecMap(entities.stream()
+                .map(IntentDefect::getSpecId)
+                .filter(StringUtils::hasText)
+                .toList());
+        Map<String, String> docTypeLabelMap = Arrays.stream(SpecDocTypeEnum.values())
+                .collect(Collectors.toMap(SpecDocTypeEnum::getCode, SpecDocTypeEnum::getDescription));
+        Map<String, String> defectTypeLabelMap = Arrays.stream(IntentDefectTypeEnum.values())
+                .collect(Collectors.toMap(IntentDefectTypeEnum::getCode, IntentDefectTypeEnum::getDescription));
+        for (IntentDefectVO vo : result) {
+            if (!StringUtils.hasText(vo.getSpecName())) {
+                Spec spec = specMap.get(vo.getSpecId());
+                if (spec != null) {
+                    vo.setSpecName(spec.getName());
+                }
+            }
+            vo.setDocTypeLabel(docTypeLabelMap.getOrDefault(vo.getDocType(), vo.getDocType()));
+            vo.setDefectTypeLabel(defectTypeLabelMap.getOrDefault(vo.getDefectType(), vo.getDefectType()));
+        }
+        return result;
+    }
+
+    private Map<String, Spec> loadSpecMap(List<String> specIds) {
+        if (specIds == null || specIds.isEmpty()) {
+            return Map.of();
+        }
+        return specMapper.selectBatchIds(new ArrayList<>(specIds)).stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toMap(Spec::getId, spec -> spec, (left, right) -> left, LinkedHashMap::new));
     }
 }

@@ -8,6 +8,8 @@ import com.schemaplexai.model.dto.workflow.WorkflowTemplateUpdateRequest;
 import com.schemaplexai.model.vo.workflow.WorkflowAiArrangeVO;
 import com.schemaplexai.model.vo.workflow.WorkflowTemplateVO;
 
+import java.util.List;
+
 /**
  * 工作流模板服务接口
  */
@@ -22,6 +24,8 @@ public interface WorkflowTemplateService {
     WorkflowTemplateVO getById(String id);
 
     PageResult<WorkflowTemplateVO> page(WorkflowTemplateQueryRequest query);
+
+    List<WorkflowTemplateVO> listAll();
 
     /** AI自动编排工作流节点 */
     WorkflowAiArrangeVO aiArrange(String templateId, WorkflowAiArrangeRequest request);

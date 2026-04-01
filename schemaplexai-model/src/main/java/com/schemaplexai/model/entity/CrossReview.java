@@ -18,6 +18,8 @@ public class CrossReview implements Serializable {
     private String tenantId;
     private String specId;
     private String taskId;
+    private String profileId;
+    private String issueType;
     private String modelAId;
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> modelAResult;
@@ -26,8 +28,15 @@ public class CrossReview implements Serializable {
     private Map<String, Object> modelBResult;
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> mergedResult;
+    private String sourceType;
+    private String sourceAgentId;
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> summary;
     /** 状态: pending/reviewing/completed/failed */
     private String status;
+    private LocalDateTime startedAt;
+    private LocalDateTime completedAt;
+    private String errorMessage;
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;
     @TableField(fill = FieldFill.INSERT)

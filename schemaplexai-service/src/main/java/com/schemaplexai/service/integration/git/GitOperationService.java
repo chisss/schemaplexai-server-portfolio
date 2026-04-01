@@ -15,13 +15,22 @@ import org.springframework.util.StringUtils;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
+
+import com.schemaplexai.model.vo.workspace.BranchDiffFileVO;
+import com.schemaplexai.model.vo.workspace.WorkspaceBranchDiffVO;
 
 /**
  * Git 操作服务
@@ -30,6 +39,8 @@ import java.util.stream.Stream;
 @Slf4j
 @Service
 public class GitOperationService {
+
+    private static final Set<String> DIFF_EXCLUDED_ROOTS = Set.of(".git", ".mirror.git", ".worktrees");
 
     @Value("${schemaplexai.workspace.root-path:/data/workspaces}")
     private String workspaceRootPath;
@@ -159,23 +170,28 @@ public class GitOperationService {
      * @param mirrorPath 裸仓库路径
      * @return 裸仓库Git对象
      */
-    public Git createBareMirror(String mirrorPath) throws GitAPIException, IOException {
+    public Git createBareMirror(String sourcePath, String mirrorPath) throws GitAPIException, IOException {
         Path path = Path.of(mirrorPath);
-        try {
-            Files.createDirectories(path);
-        } catch (IOException e) {
-            throw new IllegalStateException("无法创建裸仓库目录: " + mirrorPath, e);
-        }
-
         File dir = path.toFile();
         if (dir.exists() && dir.listFiles() != null && dir.listFiles().length > 0) {
             log.info("裸仓库已存在，直接打开: mirrorPath={}", mirrorPath);
             return Git.open(dir);
         }
 
-        Git git = Git.init()
+        try {
+            Path parent = path.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("无法创建裸仓库目录: " + mirrorPath, e);
+        }
+
+        Git git = Git.cloneRepository()
+                .setURI(Path.of(sourcePath).toUri().toString())
                 .setDirectory(dir)
                 .setBare(true)
+                .setCloneAllBranches(true)
                 .call();
         log.info("裸仓库创建成功: mirrorPath={}", mirrorPath);
         return git;
@@ -212,12 +228,15 @@ public class GitOperationService {
         // 通过 shell 命令执行 git worktree add
         // JGit 的 worktree API 需要通过 Process 执行
         try {
-            ProcessBuilder pb = new ProcessBuilder(
-                    "git", "worktree", "add",
-                    "-b", branchName,
-                    worktreePath,
-                    StringUtils.hasText(startBranch) ? startBranch : "HEAD"
-            );
+            boolean branchExists = branchExists(mirrorPath, branchName);
+            ProcessBuilder pb = branchExists
+                    ? new ProcessBuilder("git", "worktree", "add", "--force", worktreePath, branchName)
+                    : new ProcessBuilder(
+                            "git", "worktree", "add",
+                            "-b", branchName,
+                            worktreePath,
+                            StringUtils.hasText(startBranch) ? startBranch : "HEAD"
+                    );
             pb.directory(new File(mirrorPath));
             pb.redirectErrorStream(true);
             Process process = pb.start();
@@ -301,15 +320,51 @@ public class GitOperationService {
     public List<BranchInfo> listBranches(String worktreePath) throws IOException {
         log.info("列出分支: worktreePath={}", worktreePath);
         try (Git git = Git.open(new File(worktreePath))) {
-            List<BranchInfo> branches = new java.util.ArrayList<>();
+            Map<String, BranchInfo> branches = new java.util.LinkedHashMap<>();
+            String currentBranch = git.getRepository().getBranch();
             for (Ref ref : git.branchList().call()) {
                 String name = ref.getName();
                 String shortName = name.startsWith("refs/heads/") ? name.substring("refs/heads/".length()) : name;
-                boolean isCurrent = shortName.equals(git.getRepository().getBranch());
-                branches.add(new BranchInfo(shortName, isCurrent, ref.getObjectId().getName()));
+                boolean isCurrent = shortName.equals(currentBranch);
+                branches.put(shortName, new BranchInfo(shortName, isCurrent, ref.getObjectId().getName()));
+            }
+
+            for (String line : runGitCommandLines(worktreePath, "git", "for-each-ref", "--format=%(refname:short)|%(objectname)", "refs/heads")) {
+                if (!StringUtils.hasText(line) || !line.contains("|")) {
+                    continue;
+                }
+                String[] parts = line.split("\\|", 2);
+                String shortName = parts[0].trim();
+                if (!StringUtils.hasText(shortName)) {
+                    continue;
+                }
+                String commitId = parts.length > 1 ? parts[1].trim() : "";
+                BranchInfo existing = branches.get(shortName);
+                branches.put(shortName, new BranchInfo(
+                        shortName,
+                        existing != null ? existing.isCurrent() : shortName.equals(currentBranch),
+                        StringUtils.hasText(commitId) ? commitId : (existing == null ? "" : existing.commitId())
+                ));
+            }
+
+            for (String line : runGitCommandLines(worktreePath, "git", "worktree", "list", "--porcelain")) {
+                if (!line.startsWith("branch ")) {
+                    continue;
+                }
+                String refName = line.substring("branch ".length()).trim();
+                String shortName = refName.startsWith("refs/heads/") ? refName.substring("refs/heads/".length()) : refName;
+                if (!StringUtils.hasText(shortName)) {
+                    continue;
+                }
+                BranchInfo existing = branches.get(shortName);
+                branches.put(shortName, new BranchInfo(
+                        shortName,
+                        existing != null ? existing.isCurrent() : shortName.equals(currentBranch),
+                        existing == null ? "" : existing.commitId()
+                ));
             }
             log.info("分支列表获取成功: count={}", branches.size());
-            return branches;
+            return new ArrayList<>(branches.values());
         } catch (GitAPIException e) {
             log.error("列出分支失败: worktreePath={}", worktreePath, e);
             throw new IOException("列出分支失败: " + e.getMessage(), e);
@@ -325,10 +380,224 @@ public class GitOperationService {
     public String getCurrentBranch(String worktreePath) throws IOException {
         try (Git git = Git.open(new File(worktreePath))) {
             return git.getRepository().getBranch();
-        } catch (IOException e) {
-            log.error("获取当前分支失败: worktreePath={}", worktreePath, e);
-            throw e;
+        } catch (Exception ex) {
+            String output = runGitCommand(worktreePath, "git", "branch", "--show-current");
+            return output == null ? null : output.trim();
         }
+    }
+
+    /**
+     * 获取当前 HEAD 提交 ID
+     *
+     * @param worktreePath 工作树路径
+     * @return 当前提交 ID
+     */
+    public String getHeadCommitId(String worktreePath) throws IOException {
+        String output = runGitCommand(worktreePath, "git", "rev-parse", "HEAD");
+        return output == null ? null : output.trim();
+    }
+
+    /**
+     * 比较两个分支差异
+     */
+    public WorkspaceBranchDiffVO compareBranches(String worktreePath, String sourceBranch, String targetBranch) throws IOException {
+        return compareBranches(worktreePath, sourceBranch, targetBranch, null, null);
+    }
+
+    /**
+     * 比较两个分支差异，优先基于真实工作树目录对比文件内容
+     */
+    public WorkspaceBranchDiffVO compareBranches(String worktreePath,
+                                                 String sourceBranch,
+                                                 String targetBranch,
+                                                 String sourceWorktreePath,
+                                                 String targetWorktreePath) throws IOException {
+        if (!StringUtils.hasText(sourceBranch) || !StringUtils.hasText(targetBranch)) {
+            throw new IOException("分支名称不能为空");
+        }
+        WorkspaceBranchDiffVO result = new WorkspaceBranchDiffVO();
+        result.setSourceBranch(sourceBranch);
+        result.setTargetBranch(targetBranch);
+
+        String range = targetBranch + "..." + sourceBranch;
+        try {
+            String counts = runGitCommand(worktreePath, "git", "rev-list", "--left-right", "--count", range);
+            String[] countArr = counts.trim().split("\\s+");
+            if (countArr.length >= 2) {
+                result.setBehindCount(parseInteger(countArr[0]));
+                result.setAheadCount(parseInteger(countArr[1]));
+            } else {
+                result.setBehindCount(0);
+                result.setAheadCount(0);
+            }
+        } catch (IOException ex) {
+            log.warn("计算分支 ahead/behind 失败，已回退为 0: sourceBranch={}, targetBranch={}", sourceBranch, targetBranch, ex);
+            result.setBehindCount(0);
+            result.setAheadCount(0);
+        }
+
+        populateGitRefDiff(result, worktreePath, range);
+        if ((result.getChangedFileCount() == null || result.getChangedFileCount() == 0)
+                && populateWorktreeDiff(result, sourceWorktreePath, targetWorktreePath)) {
+            return result;
+        }
+        return result;
+    }
+
+    private boolean populateWorktreeDiff(WorkspaceBranchDiffVO result, String sourceWorktreePath, String targetWorktreePath) throws IOException {
+        if (!StringUtils.hasText(sourceWorktreePath) || !StringUtils.hasText(targetWorktreePath)) {
+            return false;
+        }
+        Path sourcePath = Path.of(sourceWorktreePath);
+        Path targetPath = Path.of(targetWorktreePath);
+        if (!Files.isDirectory(sourcePath) || !Files.isDirectory(targetPath)) {
+            return false;
+        }
+
+        List<BranchDiffFileVO> files = buildWorktreeDiffFiles(targetPath, sourcePath);
+        int totalAdditions = files.stream().mapToInt(file -> file.getAdditions() == null ? 0 : file.getAdditions()).sum();
+        int totalDeletions = files.stream().mapToInt(file -> file.getDeletions() == null ? 0 : file.getDeletions()).sum();
+        result.setChangedFileCount(files.size());
+        result.setAdditions(totalAdditions);
+        result.setDeletions(totalDeletions);
+        result.setFiles(files);
+        return true;
+    }
+
+    private List<BranchDiffFileVO> buildWorktreeDiffFiles(Path targetPath, Path sourcePath) throws IOException {
+        Map<String, Path> targetFiles = indexComparableFiles(targetPath);
+        Map<String, Path> sourceFiles = indexComparableFiles(sourcePath);
+        Map<String, BranchDiffFileVO> fileMap = new LinkedHashMap<>();
+        for (String relativePath : targetFiles.keySet()) {
+            fileMap.put(relativePath, null);
+        }
+        for (String relativePath : sourceFiles.keySet()) {
+            fileMap.put(relativePath, null);
+        }
+
+        List<BranchDiffFileVO> files = new ArrayList<>();
+        for (String relativePath : fileMap.keySet().stream().sorted().toList()) {
+            Path oldFile = targetFiles.get(relativePath);
+            Path newFile = sourceFiles.get(relativePath);
+            if (oldFile != null && newFile != null && Files.mismatch(oldFile, newFile) == -1L) {
+                continue;
+            }
+            BranchDiffFileVO file = new BranchDiffFileVO();
+            file.setFilePath(relativePath);
+            file.setChangeType(resolveChangeType(oldFile, newFile));
+            int[] stats = readFileDiffStats(oldFile, newFile);
+            file.setAdditions(stats[0]);
+            file.setDeletions(stats[1]);
+            file.setPatch(buildFilePatch(relativePath, oldFile, newFile));
+            files.add(file);
+        }
+        return files;
+    }
+
+    private Map<String, Path> indexComparableFiles(Path rootPath) throws IOException {
+        if (!Files.isDirectory(rootPath)) {
+            return Map.of();
+        }
+        Map<String, Path> fileMap = new LinkedHashMap<>();
+        try (Stream<Path> stream = Files.walk(rootPath)) {
+            stream.filter(Files::isRegularFile)
+                    .forEach(path -> {
+                        Path relativePath = rootPath.relativize(path);
+                        if (shouldIgnoreDiffPath(relativePath)) {
+                            return;
+                        }
+                        fileMap.put(relativePath.toString().replace(File.separatorChar, '/'), path);
+                    });
+        }
+        return fileMap;
+    }
+
+    private boolean shouldIgnoreDiffPath(Path relativePath) {
+        if (relativePath == null || relativePath.getNameCount() == 0) {
+            return true;
+        }
+        return DIFF_EXCLUDED_ROOTS.contains(relativePath.getName(0).toString());
+    }
+
+    private String resolveChangeType(Path oldFile, Path newFile) {
+        if (oldFile == null) {
+            return "A";
+        }
+        if (newFile == null) {
+            return "D";
+        }
+        return "M";
+    }
+
+    private int[] readFileDiffStats(Path oldFile, Path newFile) throws IOException {
+        String oldPath = oldFile == null ? "/dev/null" : oldFile.toString();
+        String newPath = newFile == null ? "/dev/null" : newFile.toString();
+        String output = runCommand(null, Set.of(0, 1), "git", "diff", "--no-index", "--numstat", oldPath, newPath);
+        String line = output.lines().filter(StringUtils::hasText).findFirst().orElse("");
+        if (!StringUtils.hasText(line)) {
+            return new int[]{0, 0};
+        }
+        String[] parts = line.split("\\t", 3);
+        int additions = parts.length > 0 ? parseInteger(parts[0]) : 0;
+        int deletions = parts.length > 1 ? parseInteger(parts[1]) : 0;
+        return new int[]{additions, deletions};
+    }
+
+    private String buildFilePatch(String relativePath, Path oldFile, Path newFile) throws IOException {
+        String oldPath = oldFile == null ? "/dev/null" : oldFile.toString();
+        String newPath = newFile == null ? "/dev/null" : newFile.toString();
+        return runCommand(
+                null,
+                Set.of(0, 1),
+                "diff",
+                "-u",
+                "-N",
+                "--label",
+                "a/" + relativePath,
+                oldPath,
+                "--label",
+                "b/" + relativePath,
+                newPath
+        );
+    }
+
+    private void populateGitRefDiff(WorkspaceBranchDiffVO result, String worktreePath, String range) throws IOException {
+        Map<String, int[]> statsMap = new HashMap<>();
+        for (String line : runGitCommandLines(worktreePath, "git", "diff", "--numstat", range)) {
+            String[] parts = line.split("\t");
+            if (parts.length < 3) {
+                continue;
+            }
+            String path = parts[2];
+            statsMap.put(path, new int[]{parseInteger(parts[0]), parseInteger(parts[1])});
+        }
+
+        List<BranchDiffFileVO> files = new ArrayList<>();
+        int totalAdditions = 0;
+        int totalDeletions = 0;
+        for (String line : runGitCommandLines(worktreePath, "git", "diff", "--name-status", range)) {
+            String[] parts = line.split("\t");
+            if (parts.length < 2) {
+                continue;
+            }
+            String changeType = parts[0];
+            String filePath = parts[parts.length - 1];
+            int[] stats = statsMap.getOrDefault(filePath, new int[]{0, 0});
+            BranchDiffFileVO file = new BranchDiffFileVO();
+            file.setChangeType(changeType);
+            file.setFilePath(filePath);
+            file.setAdditions(stats[0]);
+            file.setDeletions(stats[1]);
+            file.setPatch(runGitCommand(worktreePath, "git", "diff", "--unified=3", range, "--", filePath));
+            files.add(file);
+            totalAdditions += stats[0];
+            totalDeletions += stats[1];
+        }
+
+        result.setChangedFileCount(files.size());
+        result.setAdditions(totalAdditions);
+        result.setDeletions(totalDeletions);
+        result.setFiles(files);
     }
 
     /**
@@ -361,6 +630,24 @@ public class GitOperationService {
         }
     }
 
+    public boolean commitChanges(String worktreePath, String message) throws GitAPIException, IOException {
+        log.info("提交工作树变更: worktree={}", worktreePath);
+        try (Git git = Git.open(new File(worktreePath))) {
+            if (git.status().call().isClean()) {
+                log.info("工作树无变更，跳过提交: worktree={}", worktreePath);
+                return false;
+            }
+            git.add().addFilepattern(".").call();
+            git.commit()
+                    .setMessage(message)
+                    .setAuthor("SchemaPlexAI", "noreply@schemaplexai.local")
+                    .setCommitter("SchemaPlexAI", "noreply@schemaplexai.local")
+                    .call();
+            log.info("工作树提交成功: worktree={}", worktreePath);
+            return true;
+        }
+    }
+
     /**
      * 确保裸仓库存在（若不存在则创建）
      */
@@ -370,7 +657,7 @@ public class GitOperationService {
             log.debug("裸仓库已存在: mirrorPath={}", mirrorPath);
             return;
         }
-        createBareMirror(mirrorPath);
+        createBareMirror(workspaceRoot, mirrorPath);
     }
 
     /**
@@ -398,5 +685,61 @@ public class GitOperationService {
             return new UsernamePasswordCredentialsProvider(username, password);
         }
         return null;
+    }
+
+    private boolean branchExists(String mirrorPath, String branchName) throws IOException, GitAPIException {
+        try (Git mirror = openBareMirror(mirrorPath)) {
+            return mirror.branchList().call().stream()
+                    .map(Ref::getName)
+                    .map(name -> name.startsWith("refs/heads/") ? name.substring("refs/heads/".length()) : name)
+                    .anyMatch(branchName::equals);
+        }
+    }
+
+    /**
+     * 执行 git 命令并返回输出内容
+     */
+    private String runGitCommand(String worktreePath, String... command) throws IOException {
+        return runCommand(worktreePath, Set.of(0), command);
+    }
+
+    private List<String> runGitCommandLines(String worktreePath, String... command) throws IOException {
+        String output = runGitCommand(worktreePath, command);
+        return output.lines()
+                .filter(StringUtils::hasText)
+                .toList();
+    }
+
+    private String runCommand(String workingDirectory, Set<Integer> allowedExitCodes, String... command) throws IOException {
+        ProcessBuilder builder = new ProcessBuilder(command);
+        if (StringUtils.hasText(workingDirectory)) {
+            builder.directory(new File(workingDirectory));
+        }
+        builder.redirectErrorStream(true);
+        Process process = builder.start();
+        try (InputStream inputStream = process.getInputStream()) {
+            String output = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+            try {
+                int exitCode = process.waitFor();
+                if (!allowedExitCodes.contains(exitCode)) {
+                    throw new IOException("执行命令失败: " + String.join(" ", command) + System.lineSeparator() + output);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("执行命令被中断", e);
+            }
+            return output;
+        }
+    }
+
+    private int parseInteger(String value) {
+        if (!StringUtils.hasText(value) || "-".equals(value)) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException ex) {
+            return 0;
+        }
     }
 }

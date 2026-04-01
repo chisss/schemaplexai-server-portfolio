@@ -11,6 +11,7 @@ import lombok.Getter;
 public enum AgentExecutionStatusEnum {
 
     QUEUED("queued", "排队中"),
+    PAUSED("paused", "已暂停"),
     RUNNING("running", "执行中"),
     COMPLETED("completed", "执行完成"),
     FAILED("failed", "执行失败"),

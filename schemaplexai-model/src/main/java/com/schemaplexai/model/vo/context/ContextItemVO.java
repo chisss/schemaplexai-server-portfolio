@@ -29,5 +29,13 @@ public class ContextItemVO {
 
     private Integer sortOrder;
 
+    private Boolean isAgentInstructions;
+
+    private String vectorStatus;
+
+    private LocalDateTime vectorUpdatedAt;
+
+    private Integer chunkCount;
+
     private LocalDateTime createdAt;
 }

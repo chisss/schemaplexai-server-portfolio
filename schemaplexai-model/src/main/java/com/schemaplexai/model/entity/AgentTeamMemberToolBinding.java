@@ -23,10 +23,6 @@ public class AgentTeamMemberToolBinding implements Serializable {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
-    /** 租户ID */
-    @TableField(fill = FieldFill.INSERT)
-    private String tenantId;
-
     /** 关联团队成员ID */
     private String memberId;
 

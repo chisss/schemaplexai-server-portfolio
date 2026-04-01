@@ -6,6 +6,8 @@ import java.time.LocalDateTime;
 @Data
 public class DeviationVO {
     private String id;
+    private String workspaceId;
+    private String projectName;
     private String specId;
     private String specName;
     private String deviationType;
@@ -22,5 +24,7 @@ public class DeviationVO {
     private String statusLabel;
     private String resolvedByName;
     private LocalDateTime resolvedAt;
+    private String sourceType;
+    private String taskId;
     private LocalDateTime createdAt;
 }
