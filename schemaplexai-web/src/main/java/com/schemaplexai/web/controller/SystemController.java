@@ -5,11 +5,15 @@ import com.schemaplexai.model.dto.system.AiModelCreateRequest;
 import com.schemaplexai.model.dto.system.AiModelRouteCreateRequest;
 import com.schemaplexai.model.dto.system.AiModelRouteUpdateRequest;
 import com.schemaplexai.model.dto.system.AiModelUpdateRequest;
+import com.schemaplexai.model.dto.system.RagConfigUpdateRequest;
 import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.vo.system.AiModelRouteVO;
 import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;
+import com.schemaplexai.model.vo.system.RagConfigVO;
+import com.schemaplexai.model.vo.system.RagOperationLogVO;
 import com.schemaplexai.service.config.SystemConfigService;
+import com.schemaplexai.service.rag.RagConfigService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -36,6 +40,7 @@ import java.util.List;
 public class SystemController {
 
     private final SystemConfigService systemConfigService;
+    private final RagConfigService ragConfigService;
 
     // ==================== AI模型管理 ====================
 
@@ -115,6 +120,26 @@ public class SystemController {
     public R<Void> deleteRoute(@PathVariable String id) {
         systemConfigService.deleteRoute(id);
         return R.ok();
+    }
+
+    // ==================== RAG 管理 ====================
+
+    @GetMapping("/rag/config")
+    @Operation(summary = "获取当前租户 RAG 配置")
+    public R<RagConfigVO> getRagConfig() {
+        return R.ok(ragConfigService.getCurrentTenantConfig());
+    }
+
+    @PutMapping("/rag/config")
+    @Operation(summary = "更新当前租户 RAG 配置")
+    public R<RagConfigVO> updateRagConfig(@Valid @RequestBody RagConfigUpdateRequest request) {
+        return R.ok(ragConfigService.updateCurrentTenantConfig(request));
+    }
+
+    @GetMapping("/rag/operations")
+    @Operation(summary = "查询 RAG 操作日志")
+    public R<List<RagOperationLogVO>> listRagOperations(String contextId, String sourceType, Integer limit) {
+        return R.ok(ragConfigService.listCurrentTenantLogs(contextId, sourceType, limit));
     }
 
     // ==================== 团队模板管理 ====================

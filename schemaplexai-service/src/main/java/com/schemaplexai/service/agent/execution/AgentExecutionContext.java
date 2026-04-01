@@ -44,6 +44,14 @@ public class AgentExecutionContext {
     @Builder.Default
     private int maxMessages = 100;
 
+    /** 最大推理轮次（默认50） */
+    @Builder.Default
+    private int maxRounds = 50;
+
+    /** 每轮允许的最大工具调用数（默认8） */
+    @Builder.Default
+    private int maxToolCallsPerRound = 8;
+
     /** 是否启用流式输出（当前阶段预留） */
     private boolean stream;
 }

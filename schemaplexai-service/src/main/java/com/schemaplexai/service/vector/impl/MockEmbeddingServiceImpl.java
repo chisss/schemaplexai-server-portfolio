@@ -25,7 +25,7 @@ public class MockEmbeddingServiceImpl implements EmbeddingService {
      * 基于 SHA-256 哈希生成伪随机但确定性的 1536 维向量（L2归一化）
      */
     @Override
-    public float[] embed(String text) {
+    public float[] embed(String tenantId, String text) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] seed = digest.digest((text == null ? "" : text).getBytes(StandardCharsets.UTF_8));
@@ -54,7 +54,7 @@ public class MockEmbeddingServiceImpl implements EmbeddingService {
     }
 
     @Override
-    public int dimension() {
+    public int dimension(String tenantId) {
         return DIMENSION;
     }
 }

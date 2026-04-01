@@ -3,6 +3,10 @@ package com.schemaplexai.service.vector;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.service.rag.EmbeddingQuotaGuard;
+import com.schemaplexai.service.rag.RagConfigService;
+import com.schemaplexai.service.rag.RagRuntimeSettings;
 import io.milvus.v2.client.MilvusClientV2;
 import io.milvus.v2.common.DataType;
 import io.milvus.v2.common.IndexParam;
@@ -43,7 +47,7 @@ import java.util.List;
 @ConditionalOnProperty(prefix = "milvus", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class MilvusVectorService {
 
-    static final String COLLECTION = "sf_context_items";
+    static final String DEFAULT_COLLECTION = "sf_context_items";
     private static final String FIELD_ITEM_ID = "item_id";
     private static final String FIELD_TENANT_ID = "tenant_id";
     private static final String FIELD_AGENT_ID = "agent_id";
@@ -55,13 +59,22 @@ public class MilvusVectorService {
 
     private final MilvusClientV2 milvusClient;
     private final EmbeddingService embeddingService;
+    private final RagConfigService ragConfigService;
+    private final EmbeddingQuotaGuard embeddingQuotaGuard;
     private final Gson gson = new Gson();
 
     /** 初始化集合（启动时或首次使用时调用） */
-    public void ensureCollection() {
+    public void ensureCollection(String tenantId) {
         try {
+            RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
+            if (!settings.isEnabled()) {
+                return;
+            }
+            String collectionName = StringUtils.hasText(settings.getCollectionName())
+                    ? settings.getCollectionName()
+                    : DEFAULT_COLLECTION;
             boolean exists = milvusClient.hasCollection(
-                    HasCollectionReq.builder().collectionName(COLLECTION).build());
+                    HasCollectionReq.builder().collectionName(collectionName).build());
             if (exists) return;
 
             // 构建 Schema
@@ -79,11 +92,11 @@ public class MilvusVectorService {
                     .fieldName(FIELD_CONTENT_SUMMARY).dataType(DataType.VarChar).maxLength(500).build());
             schema.addField(AddFieldReq.builder()
                     .fieldName(FIELD_VECTOR).dataType(DataType.FloatVector)
-                    .dimension(embeddingService.dimension()).build());
+                    .dimension(settings.getEmbeddingDimension()).build());
 
             // 创建集合
             milvusClient.createCollection(CreateCollectionReq.builder()
-                    .collectionName(COLLECTION)
+                    .collectionName(collectionName)
                     .collectionSchema(schema)
                     .build());
 
@@ -94,14 +107,14 @@ public class MilvusVectorService {
                     .metricType(IndexParam.MetricType.IP)
                     .build();
             milvusClient.createIndex(CreateIndexReq.builder()
-                    .collectionName(COLLECTION)
+                    .collectionName(collectionName)
                     .indexParams(Collections.singletonList(indexParam))
                     .build());
 
             // 加载集合到内存
-            milvusClient.loadCollection(LoadCollectionReq.builder().collectionName(COLLECTION).build());
+            milvusClient.loadCollection(LoadCollectionReq.builder().collectionName(collectionName).build());
 
-            log.info("Milvus 集合 [{}] 创建并加载完成，向量维度={}", COLLECTION, embeddingService.dimension());
+            log.info("Milvus 集合 [{}] 创建并加载完成，向量维度={}", collectionName, settings.getEmbeddingDimension());
         } catch (Exception e) {
             log.warn("Milvus ensureCollection 异常（系统继续运行）: {}", e.getMessage());
         }
@@ -116,11 +129,19 @@ public class MilvusVectorService {
      * @param contextId   所属上下文 ID
      * @param content     原始内容（自动截取前500字符作为 summary）
      */
-    public void upsertContextItem(String itemId, String tenantId, String agentId,
-                                  String contextId, String content) {
+    public boolean upsertContextItem(String itemId, String tenantId, String agentId,
+                                     String contextId, String content) {
         try {
-            ensureCollection();
-            float[] vector = embeddingService.embed(content);
+            RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
+            if (!settings.isEnabled()) {
+                return false;
+            }
+            String collectionName = StringUtils.hasText(settings.getCollectionName())
+                    ? settings.getCollectionName()
+                    : DEFAULT_COLLECTION;
+            ensureCollection(tenantId);
+            embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, EmbeddingTokenEstimator.estimate(content));
+            float[] vector = embeddingService.embed(tenantId, content);
             String summary = content != null && content.length() > 500
                     ? content.substring(0, 500) : content;
 
@@ -135,13 +156,15 @@ public class MilvusVectorService {
             row.add(FIELD_VECTOR, vectorArray);
 
             milvusClient.upsert(UpsertReq.builder()
-                    .collectionName(COLLECTION)
+                    .collectionName(collectionName)
                     .data(Collections.singletonList(row))
                     .build());
 
             log.debug("向量化写入 Milvus: itemId={}, tenantId={}", itemId, tenantId);
+            return true;
         } catch (Exception e) {
             log.warn("Milvus upsert 异常（跳过向量索引）: itemId={}, error={}", itemId, e.getMessage());
+            return false;
         }
     }
 
@@ -159,15 +182,25 @@ public class MilvusVectorService {
         try {
             if (!StringUtils.hasText(tenantId) || !StringUtils.hasText(query)) return results;
 
-            ensureCollection();
-            float[] queryVector = embeddingService.embed(query);
+            RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
+            if (!settings.isEnabled()) {
+                return results;
+            }
+            String collectionName = StringUtils.hasText(settings.getCollectionName())
+                    ? settings.getCollectionName()
+                    : DEFAULT_COLLECTION;
+            ensureCollection(tenantId);
+            embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, EmbeddingTokenEstimator.estimate(query));
+            float[] queryVector = embeddingService.embed(tenantId, query);
 
             // 构建过滤条件：租户隔离 + (agent 匹配 OR 全局条目)
             String filter = String.format("tenant_id == \"%s\" && (agent_id == \"%s\" || agent_id == \"\")",
                     tenantId, agentId != null ? agentId : "");
 
+            float similarityThreshold = (float) settings.getRetrievalMinScore();
+
             SearchResp resp = milvusClient.search(SearchReq.builder()
-                    .collectionName(COLLECTION)
+                    .collectionName(collectionName)
                     .data(Collections.singletonList(new FloatVec(queryVector)))
                     .filter(filter)
                     .topK(topK)
@@ -178,7 +211,7 @@ public class MilvusVectorService {
 
             for (List<SearchResp.SearchResult> resultList : resp.getSearchResults()) {
                 for (SearchResp.SearchResult result : resultList) {
-                    if (result.getScore() >= SIMILARITY_THRESHOLD) {
+                    if (result.getScore() >= similarityThreshold) {
                         Object summary = result.getEntity().get(FIELD_CONTENT_SUMMARY);
                         if (summary != null && !summary.toString().isBlank()) {
                             results.add(summary.toString());
@@ -199,9 +232,26 @@ public class MilvusVectorService {
      * @param itemId 上下文条目 ID
      */
     public void deleteContextItem(String itemId) {
+        deleteContextItem(SecurityUtil.getCurrentTenantId(), itemId);
+    }
+
+    /**
+     * 删除指定租户下的上下文条目向量
+     */
+    public void deleteContextItem(String tenantId, String itemId) {
         try {
+            if (!StringUtils.hasText(tenantId) || !StringUtils.hasText(itemId)) {
+                return;
+            }
+            RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
+            if (!settings.isEnabled()) {
+                return;
+            }
+            String collectionName = StringUtils.hasText(settings.getCollectionName())
+                    ? settings.getCollectionName()
+                    : DEFAULT_COLLECTION;
             milvusClient.delete(DeleteReq.builder()
-                    .collectionName(COLLECTION)
+                    .collectionName(collectionName)
                     .ids(Collections.singletonList(itemId))
                     .build());
             log.debug("Milvus 向量删除: itemId={}", itemId);

@@ -9,6 +9,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.List;
+
 /**
  * 知识文档管理控制器
  */
@@ -25,6 +27,12 @@ public class KnowledgeDocumentController {
     public R<KnowledgeDocumentVO> upload(@RequestParam String contextId,
                                          @RequestParam("file") MultipartFile file) {
         return R.ok(knowledgeDocumentService.uploadDocument(contextId, file));
+    }
+
+    @GetMapping
+    @Operation(summary = "查询上下文下的知识文档列表")
+    public R<List<KnowledgeDocumentVO>> listByContextId(@RequestParam String contextId) {
+        return R.ok(knowledgeDocumentService.listByContextId(contextId));
     }
 
     @GetMapping("/{documentId}")

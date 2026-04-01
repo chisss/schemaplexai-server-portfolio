@@ -15,6 +15,7 @@ public class AiModelGroupVO {
     private String name;
     private String description;
     private String routingStrategy;
+    private String useCase;
     private String status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
@@ -30,6 +31,8 @@ public class AiModelGroupVO {
         private String modelName;
         /** 模型提供商 */
         private String provider;
+        /** 模型用途 */
+        private String useCase;
         private Integer sortOrder;
     }
 }

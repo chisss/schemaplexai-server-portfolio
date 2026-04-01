@@ -26,6 +26,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 工作流模板服务实现
@@ -134,6 +135,13 @@ public class WorkflowTemplateServiceImpl implements WorkflowTemplateService {
         var result = templateMapper.selectPage(page, wrapper);
         var voList = templateConverter.toVOList(result.getRecords());
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
+    }
+
+    @Override
+    public List<WorkflowTemplateVO> listAll() {
+        var wrapper = new LambdaQueryWrapper<WorkflowTemplate>()
+                .orderByDesc(WorkflowTemplate::getCreatedAt);
+        return templateConverter.toVOList(templateMapper.selectList(wrapper));
     }
 
     private WorkflowTemplate requireExists(String id) {

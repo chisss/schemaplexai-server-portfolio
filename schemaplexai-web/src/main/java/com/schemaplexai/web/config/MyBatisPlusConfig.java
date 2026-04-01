@@ -40,6 +40,7 @@ public class MyBatisPlusConfig {
             // Agent 子表（通过 agent_id 关联父表，父表已做租户隔离）
             "sf_agent_config",
             "sf_agent_team_member",
+            "sf_agent_team_member_tool_binding",
             "sf_agent_context_binding",
             "sf_steering_document",
             // Spec 子表（通过 spec_id 关联父表）
@@ -64,7 +65,9 @@ public class MyBatisPlusConfig {
             // 技能表（tenant_id=NULL 表示系统内置，需手动处理租户逻辑）
             "sf_skill",
             // MCP Server 表（同上）
-            "sf_mcp_server"
+            "sf_mcp_server",
+            // 团队模板表（tenant_id=NULL 表示全局模板，需手动处理租户逻辑）
+            "sf_team_template"
     );
 
     @Bean

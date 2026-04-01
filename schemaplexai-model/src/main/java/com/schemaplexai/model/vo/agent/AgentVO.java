@@ -51,6 +51,9 @@ public class AgentVO {
     /** 工作类型/团队模板code */
     private String workType;
 
+    /** 团队模板名称 */
+    private String templateName;
+
     /** 配置是否完成（综合状态） */
     private Boolean configCompleted;
 

@@ -70,6 +70,9 @@ public class AiModel implements Serializable {
     /** 最大Token限制 */
     private Integer maxTokens;
 
+    /** 模型累计 Tokens 限额 */
+    private Integer maxQuotaTokens;
+
     /** 状态: active/inactive */
     private String status;
 

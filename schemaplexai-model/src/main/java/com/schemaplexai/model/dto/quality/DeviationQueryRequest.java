@@ -4,6 +4,7 @@ import lombok.Data;
 
 @Data
 public class DeviationQueryRequest {
+    private String workspaceId;
     private String specId;
     private String deviationType;
     private String severity;

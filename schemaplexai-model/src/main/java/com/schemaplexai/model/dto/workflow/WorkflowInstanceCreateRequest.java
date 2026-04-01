@@ -14,6 +14,9 @@ public class WorkflowInstanceCreateRequest {
     @NotBlank(message = "模板ID不能为空")
     private String templateId;
 
+    /** 租户ID */
+    private String tenantId;
+
     /** 关联的Spec ID */
     private String specId;
 

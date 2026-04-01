@@ -33,6 +33,7 @@ public class QualityOrchestrator {
         message.put("specId", specId);
         message.put("agentExecutionId", agentExecutionId);
         message.put("dimensionCode", dimensionCode);
+        message.put("type", "deviation_detect");
 
         rabbitTemplate.convertAndSend("sf.quality.check", message);
 

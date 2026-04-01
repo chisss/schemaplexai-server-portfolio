@@ -57,4 +57,7 @@ public class AiModelCreateRequest {
 
     /** 最大Token限制 */
     private Integer maxTokens;
+
+    /** 模型累计 Tokens 限额 */
+    private Integer maxQuotaTokens;
 }

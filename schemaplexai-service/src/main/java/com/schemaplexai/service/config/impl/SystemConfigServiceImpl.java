@@ -5,6 +5,7 @@ import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.ModelProviderEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.AiModelRouteMapper;
 import com.schemaplexai.dao.mapper.TeamTemplateMapper;
@@ -50,12 +51,15 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class SystemConfigServiceImpl implements SystemConfigService {
 
+    private static final int DOUBAO_EMBEDDING_VISION_251215_MAX_QUOTA = 500_000;
+
     private final AiModelMapper aiModelMapper;
     private final AiModelRouteMapper aiModelRouteMapper;
     private final TeamTemplateMapper teamTemplateMapper;
     private final EntityValidator entityValidator;
 
     private static final String CONNECTIVITY_PROMPT = "Reply with exactly: CONNECTIVITY_OK";
+    private static final String EMBEDDING_CONNECTIVITY_INPUT = "SchemaPlexAI embedding connectivity check";
     private static final MediaType JSON_TYPE = MediaType.parse("application/json; charset=utf-8");
 
     // ==================== AI模型 CRUD ====================
@@ -92,6 +96,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         // 校验名称唯一性
         entityValidator.checkUnique(aiModelMapper, AiModel::getName,
                 request.getName(), ResultCode.MODEL_NAME_DUPLICATE);
+        validateModelQuota(request.getProvider(), request.getUseCase(), request.getModelId(), request.getMaxQuotaTokens());
 
         AiModel model = new AiModel();
         model.setName(request.getName());
@@ -115,6 +120,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                 ? request.getRetryIntervalSeconds() : 5);
         model.setMaxTokens(request.getMaxTokens() != null
                 ? request.getMaxTokens() : 4096);
+        model.setMaxQuotaTokens(request.getMaxQuotaTokens());
         model.setStatus(CommonConstant.STATUS_ACTIVE);
 
         aiModelMapper.insert(model);
@@ -135,6 +141,11 @@ public class SystemConfigServiceImpl implements SystemConfigService {
 
         AiModel updateEntity = new AiModel();
         updateEntity.setId(id);
+        String resolvedProvider = StringUtils.hasText(request.getProvider()) ? request.getProvider() : model.getProvider();
+        String resolvedUseCase = request.getUseCase() != null ? request.getUseCase() : model.getUseCase();
+        String resolvedModelId = StringUtils.hasText(request.getModelId()) ? request.getModelId() : model.getModelId();
+        Integer resolvedMaxQuotaTokens = request.getMaxQuotaTokens() != null ? request.getMaxQuotaTokens() : model.getMaxQuotaTokens();
+        validateModelQuota(resolvedProvider, resolvedUseCase, resolvedModelId, resolvedMaxQuotaTokens);
         if (StringUtils.hasText(request.getName())) {
             updateEntity.setName(request.getName());
         }
@@ -178,6 +189,9 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         }
         if (request.getMaxTokens() != null) {
             updateEntity.setMaxTokens(request.getMaxTokens());
+        }
+        if (request.getMaxQuotaTokens() != null) {
+            updateEntity.setMaxQuotaTokens(request.getMaxQuotaTokens());
         }
         if (StringUtils.hasText(request.getStatus())) {
             updateEntity.setStatus(request.getStatus());
@@ -225,6 +239,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         // 校验路由名称唯一性
         entityValidator.checkUnique(aiModelRouteMapper, AiModelRoute::getName,
                 request.getName(), ResultCode.ROUTE_NAME_DUPLICATE);
+        validateRouteModelsUseCase(request.getPrimaryModelId(), request.getSecondaryModelId(), request.getTertiaryModelId());
 
         AiModelRoute route = new AiModelRoute();
         route.setName(request.getName());
@@ -294,6 +309,12 @@ public class SystemConfigServiceImpl implements SystemConfigService {
             updateEntity.setStatus(request.getStatus());
         }
 
+        validateRouteModelsUseCase(
+                StringUtils.hasText(request.getPrimaryModelId()) ? request.getPrimaryModelId() : route.getPrimaryModelId(),
+                request.getSecondaryModelId() != null ? request.getSecondaryModelId() : route.getSecondaryModelId(),
+                request.getTertiaryModelId() != null ? request.getTertiaryModelId() : route.getTertiaryModelId()
+        );
+
         aiModelRouteMapper.updateById(updateEntity);
         log.info("更新路由规则成功: routeId={}", id);
 
@@ -314,18 +335,32 @@ public class SystemConfigServiceImpl implements SystemConfigService {
 
     @Override
     public List<TeamTemplate> listTeamTemplates() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        LambdaQueryWrapper<TeamTemplate> wrapper = new LambdaQueryWrapper<TeamTemplate>()
+                .eq(TeamTemplate::getStatus, CommonConstant.STATUS_ACTIVE);
+
+        if (StringUtils.hasText(tenantId)) {
+            wrapper.and(w -> w.isNull(TeamTemplate::getTenantId).or().eq(TeamTemplate::getTenantId, tenantId));
+        }
+
         return teamTemplateMapper.selectList(
-                new LambdaQueryWrapper<TeamTemplate>()
-                        .eq(TeamTemplate::getStatus, CommonConstant.STATUS_ACTIVE)
-                        .orderByAsc(TeamTemplate::getCreatedAt)
+                wrapper.orderByAsc(TeamTemplate::getCreatedAt)
         );
     }
 
     @Override
     public TeamTemplate getTeamTemplateByCode(String code) {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        LambdaQueryWrapper<TeamTemplate> wrapper = new LambdaQueryWrapper<TeamTemplate>()
+                .eq(TeamTemplate::getCode, code)
+                .eq(TeamTemplate::getStatus, CommonConstant.STATUS_ACTIVE);
+
+        if (StringUtils.hasText(tenantId)) {
+            wrapper.and(w -> w.isNull(TeamTemplate::getTenantId).or().eq(TeamTemplate::getTenantId, tenantId));
+        }
+
         TeamTemplate template = teamTemplateMapper.selectOne(
-                new LambdaQueryWrapper<TeamTemplate>()
-                        .eq(TeamTemplate::getCode, code)
+                wrapper
         );
         if (template == null) {
             throw new BusinessException(ResultCode.TEMPLATE_NOT_FOUND);
@@ -363,7 +398,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                             .errorCode(errorCode).errorMessage(trimError(errorMsg))
                             .testedAt(testedAt).build();
                 } else {
-                    result = parseConnectivityResult(responseBody, provider, model.getModelId(), latencyMs, testedAt);
+                    result = parseConnectivityResult(responseBody, provider, model, latencyMs, testedAt);
                 }
             }
         } catch (IOException ex) {
@@ -409,6 +444,9 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     private String buildConnectivityUrl(AiModel model, String provider, String apiKey) {
         String baseUrl = normalizeBaseUrl(StringUtils.hasText(model.getBaseUrl())
                 ? model.getBaseUrl() : defaultBaseUrl(provider));
+        if (isEmbeddingModel(model)) {
+            return buildEmbeddingConnectivityUrl(provider, baseUrl);
+        }
         if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
             return baseUrl + "/v1/messages";
         }
@@ -432,12 +470,25 @@ public class SystemConfigServiceImpl implements SystemConfigService {
             case "anthropic", "claude" -> "https://api.anthropic.com";
             case "gemini" -> "https://generativelanguage.googleapis.com";
             case "kimi"   -> "https://api.moonshot.cn";
+            case "doubao" -> "https://ark.cn-beijing.volces.com/api/v3";
             default       -> "https://api.openai.com";
         };
     }
 
     private String buildConnectivityPayload(AiModel model, String provider) throws Exception {
         com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        if (isEmbeddingModel(model)) {
+            if (isDoubaoMultimodalEmbedding(model, provider)) {
+                return om.writeValueAsString(Map.of(
+                        "model", model.getModelId(),
+                        "input", List.of(Map.of("type", "text", "text", EMBEDDING_CONNECTIVITY_INPUT))
+                ));
+            }
+            return om.writeValueAsString(Map.of(
+                    "model", model.getModelId(),
+                    "input", EMBEDDING_CONNECTIVITY_INPUT
+            ));
+        }
         if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
             return om.writeValueAsString(Map.of(
                     "model", model.getModelId(),
@@ -459,14 +510,19 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     }
 
     private ConnectivityTestResultVO parseConnectivityResult(String responseBody, String provider,
-                                                              String fallbackModel, long latencyMs,
-                                                              LocalDateTime testedAt) throws Exception {
+                                                             AiModel model, long latencyMs,
+                                                             LocalDateTime testedAt) throws Exception {
         com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
         com.fasterxml.jackson.databind.JsonNode root = om.readTree(responseBody);
+        String fallbackModel = model.getModelId();
         String modelName = fallbackModel;
         Integer tokenInput = null;
         Integer tokenOutput = null;
-        if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
+        if (isEmbeddingModel(model)) {
+            modelName = root.path("model").asText(fallbackModel);
+            com.fasterxml.jackson.databind.JsonNode usage = root.path("usage");
+            tokenInput = readFirstInt(usage, "prompt_tokens", "input_tokens", "total_tokens");
+        } else if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
             modelName = root.path("model").asText(fallbackModel);
             com.fasterxml.jackson.databind.JsonNode usage = root.path("usage");
             tokenInput = readInt(usage, "input_tokens");
@@ -488,10 +544,114 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                 .testedAt(testedAt).build();
     }
 
+    private Integer readFirstInt(com.fasterxml.jackson.databind.JsonNode node, String... fieldNames) {
+        for (String fieldName : fieldNames) {
+            Integer value = readInt(node, fieldName);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private void validateRouteModelsUseCase(String primaryModelId, String secondaryModelId, String tertiaryModelId) {
+        List<String> modelIds = java.util.stream.Stream.of(primaryModelId, secondaryModelId, tertiaryModelId)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
+        if (modelIds.isEmpty()) {
+            return;
+        }
+        List<AiModel> models = aiModelMapper.selectBatchIds(modelIds);
+        if (models.size() != modelIds.size()) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "路由规则引用了不存在的模型");
+        }
+        List<String> normalizedUseCases = models.stream()
+                .map(this::normalizeUseCase)
+                .distinct()
+                .toList();
+        if (normalizedUseCases.size() > 1) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "路由规则仅允许同一 useCase 的模型组成降级链路");
+        }
+    }
+
+    private String normalizeUseCase(AiModel model) {
+        if (model == null || !StringUtils.hasText(model.getUseCase())) {
+            return "__blank__";
+        }
+        return model.getUseCase().trim().toLowerCase(Locale.ROOT);
+    }
+
+    private boolean isEmbeddingModel(AiModel model) {
+        return model != null && (isEmbeddingUseCase(model.getUseCase())
+                || (StringUtils.hasText(model.getModelId())
+                && model.getModelId().toLowerCase(Locale.ROOT).contains("embedding")));
+    }
+
+    private boolean isDoubaoMultimodalEmbedding(AiModel model, String provider) {
+        if (model == null) {
+            return false;
+        }
+        String normalizedProvider = provider != null ? provider.toLowerCase(Locale.ROOT) : "";
+        String baseUrl = model.getBaseUrl() != null ? model.getBaseUrl().toLowerCase(Locale.ROOT) : "";
+        String modelId = model.getModelId() != null ? model.getModelId().toLowerCase(Locale.ROOT) : "";
+        return "doubao".equals(normalizedProvider)
+                && (baseUrl.endsWith("/embeddings/multimodal") || modelId.contains("embedding-vision"));
+    }
+
+    private boolean isEmbeddingUseCase(String useCase) {
+        return StringUtils.hasText(useCase)
+                && (useCase.toLowerCase(Locale.ROOT).contains("embedding") || useCase.contains("向量"));
+    }
+
+    private String buildEmbeddingConnectivityUrl(String provider, String baseUrl) {
+        if (baseUrl.endsWith("/embeddings/multimodal")) {
+            return baseUrl;
+        }
+        if (baseUrl.endsWith("/embeddings")) {
+            return baseUrl;
+        }
+        if (baseUrl.endsWith("/chat/completions")) {
+            return baseUrl.substring(0, baseUrl.length() - "/chat/completions".length()) + "/embeddings";
+        }
+        if (ModelProviderEnum.DOUBAO.getCode().equals(provider) || baseUrl.contains("/api/v3")) {
+            if (baseUrl.contains("/api/v3")) {
+                return baseUrl + "/embeddings";
+            }
+            return baseUrl + "/api/v3/embeddings";
+        }
+        if (baseUrl.endsWith("/v1")) {
+            return baseUrl + "/embeddings";
+        }
+        return baseUrl + "/v1/embeddings";
+    }
+
     private Integer readInt(com.fasterxml.jackson.databind.JsonNode node, String field) {
         if (node == null || node.isMissingNode()) return null;
         com.fasterxml.jackson.databind.JsonNode f = node.get(field);
         return (f != null && !f.isNull() && f.canConvertToInt()) ? f.asInt() : null;
+    }
+
+    private void validateModelQuota(String provider, String useCase, String modelId, Integer maxQuotaTokens) {
+        if (maxQuotaTokens == null) {
+            return;
+        }
+        if (maxQuotaTokens <= 0) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "模型最大限额必须大于 0");
+        }
+        String normalizedProvider = provider != null ? provider.trim().toLowerCase(Locale.ROOT) : "";
+        String normalizedUseCase = useCase != null ? useCase.trim().toLowerCase(Locale.ROOT) : "";
+        String normalizedModelId = modelId != null ? modelId.trim().toLowerCase(Locale.ROOT) : "";
+        boolean isEmbedding = normalizedUseCase.contains("embedding")
+                || normalizedUseCase.contains("向量")
+                || normalizedModelId.contains("embedding");
+        if ("doubao".equals(normalizedProvider)
+                && isEmbedding
+                && normalizedModelId.contains("doubao-embedding-vision-251215")
+                && maxQuotaTokens > DOUBAO_EMBEDDING_VISION_251215_MAX_QUOTA) {
+            throw new BusinessException(ResultCode.BAD_REQUEST,
+                    "Doubao doubao-embedding-vision-251215 最大限额不能超过 500000 tokens");
+        }
     }
 
     private void saveConnectivityResult(String modelId, ConnectivityTestResultVO result) {

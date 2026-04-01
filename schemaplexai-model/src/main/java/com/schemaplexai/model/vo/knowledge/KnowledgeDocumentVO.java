@@ -18,6 +18,8 @@ public class KnowledgeDocumentVO {
     private Long fileSize;
     private String status;
     private Integer chunkCount;
+    private Integer totalTokens;
+    private String embeddingModel;
     private String errorMessage;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

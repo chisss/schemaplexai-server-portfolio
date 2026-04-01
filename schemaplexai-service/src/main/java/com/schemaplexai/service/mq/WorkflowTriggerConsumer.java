@@ -4,19 +4,24 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
+import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
 import com.schemaplexai.model.dto.workflow.WorkflowInstanceCreateRequest;
 import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.entity.WorkflowInstance;
+import com.schemaplexai.model.entity.WorkflowNodeExecution;
 import com.schemaplexai.model.entity.WorkflowTemplate;
 import com.schemaplexai.service.mq.message.WorkflowTriggerMessage;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
+import com.schemaplexai.service.workflow.runtime.SpecWorkflowRuntimeService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -32,6 +37,8 @@ public class WorkflowTriggerConsumer {
     private final WorkflowTemplateMapper workflowTemplateMapper;
     private final SpecMapper specMapper;
     private final WorkflowInstanceMapper workflowInstanceMapper;
+    private final WorkflowNodeExecutionMapper workflowNodeExecutionMapper;
+    private final SpecWorkflowRuntimeService specWorkflowRuntimeService;
 
     @RabbitListener(queues = "sf.workflow.trigger")
     public void handleWorkflowTrigger(WorkflowTriggerMessage message) {
@@ -57,13 +64,25 @@ public class WorkflowTriggerConsumer {
                 return;
             }
 
+            Spec spec = specMapper.selectById(specId);
+            if (spec == null) {
+                log.warn("Spec不存在，跳过工作流触发: specId={}", specId);
+                return;
+            }
+
             var request = new WorkflowInstanceCreateRequest();
             request.setTemplateId(templateId);
+            request.setTenantId(message.getTenantId());
             request.setSpecId(specId);
-            request.setName("Spec审核工作流-" + specId);
-            request.setVariables(buildVariables(message));
+            request.setName("Spec审核工作流-" + spec.getName());
+            request.setVariables(buildVariables(spec, message));
 
             var instance = workflowInstanceService.create(request);
+            Spec update = new Spec();
+            update.setId(specId);
+            update.setWorkflowInstanceId(instance.getId());
+            update.setTargetBranch(specWorkflowRuntimeService.resolveTargetBranch(spec));
+            specMapper.updateById(update);
             workflowInstanceService.start(instance.getId());
 
             log.info("工作流实例已创建并启动: instanceId={}, specId={}, templateId={}",
@@ -88,7 +107,7 @@ public class WorkflowTriggerConsumer {
     }
 
     private boolean hasActiveInstance(String specId, String templateId) {
-        Long count = workflowInstanceMapper.selectCount(
+        List<WorkflowInstance> instances = workflowInstanceMapper.selectList(
                 new LambdaQueryWrapper<WorkflowInstance>()
                         .eq(WorkflowInstance::getSpecId, specId)
                         .eq(WorkflowInstance::getTemplateId, templateId)
@@ -96,12 +115,61 @@ public class WorkflowTriggerConsumer {
                                 WorkflowInstanceStatusEnum.PENDING.getCode(),
                                 WorkflowInstanceStatusEnum.RUNNING.getCode(),
                                 WorkflowInstanceStatusEnum.PAUSED.getCode())
+                        .orderByAsc(WorkflowInstance::getCreatedAt)
         );
-        return count != null && count > 0;
+        if (instances == null || instances.isEmpty()) {
+            return false;
+        }
+
+        for (WorkflowInstance instance : instances) {
+            if (!repairInconsistentActiveInstance(instance)) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    private Map<String, Object> buildVariables(WorkflowTriggerMessage message) {
-        Map<String, Object> variables = new HashMap<>();
+    private boolean repairInconsistentActiveInstance(WorkflowInstance instance) {
+        List<WorkflowNodeExecution> nodeExecutions = workflowNodeExecutionMapper.selectList(
+                new LambdaQueryWrapper<WorkflowNodeExecution>()
+                        .eq(WorkflowNodeExecution::getInstanceId, instance.getId())
+                        .orderByAsc(WorkflowNodeExecution::getCreatedAt)
+        );
+        if (nodeExecutions == null || nodeExecutions.isEmpty()) {
+            return false;
+        }
+
+        boolean hasFailedNode = nodeExecutions.stream()
+                .anyMatch(node -> WorkflowInstanceStatusEnum.FAILED.getCode().equals(node.getStatus()));
+        boolean hasCompletedEndNode = nodeExecutions.stream()
+                .anyMatch(node -> "end".equals(node.getNodeId())
+                        && WorkflowInstanceStatusEnum.COMPLETED.getCode().equals(node.getStatus()));
+        if (!hasFailedNode && !hasCompletedEndNode) {
+            return false;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        WorkflowInstance update = new WorkflowInstance();
+        update.setId(instance.getId());
+        update.setUpdatedAt(now);
+
+        if (hasCompletedEndNode) {
+            update.setStatus(WorkflowInstanceStatusEnum.COMPLETED.getCode());
+            update.setCurrentNodeId("end");
+            update.setCompletedAt(instance.getCompletedAt() != null ? instance.getCompletedAt() : now);
+            log.warn("检测到状态残留的已完成实例，已自动修复: instanceId={}", instance.getId());
+        } else {
+            update.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
+            update.setCompletedAt(now);
+            log.warn("检测到状态残留的失败实例，已自动修复: instanceId={}", instance.getId());
+        }
+
+        workflowInstanceMapper.updateById(update);
+        return true;
+    }
+
+    private Map<String, Object> buildVariables(Spec spec, WorkflowTriggerMessage message) {
+        Map<String, Object> variables = new HashMap<>(specWorkflowRuntimeService.buildRuntimeVariables(spec, message));
         variables.put("triggerType", message.getTriggerType());
         variables.put("docType", message.getDocType());
         variables.put("triggerBy", message.getTriggerBy());

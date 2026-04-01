@@ -55,7 +55,14 @@ import java.util.concurrent.CompletableFuture;
 public class AgentExecutionEngine {
 
     private static final int    MAX_ROUNDS        = 50;
+    private static final int    MAX_TOOL_CALLS_PER_ROUND = 8;
     private static final int    LOG_CONTENT_LIMIT = 500;
+    private static final int    MAX_MODEL_RETRIES = 2;
+    private static final int    FALLBACK_EVIDENCE_LIMIT = 6;
+    private static final int    FALLBACK_TEXT_LIMIT = 320;
+    private static final String FORCE_COMPLETION_PROMPT =
+            "工具与轮次预算已达到上限。不要继续调用任何工具，请基于当前已获得的信息直接输出最终结果。"
+                    + "如果个别细节无法确认，请明确标注“待确认”，不要继续探索，并直接输出结构化 Markdown。";
 
     private static final String STATUS_RUNNING   = AgentExecutionStatusEnum.RUNNING.getCode();
     private static final String STATUS_STOPPED   = AgentExecutionStatusEnum.STOPPED.getCode();
@@ -126,16 +133,18 @@ public class AgentExecutionEngine {
 
         log.info("ChatMemory 初始化完成: conversationId={}, 历史消息数={}", conversationId, chatMemory.messages().size());
 
-        LangChain4jResolution resolution;
+        List<LangChain4jResolution> modelChain;
         if ("model_group".equals(ctx.getAgentModelType()) && StringUtils.hasText(ctx.getAgentModelGroupId())) {
-            resolution = aiModelRouter.resolveFromGroup(ctx.getAgentModelGroupId());
+            modelChain = aiModelRouter.resolveGroupChain(ctx.getAgentModelGroupId());
         } else {
-            resolution = aiModelRouter.resolveByModelName(ctx.getModel());
+            modelChain = aiModelRouter.resolveRouteChain(ctx.getModel());
         }
+        LangChain4jResolution resolution = modelChain.getFirst();
         appendLog(executionId, agentId, tenantId, "DEBUG", "MODEL_RESOLVED", 0,
-                "provider=" + resolution.config().getProvider() + ", modelId=" + resolution.config().getModelId(), startMs);
+                "chainSize=" + modelChain.size() + ", provider="
+                        + resolution.config().getProvider() + ", modelId=" + resolution.config().getModelId(), startMs);
 
-        return runAgenticLoop(ctx, systemPrompt, chatMemory, resolution, startMs, conversationId);
+        return runAgenticLoop(ctx, systemPrompt, chatMemory, modelChain, startMs, conversationId);
     }
 
     // =========================================================================
@@ -143,7 +152,7 @@ public class AgentExecutionEngine {
     // =========================================================================
 
     private AgentExecutionResult runAgenticLoop(AgentExecutionContext ctx,
-            String systemPrompt, ChatMemory chatMemory, LangChain4jResolution resolution, long startMs, String conversationId) {
+            String systemPrompt, ChatMemory chatMemory, List<LangChain4jResolution> modelChain, long startMs, String conversationId) {
 
         String executionId = ctx.getExecutionId();
         String agentId     = ctx.getAgentId();
@@ -157,8 +166,10 @@ public class AgentExecutionEngine {
         String  lastContent      = "";
         int     lastRound        = 0;
         boolean loopCompleted    = false;
+        int     maxRounds        = normalizeLimit(ctx.getMaxRounds(), MAX_ROUNDS);
+        int     maxToolCallsPerRound = normalizeLimit(ctx.getMaxToolCallsPerRound(), MAX_TOOL_CALLS_PER_ROUND);
 
-        for (int round = 1; round <= MAX_ROUNDS; round++) {
+        for (int round = 1; round <= maxRounds; round++) {
             lastRound = round;
 
             if (isStopped(executionId)) {
@@ -184,10 +195,18 @@ public class AgentExecutionEngine {
                     .build();
 
             // 单轮 AI 调用
-            ChatResponse response;
+            ModelCallResult callResult;
             try {
-                response = resolution.model().chat(request);
+                callResult = invokeModelWithRetry(modelChain, request, executionId, agentId, tenantId, round, startMs);
             } catch (Exception e) {
+                AgentExecutionResult gracefulResult = handleRetryableModelFailure(
+                        ctx, modelChain.getLast(), systemPrompt, chatMemory,
+                        executionId, agentId, tenantId, round, maxRounds, startMs,
+                        totalTokenInput, totalTokenOutput, conversationId, e
+                );
+                if (gracefulResult != null) {
+                    return gracefulResult;
+                }
                 String errMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                 log.error("AI 调用失败: executionId={}, round={}, error={}", executionId, round, errMsg);
                 agentLogService.updateExecutionStatus(executionId, STATUS_FAILED, errMsg,
@@ -195,6 +214,7 @@ public class AgentExecutionEngine {
                 publishEvent(executionId, "FAILED", round, "AI 调用失败: " + errMsg, null, startMs);
                 return AgentExecutionResult.builder().status(STATUS_FAILED).errorMessage(errMsg).rounds(round).build();
             }
+            ChatResponse response = callResult.response();
 
             // 累计 token
             var tokenUsage = response.metadata().tokenUsage();
@@ -256,8 +276,16 @@ public class AgentExecutionEngine {
                             .build())
                     .toList();
 
-            publishEvent(executionId, "TOOL_CALL", round, "开始执行工具调用(" + toolCalls.size() + "个)", null, startMs);
-            List<ToolResult> toolResults = toolRegistry.executeAll(tenantId, agentId, toolCalls);
+            List<ToolCall> limitedToolCalls = limitToolCalls(executionId, agentId, tenantId, round,
+                    toolCalls, maxToolCallsPerRound, startMs);
+            publishEvent(executionId, "TOOL_CALL", round,
+                    "开始执行工具调用(" + limitedToolCalls.size() + "/" + toolCalls.size() + "个)", null, startMs);
+            List<ToolResult> toolResults = new ArrayList<>(toolRegistry.executeAll(tenantId, agentId, limitedToolCalls));
+            if (limitedToolCalls.size() < toolCalls.size()) {
+                for (int i = limitedToolCalls.size(); i < toolCalls.size(); i++) {
+                    toolResults.add(buildToolLimitResult(toolCalls.get(i), maxToolCallsPerRound));
+                }
+            }
 
             // 追加 AI 消息（含工具调用请求）和工具执行结果到 ChatMemory
             chatMemory.add(aiMsg);
@@ -273,13 +301,44 @@ public class AgentExecutionEngine {
         }
 
         if (!loopCompleted) {
-            String errMsg = "超出最大执行轮次 " + MAX_ROUNDS;
-            log.warn("Agent 超出最大轮次: executionId={}", executionId);
-            appendLog(executionId, agentId, tenantId, "ERROR", "EXECUTION_FAILED", MAX_ROUNDS, errMsg, startMs);
-            agentLogService.updateExecutionStatus(executionId, STATUS_FAILED, errMsg,
-                    totalTokenInput, totalTokenOutput, null);
-            publishEvent(executionId, "FAILED", MAX_ROUNDS, errMsg, null, startMs);
-            return AgentExecutionResult.builder().status(STATUS_FAILED).errorMessage(errMsg).build();
+            appendLog(executionId, agentId, tenantId, "WARN", "FORCE_COMPLETION", maxRounds,
+                    "已达到最大执行轮次，进入强制收敛输出", startMs);
+            try {
+                ChatResponse forcedResponse = forceCompletion(modelChain.getLast(), systemPrompt, chatMemory,
+                        executionId, agentId, tenantId, maxRounds + 1, startMs);
+                var forcedTokenUsage = forcedResponse.metadata().tokenUsage();
+                if (forcedTokenUsage != null) {
+                    totalTokenInput += forcedTokenUsage.inputTokenCount();
+                    totalTokenOutput += forcedTokenUsage.outputTokenCount();
+                }
+                AiMessage forcedAiMessage = forcedResponse.aiMessage();
+                lastContent = forcedAiMessage != null && forcedAiMessage.text() != null ? forcedAiMessage.text() : "";
+                chatMemory.add(UserMessage.from(FORCE_COMPLETION_PROMPT));
+                if (forcedAiMessage != null) {
+                    chatMemory.add(forcedAiMessage);
+                }
+                return buildCompletedResult(executionId, agentId, tenantId,
+                        lastContent, totalTokenInput, totalTokenOutput, maxRounds + 1, startMs, conversationId);
+            } catch (Exception forceException) {
+                if (hasCompletionEvidence(chatMemory)) {
+                    String degradedContent = buildDegradedCompletion(ctx, chatMemory, maxRounds, null, forceException);
+                    appendLog(executionId, agentId, tenantId, "WARN", "DEGRADED_COMPLETION", maxRounds,
+                            "强制收敛失败，基于已收集证据输出降级结论", startMs);
+                    publishEvent(executionId, "AI_RESPONSE", maxRounds, "强制收敛失败，已使用降级结论完成节点", null, startMs);
+                    chatMemory.add(UserMessage.from(FORCE_COMPLETION_PROMPT));
+                    chatMemory.add(AiMessage.from(degradedContent));
+                    return buildCompletedResult(executionId, agentId, tenantId,
+                            degradedContent, totalTokenInput, totalTokenOutput, maxRounds, startMs, conversationId);
+                }
+                String errMsg = "超出最大执行轮次 " + maxRounds + "，且强制收敛失败: "
+                        + (forceException.getMessage() != null ? forceException.getMessage() : forceException.getClass().getSimpleName());
+                log.warn("Agent 超出最大轮次且强制收敛失败: executionId={}", executionId, forceException);
+                appendLog(executionId, agentId, tenantId, "ERROR", "EXECUTION_FAILED", maxRounds, errMsg, startMs);
+                agentLogService.updateExecutionStatus(executionId, STATUS_FAILED, errMsg,
+                        totalTokenInput, totalTokenOutput, null);
+                publishEvent(executionId, "FAILED", maxRounds, errMsg, null, startMs);
+                return AgentExecutionResult.builder().status(STATUS_FAILED).errorMessage(errMsg).build();
+            }
         }
 
         return buildCompletedResult(executionId, agentId, tenantId,
@@ -368,9 +427,361 @@ public class AgentExecutionEngine {
         if (inputContext == null || inputContext.isEmpty()) return inputPrompt;
         StringBuilder sb = new StringBuilder();
         if (StringUtils.hasText(inputPrompt)) sb.append(inputPrompt).append("\n\n");
-        sb.append("---\n以下为补充上下文变量：\n");
-        inputContext.forEach((k, v) -> sb.append("- ").append(k).append(": ").append(v).append("\n"));
+        StringBuilder contextSb = new StringBuilder();
+        inputContext.forEach((k, v) -> {
+            if (k != null && k.startsWith("_")) {
+                return;
+            }
+            if (v == null) {
+                return;
+            }
+            contextSb.append("- ").append(k).append(": ").append(renderContextValue(v)).append("\n");
+        });
+        if (contextSb.isEmpty()) {
+            return sb.toString().trim();
+        }
+        sb.append("---\n以下为补充上下文变量：\n").append(contextSb);
         return sb.toString().trim();
+    }
+
+    private String renderContextValue(Object value) {
+        String text;
+        try {
+            text = value instanceof String ? (String) value : objectMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            text = String.valueOf(value);
+        }
+        return text.length() > 500 ? text.substring(0, 500) + "...[截断]" : text;
+    }
+
+    private ModelCallResult invokeModelWithRetry(List<LangChain4jResolution> modelChain, ChatRequest request,
+                                                 String executionId, String agentId, String tenantId,
+                                                 int round, long startMs) throws Exception {
+        Exception lastError = null;
+        for (int index = 0; index < modelChain.size(); index++) {
+            LangChain4jResolution resolution = modelChain.get(index);
+            try {
+                ChatResponse response = invokeModelWithRetry(resolution, request, executionId, agentId, tenantId, round, startMs);
+                return new ModelCallResult(response, resolution);
+            } catch (Exception e) {
+                lastError = e;
+                boolean hasFallback = index < modelChain.size() - 1;
+                if (hasFallback) {
+                    appendLog(executionId, agentId, tenantId, "WARN", "MODEL_FALLBACK_SWITCH", round,
+                            "模型调用失败，切换至下一个降级模型: provider=" + resolution.config().getProvider()
+                                    + ", modelId=" + resolution.config().getModelId()
+                                    + ", error=" + resolveExceptionMessage(e), startMs);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw lastError != null ? lastError : new IllegalStateException("AI 调用失败");
+    }
+
+    private ChatResponse invokeModelWithRetry(LangChain4jResolution resolution, ChatRequest request,
+                                              String executionId, String agentId, String tenantId,
+                                              int round, long startMs) throws Exception {
+        Exception lastError = null;
+        for (int attempt = 1; attempt <= MAX_MODEL_RETRIES + 1; attempt++) {
+            try {
+                return resolution.model().chat(request);
+            } catch (Exception e) {
+                lastError = e;
+                if (!isRetryableModelError(e) || attempt > MAX_MODEL_RETRIES) {
+                    throw e;
+                }
+                String errMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                log.warn("AI 调用失败，准备重试: executionId={}, round={}, attempt={}, error={}",
+                        executionId, round, attempt, errMsg);
+                appendLog(executionId, agentId, tenantId, "WARN", "MODEL_RETRY", round,
+                        "模型调用失败，准备第 " + attempt + " 次重试: " + errMsg, startMs);
+                try {
+                    Thread.sleep(1000L * attempt);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    throw interruptedException;
+                }
+            }
+        }
+        throw lastError != null ? lastError : new IllegalStateException("AI 调用失败");
+    }
+
+    private boolean isRetryableModelError(Exception e) {
+        String errMsg = e.getMessage();
+        if (!StringUtils.hasText(errMsg)) {
+            return false;
+        }
+        String normalized = errMsg.toLowerCase();
+        return normalized.contains("api_error")
+                || normalized.contains("unknown error (1000)")
+                || normalized.contains("timeout")
+                || normalized.contains("temporar")
+                || normalized.contains("rate limit")
+                || normalized.contains("429");
+    }
+
+    private int normalizeLimit(int configuredValue, int defaultValue) {
+        return configuredValue > 0 ? configuredValue : defaultValue;
+    }
+
+    private ChatResponse forceCompletion(LangChain4jResolution resolution,
+                                         String systemPrompt,
+                                         ChatMemory chatMemory,
+                                         String executionId,
+                                         String agentId,
+                                         String tenantId,
+                                         int round,
+                                         long startMs) throws Exception {
+        String forceCompletionContext = buildForceCompletionContext(chatMemory);
+        appendLog(executionId, agentId, tenantId, "INFO", "ROUND_START", round,
+                "强制收敛轮开始，evidence=" + collectFallbackEvidence(chatMemory).size() + " items", startMs);
+        publishEvent(executionId, "ROUND_START", round, "进入强制收敛轮", null, startMs);
+
+        List<ChatMessage> messages = new ArrayList<>();
+        messages.add(SystemMessage.from(systemPrompt));
+        messages.add(UserMessage.from(forceCompletionContext));
+
+        ChatRequest forcedRequest = ChatRequest.builder()
+                .messages(messages)
+                .toolSpecifications(List.of())
+                .build();
+
+        ChatResponse response = invokeModelWithRetry(resolution, forcedRequest, executionId, agentId, tenantId, round, startMs);
+        String preview = response.aiMessage() != null && response.aiMessage().text() != null
+                ? response.aiMessage().text() : "";
+        if (preview.length() > LOG_CONTENT_LIMIT) {
+            preview = preview.substring(0, LOG_CONTENT_LIMIT) + "...[截断]";
+        }
+        agentLogService.appendLog(executionId, agentId, tenantId, "INFO", "AI_RESPONSE",
+                round, null, preview,
+                response.metadata().tokenUsage() != null ? (int) response.metadata().tokenUsage().outputTokenCount() : 0,
+                elapsed(startMs));
+        publishEvent(executionId, "AI_RESPONSE", round, "已收到强制收敛响应", null, startMs);
+        return response;
+    }
+
+    private AgentExecutionResult handleRetryableModelFailure(AgentExecutionContext ctx,
+                                                             LangChain4jResolution resolution,
+                                                             String systemPrompt,
+                                                             ChatMemory chatMemory,
+                                                             String executionId,
+                                                             String agentId,
+                                                             String tenantId,
+                                                             int round,
+                                                             int maxRounds,
+                                                             long startMs,
+                                                             long totalTokenInput,
+                                                             long totalTokenOutput,
+                                                             String conversationId,
+                                                             Exception modelException) {
+        if (!shouldGracefullyCompleteOnModelFailure(modelException, round, maxRounds, chatMemory)) {
+            return null;
+        }
+
+        appendLog(executionId, agentId, tenantId, "WARN", "MODEL_FAILURE_FALLBACK", round,
+                "模型在第 " + round + " 轮持续失败，尝试强制收敛完成当前节点", startMs);
+
+        try {
+            ChatResponse forcedResponse = forceCompletion(resolution, systemPrompt, chatMemory,
+                    executionId, agentId, tenantId, round + 1, startMs);
+            var forcedTokenUsage = forcedResponse.metadata().tokenUsage();
+            long mergedTokenInput = totalTokenInput;
+            long mergedTokenOutput = totalTokenOutput;
+            if (forcedTokenUsage != null) {
+                mergedTokenInput += forcedTokenUsage.inputTokenCount();
+                mergedTokenOutput += forcedTokenUsage.outputTokenCount();
+            }
+
+            AiMessage forcedAiMessage = forcedResponse.aiMessage();
+            String forcedContent = forcedAiMessage != null ? forcedAiMessage.text() : null;
+            if (!StringUtils.hasText(forcedContent)) {
+                forcedContent = buildDegradedCompletion(ctx, chatMemory, round, modelException, null);
+            }
+
+            chatMemory.add(UserMessage.from(FORCE_COMPLETION_PROMPT));
+            chatMemory.add(AiMessage.from(forcedContent));
+            return buildCompletedResult(executionId, agentId, tenantId,
+                    forcedContent, mergedTokenInput, mergedTokenOutput, round + 1, startMs, conversationId);
+        } catch (Exception forceException) {
+            if (!hasCompletionEvidence(chatMemory)) {
+                return null;
+            }
+            String degradedContent = buildDegradedCompletion(ctx, chatMemory, round, modelException, forceException);
+            appendLog(executionId, agentId, tenantId, "WARN", "DEGRADED_COMPLETION", round,
+                    "模型调用与强制收敛均失败，基于已收集证据输出降级结论", startMs);
+            publishEvent(executionId, "AI_RESPONSE", round, "模型异常，已使用降级结论完成节点", null, startMs);
+            chatMemory.add(UserMessage.from(FORCE_COMPLETION_PROMPT));
+            chatMemory.add(AiMessage.from(degradedContent));
+            return buildCompletedResult(executionId, agentId, tenantId,
+                    degradedContent, totalTokenInput, totalTokenOutput, round, startMs, conversationId);
+        }
+    }
+
+    private boolean shouldGracefullyCompleteOnModelFailure(Exception exception,
+                                                           int round,
+                                                           int maxRounds,
+                                                           ChatMemory chatMemory) {
+        if (!isRetryableModelError(exception)) {
+            return false;
+        }
+        return round >= maxRounds || round >= 3 && hasCompletionEvidence(chatMemory);
+    }
+
+    private boolean hasCompletionEvidence(ChatMemory chatMemory) {
+        if (chatMemory == null || chatMemory.messages() == null) {
+            return false;
+        }
+        int evidenceCount = 0;
+        for (ChatMessage message : chatMemory.messages()) {
+            if (message instanceof AiMessage aiMessage && StringUtils.hasText(aiMessage.text())) {
+                evidenceCount++;
+            } else if (message instanceof ToolExecutionResultMessage toolMessage
+                    && StringUtils.hasText(toolMessage.text())) {
+                evidenceCount++;
+            }
+            if (evidenceCount >= 2) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String buildDegradedCompletion(AgentExecutionContext ctx,
+                                           ChatMemory chatMemory,
+                                           int round,
+                                           Exception primaryException,
+                                           Exception forcedException) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("# 阶段性技术结论（降级收敛）").append(System.lineSeparator()).append(System.lineSeparator());
+        builder.append("## 任务目标").append(System.lineSeparator());
+        builder.append("- ").append(compactText(ctx != null ? ctx.getInputPrompt() : "生成本节点要求的结构化 Markdown 结果", 220))
+                .append(System.lineSeparator()).append(System.lineSeparator());
+
+        builder.append("## 已确认信息").append(System.lineSeparator());
+        List<String> evidences = collectFallbackEvidence(chatMemory);
+        if (evidences.isEmpty()) {
+            builder.append("- 当前未收集到足够证据，请在后续节点或人工复核时补充。").append(System.lineSeparator());
+        } else {
+            for (String evidence : evidences) {
+                builder.append("- ").append(evidence).append(System.lineSeparator());
+            }
+        }
+        builder.append(System.lineSeparator());
+
+        builder.append("## 当前结论").append(System.lineSeparator());
+        builder.append("- 已基于前序轮次收集的信息完成收敛输出，可继续驱动后续工作流节点。").append(System.lineSeparator());
+        builder.append("- 模型在第 ").append(round).append(" 轮发生瞬时异常，当前结果为保守结论，优先保证链路连续性。")
+                .append(System.lineSeparator()).append(System.lineSeparator());
+
+        builder.append("## 风险与待确认").append(System.lineSeparator());
+        builder.append("- 模型异常: ").append(compactText(resolveExceptionMessage(primaryException), 180))
+                .append(System.lineSeparator());
+        if (forcedException != null) {
+            builder.append("- 强制收敛异常: ").append(compactText(resolveExceptionMessage(forcedException), 180))
+                    .append(System.lineSeparator());
+        }
+        builder.append("- 如需更完整结论，可在模型恢复后重新触发当前节点或复跑工作流。").append(System.lineSeparator());
+        return builder.toString();
+    }
+
+    private List<String> collectFallbackEvidence(ChatMemory chatMemory) {
+        List<String> evidences = new ArrayList<>();
+        if (chatMemory == null || chatMemory.messages() == null) {
+            return evidences;
+        }
+        List<ChatMessage> messages = chatMemory.messages();
+        for (int i = messages.size() - 1; i >= 0 && evidences.size() < FALLBACK_EVIDENCE_LIMIT; i--) {
+            ChatMessage message = messages.get(i);
+            if (message instanceof ToolExecutionResultMessage toolMessage && StringUtils.hasText(toolMessage.text())) {
+                evidences.add(0, "工具[" + toolMessage.toolName() + "] => "
+                        + compactText(toolMessage.text(), FALLBACK_TEXT_LIMIT));
+            } else if (message instanceof AiMessage aiMessage && StringUtils.hasText(aiMessage.text())) {
+                evidences.add(0, "AI结论 => " + compactText(aiMessage.text(), FALLBACK_TEXT_LIMIT));
+            }
+        }
+        return evidences;
+    }
+
+    private String buildForceCompletionContext(ChatMemory chatMemory) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("请基于以下已收集证据直接输出最终 Markdown，不要再调用工具。").append(System.lineSeparator())
+                .append(System.lineSeparator());
+
+        String taskSummary = extractTaskSummary(chatMemory);
+        if (StringUtils.hasText(taskSummary)) {
+            builder.append("任务摘要: ").append(compactText(taskSummary, 220)).append(System.lineSeparator())
+                    .append(System.lineSeparator());
+        }
+
+        List<String> evidences = collectFallbackEvidence(chatMemory);
+        if (evidences.isEmpty()) {
+            builder.append("- 当前没有可用证据，请直接输出一个保守但可交付的 Markdown 结果，并明确待确认项。");
+            return builder.toString();
+        }
+
+        builder.append("已收集证据:").append(System.lineSeparator());
+        for (String evidence : evidences) {
+            builder.append("- ").append(evidence).append(System.lineSeparator());
+        }
+        builder.append(System.lineSeparator()).append(FORCE_COMPLETION_PROMPT);
+        return builder.toString();
+    }
+
+    private String extractTaskSummary(ChatMemory chatMemory) {
+        if (chatMemory == null || chatMemory.messages() == null) {
+            return null;
+        }
+        for (ChatMessage message : chatMemory.messages()) {
+            if (message instanceof UserMessage userMessage && StringUtils.hasText(userMessage.singleText())) {
+                return userMessage.singleText();
+            }
+        }
+        return null;
+    }
+
+    private String resolveExceptionMessage(Exception exception) {
+        return exception != null && StringUtils.hasText(exception.getMessage())
+                ? exception.getMessage()
+                : exception != null ? exception.getClass().getSimpleName() : "unknown";
+    }
+
+    private String compactText(String text, int limit) {
+        if (!StringUtils.hasText(text)) {
+            return "待确认";
+        }
+        String normalized = text.replaceAll("\\s+", " ").trim();
+        if (normalized.length() <= limit) {
+            return normalized;
+        }
+        return normalized.substring(0, Math.max(limit, 1)) + "...";
+    }
+
+    private List<ToolCall> limitToolCalls(String executionId,
+                                          String agentId,
+                                          String tenantId,
+                                          int round,
+                                          List<ToolCall> toolCalls,
+                                          int maxToolCallsPerRound,
+                                          long startMs) {
+        if (toolCalls == null || toolCalls.isEmpty() || toolCalls.size() <= maxToolCallsPerRound) {
+            return toolCalls;
+        }
+        appendLog(executionId, agentId, tenantId, "WARN", "TOOL_CALL_LIMITED", round,
+                "本轮工具调用数 " + toolCalls.size() + " 超过上限 " + maxToolCallsPerRound + "，仅执行前 "
+                        + maxToolCallsPerRound + " 个，其余调用将返回限流提示",
+                startMs);
+        return new ArrayList<>(toolCalls.subList(0, maxToolCallsPerRound));
+    }
+
+    private ToolResult buildToolLimitResult(ToolCall toolCall, int maxToolCallsPerRound) {
+        return ToolResult.builder()
+                .callId(toolCall != null ? toolCall.getCallId() : null)
+                .toolCode(toolCall != null ? toolCall.getToolCode() : null)
+                .success(false)
+                .result(objectMapper.nullNode())
+                .errorMessage("本轮工具调用数量超过限制 " + maxToolCallsPerRound + "，请基于已有结果收敛并直接输出结论")
+                .build();
     }
 
     private JsonNode parseJsonOrEmpty(String jsonStr) {
@@ -409,6 +820,9 @@ public class AgentExecutionEngine {
 
     private long elapsed(long startMs) {
         return System.currentTimeMillis() - startMs;
+    }
+
+    private record ModelCallResult(ChatResponse response, LangChain4jResolution resolution) {
     }
 
     private static CompletableFuture<AgentExecutionResult> done(AgentExecutionResult r) {

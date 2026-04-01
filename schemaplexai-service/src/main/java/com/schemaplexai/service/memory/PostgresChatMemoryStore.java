@@ -1,7 +1,9 @@
 package com.schemaplexai.service.memory;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.ChatMessageMapper;
+import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.ChatMessageEntity;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -31,6 +33,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class PostgresChatMemoryStore implements ChatMemoryStore {
 
+    private final AgentExecutionMapper agentExecutionMapper;
     private final ChatMessageMapper chatMessageMapper;
 
     @Override
@@ -60,6 +63,12 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
     public void updateMessages(Object memoryId, List<ChatMessage> messages) {
         String conversationId = memoryId.toString();
         try {
+            AgentExecution messageOwner = resolveMessageOwner(conversationId);
+            if (messageOwner == null) {
+                log.warn("未找到对话所属执行记录，跳过写入对话历史: conversationId={}", conversationId);
+                return;
+            }
+
             // 删除旧消息（物理删除，因为 ChatMemory 的 eviction 机制需要精确覆盖）
             chatMessageMapper.delete(
                     new LambdaQueryWrapper<ChatMessageEntity>()
@@ -68,7 +77,7 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
             // 批量插入新消息
             for (int i = 0; i < messages.size(); i++) {
                 ChatMessage msg = messages.get(i);
-                ChatMessageEntity entity = fromLangChain4jMessage(msg, conversationId, i);
+                ChatMessageEntity entity = fromLangChain4jMessage(msg, messageOwner, conversationId, i);
                 if (entity != null) {
                     chatMessageMapper.insert(entity);
                 }
@@ -137,9 +146,13 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
     /**
      * LangChain4J ChatMessage → ChatMessageEntity
      */
-    private ChatMessageEntity fromLangChain4jMessage(ChatMessage msg, String conversationId, int index) {
+    private ChatMessageEntity fromLangChain4jMessage(ChatMessage msg, AgentExecution messageOwner,
+                                                     String conversationId, int index) {
         ChatMessageEntity entity = new ChatMessageEntity();
+        entity.setTenantId(messageOwner.getTenantId());
         entity.setConversationId(conversationId);
+        entity.setExecutionId(messageOwner.getId());
+        entity.setAgentId(messageOwner.getAgentId());
         entity.setMessageIndex(index);
         entity.setCreatedAt(LocalDateTime.now());
         entity.setDeleted(0);
@@ -177,5 +190,13 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
         }
 
         return entity;
+    }
+
+    private AgentExecution resolveMessageOwner(String conversationId) {
+        return agentExecutionMapper.selectOne(
+                new LambdaQueryWrapper<AgentExecution>()
+                        .eq(AgentExecution::getConversationId, conversationId)
+                        .orderByDesc(AgentExecution::getCreatedAt)
+                        .last("LIMIT 1"));
     }
 }

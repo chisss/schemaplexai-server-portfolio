@@ -3,7 +3,12 @@ package com.schemaplexai.service.memory.rag;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.schemaplexai.dao.mapper.KnowledgeDocumentMapper;
 import com.schemaplexai.model.entity.KnowledgeDocument;
+import com.schemaplexai.model.entity.RagOperationLog;
+import com.schemaplexai.service.rag.EmbeddingQuotaGuard;
+import com.schemaplexai.service.rag.RagConfigService;
+import com.schemaplexai.service.rag.RagRuntimeSettings;
 import com.schemaplexai.service.vector.EmbeddingService;
+import com.schemaplexai.service.vector.EmbeddingTokenEstimator;
 import dev.langchain4j.data.document.Document;
 import dev.langchain4j.data.document.DocumentSplitter;
 import dev.langchain4j.data.document.parser.apache.tika.ApacheTikaDocumentParser;
@@ -11,173 +16,262 @@ import dev.langchain4j.data.document.splitter.DocumentSplitters;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.filter.Filter;
+import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.io.InputStream;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * 文档摄入管线（RAG Pipeline）
  *
  * <p>完整流程：Load → Clean → Split → Embed → Store
- * <ul>
- *   <li>Load: 使用 Apache Tika 解析 PDF/Word/Excel/TXT/Markdown/HTML</li>
- *   <li>Clean: 使用 {@link CleaningDocumentTransformer} 清洗文本</li>
- *   <li>Split: 使用 {@link DocumentSplitters#recursive} 递归分块</li>
- *   <li>Embed: 使用 {@link EmbeddingService} 生成向量</li>
- *   <li>Store: 写入 {@link EmbeddingStore} (Milvus)</li>
- * </ul>
- *
- * <p>处理状态跟踪到 sf_knowledge_document 表。
  */
 @Slf4j
 @Service
 public class DocumentIngestionService {
 
-    /** 分块大小（字符数） */
-    private static final int CHUNK_SIZE = 1000;
-    /** 分块重叠（字符数） */
-    private static final int CHUNK_OVERLAP = 200;
-
-    private final EmbeddingStore<TextSegment> embeddingStore;
+    private final RagMilvusStoreFactory ragMilvusStoreFactory;
+    private final RagConfigService ragConfigService;
+    private final EmbeddingQuotaGuard embeddingQuotaGuard;
     private final EmbeddingService embeddingService;
     private final KnowledgeDocumentMapper documentMapper;
 
     public DocumentIngestionService(
-            @Autowired(required = false) EmbeddingStore<TextSegment> embeddingStore,
+            @Autowired(required = false) RagMilvusStoreFactory ragMilvusStoreFactory,
+            RagConfigService ragConfigService,
+            EmbeddingQuotaGuard embeddingQuotaGuard,
             EmbeddingService embeddingService,
             KnowledgeDocumentMapper documentMapper) {
-        this.embeddingStore = embeddingStore;
+        this.ragMilvusStoreFactory = ragMilvusStoreFactory;
+        this.ragConfigService = ragConfigService;
+        this.embeddingQuotaGuard = embeddingQuotaGuard;
         this.embeddingService = embeddingService;
         this.documentMapper = documentMapper;
     }
 
+    @lombok.Getter
+    public static class TextIngestionResult {
+
+        private final String status;
+        private final int chunkCount;
+        private final String errorMessage;
+
+        private TextIngestionResult(String status, int chunkCount, String errorMessage) {
+            this.status = status;
+            this.chunkCount = chunkCount;
+            this.errorMessage = errorMessage;
+        }
+
+        public static TextIngestionResult success(int chunkCount) {
+            return new TextIngestionResult("success", chunkCount, null);
+        }
+
+        public static TextIngestionResult failed(String errorMessage) {
+            return new TextIngestionResult("failed", 0, errorMessage);
+        }
+
+        public static TextIngestionResult skipped(String errorMessage) {
+            return new TextIngestionResult("skipped", 0, errorMessage);
+        }
+
+        public boolean isSuccess() {
+            return "success".equalsIgnoreCase(status);
+        }
+    }
+
     /**
      * 执行文档摄入管线
-     *
-     * @param documentId  知识文档记录 ID（sf_knowledge_document.id）
-     * @param tenantId    租户 ID
-     * @param contextId   关联的上下文 ID
-     * @param fileStream  文件输入流
-     * @param fileName    原始文件名
      */
     public void ingestDocument(String documentId, String tenantId, String contextId,
                                InputStream fileStream, String fileName) {
-        if (embeddingStore == null) {
-            log.warn("EmbeddingStore 不可用，跳过文档摄入: documentId={}", documentId);
-            updateDocumentStatus(documentId, "failed", "EmbeddingStore 不可用", 0);
+        RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
+        EmbeddingStore<TextSegment> embeddingStore = resolveStore(tenantId);
+        if (!settings.isEnabled() || embeddingStore == null) {
+            String errorMessage = !settings.isEnabled() ? "RAG 未启用" : "EmbeddingStore 不可用";
+            log.warn("跳过文档摄入: documentId={}, tenantId={}, reason={}", documentId, tenantId, errorMessage);
+            updateDocumentStatus(documentId, "failed", errorMessage, 0, 0, settings.getModelId());
+            recordWriteOperation("knowledge_document", documentId, contextId, tenantId, settings,
+                    0, 0, 0, 0L, "failed", errorMessage, buildMetadata(fileName, settings));
             return;
         }
 
-        // 更新状态为处理中
-        updateDocumentStatus(documentId, "processing", null, 0);
+        updateDocumentStatus(documentId, "processing", null, 0, 0, settings.getModelId());
+        long startMs = System.currentTimeMillis();
 
         try {
-            // 1. 解析文档（Apache Tika 自动识别格式）
             ApacheTikaDocumentParser parser = new ApacheTikaDocumentParser();
             Document document = parser.parse(fileStream);
             log.info("文档解析完成: documentId={}, fileName={}, 原始长度={}",
                     documentId, fileName, document.text().length());
 
-            // 2. 文本清洗
-            CleaningDocumentTransformer cleaner = new CleaningDocumentTransformer();
-            document = cleaner.transform(document);
+            document = cleanDocument(document, settings.isTextCleaningEnabled());
 
-            // 3. 文本分块
-            DocumentSplitter splitter = DocumentSplitters.recursive(CHUNK_SIZE, CHUNK_OVERLAP);
+            DocumentSplitter splitter = DocumentSplitters.recursive(settings.getChunkSize(), settings.getChunkOverlap());
             List<TextSegment> segments = splitter.split(document);
             log.info("文档分块完成: documentId={}, chunkCount={}", documentId, segments.size());
+            int totalTokens = segments.stream()
+                    .map(TextSegment::text)
+                    .mapToInt(EmbeddingTokenEstimator::estimate)
+                    .sum();
+            embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, totalTokens);
 
-            // 4. 向量化并存储
-            int storedCount = 0;
+            removeExistingSegments(embeddingStore, "document_id", documentId);
+
+            List<String> ids = new ArrayList<>(segments.size());
+            List<Embedding> embeddings = new ArrayList<>(segments.size());
+            List<TextSegment> embeddedSegments = new ArrayList<>(segments.size());
             for (int i = 0; i < segments.size(); i++) {
                 TextSegment segment = segments.get(i);
-
-                // 注入元数据
                 segment.metadata().put("tenant_id", tenantId);
                 segment.metadata().put("context_id", contextId != null ? contextId : "");
                 segment.metadata().put("document_id", documentId);
                 segment.metadata().put("chunk_index", String.valueOf(i));
                 segment.metadata().put("file_name", fileName);
-
-                // 向量化
-                float[] vector = embeddingService.embed(segment.text());
-                Embedding embedding = Embedding.from(vector);
-
-                // 存储到 EmbeddingStore
-                embeddingStore.add(embedding, segment);
-                storedCount++;
+                ids.add(buildChunkId(documentId, i));
+                embeddings.add(Embedding.from(embeddingService.embed(tenantId, segment.text())));
+                embeddedSegments.add(segment);
+            }
+            if (!ids.isEmpty()) {
+                embeddingStore.addAll(ids, embeddings, embeddedSegments);
             }
 
-            // 5. 更新文档状态
-            updateDocumentStatus(documentId, "completed", null, storedCount);
-            log.info("文档摄入完成: documentId={}, chunks={}", documentId, storedCount);
-
+            long durationMs = System.currentTimeMillis() - startMs;
+            updateDocumentStatus(documentId, "completed", null, ids.size(), totalTokens, settings.getModelId());
+            recordWriteOperation("knowledge_document", documentId, contextId, tenantId, settings,
+                    ids.size(), document.text().length(), totalTokens, durationMs, "success", null, buildMetadata(fileName, settings));
+            log.info("文档摄入完成: documentId={}, chunks={}, durationMs={}", documentId, ids.size(), durationMs);
         } catch (Exception e) {
+            long durationMs = System.currentTimeMillis() - startMs;
             log.error("文档摄入失败: documentId={}, error={}", documentId, e.getMessage(), e);
-            updateDocumentStatus(documentId, "failed", e.getMessage(), 0);
+            updateDocumentStatus(documentId, "failed", e.getMessage(), 0, 0, settings.getModelId());
+            recordWriteOperation("knowledge_document", documentId, contextId, tenantId, settings,
+                    0, 0, 0, durationMs, "failed", e.getMessage(), buildMetadata(fileName, settings));
         }
     }
 
     /**
      * 直接摄入纯文本内容（用于上下文条目的向量化）
-     *
-     * @param itemId     条目 ID
-     * @param tenantId   租户 ID
-     * @param contextId  上下文 ID
-     * @param content    文本内容
-     * @return 分块数量
      */
-    public int ingestText(String itemId, String tenantId, String contextId, String content) {
-        if (embeddingStore == null) {
-            log.warn("EmbeddingStore 不可用，跳过文本摄入: itemId={}", itemId);
-            return 0;
+    public TextIngestionResult ingestText(String itemId, String tenantId, String contextId, String content) {
+        RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
+        EmbeddingStore<TextSegment> embeddingStore = resolveStore(tenantId);
+        if (!settings.isEnabled() || embeddingStore == null) {
+            String errorMessage = !settings.isEnabled() ? "RAG 未启用" : "EmbeddingStore 不可用";
+            recordWriteOperation("context_item", itemId, contextId, tenantId, settings,
+                    0, content != null ? content.length() : 0, 0, 0L,
+                    "skipped", errorMessage,
+                    buildMetadata(null, settings));
+            log.warn("EmbeddingStore 不可用或 RAG 未启用，跳过文本摄入: itemId={}", itemId);
+            return TextIngestionResult.skipped(errorMessage);
         }
 
+        long startMs = System.currentTimeMillis();
         try {
-            if (content == null || content.isBlank()) {
-                return 0;
+            if (!StringUtils.hasText(content)) {
+                return TextIngestionResult.skipped("内容为空");
             }
 
-            // 清洗
-            Document document = Document.from(content);
-            CleaningDocumentTransformer cleaner = new CleaningDocumentTransformer();
-            document = cleaner.transform(document);
-
-            // 分块
-            DocumentSplitter splitter = DocumentSplitters.recursive(CHUNK_SIZE, CHUNK_OVERLAP);
+            Document document = cleanDocument(Document.from(content), settings.isTextCleaningEnabled());
+            DocumentSplitter splitter = DocumentSplitters.recursive(settings.getChunkSize(), settings.getChunkOverlap());
             List<TextSegment> segments = splitter.split(document);
+            int totalTokens = segments.stream()
+                    .map(TextSegment::text)
+                    .mapToInt(EmbeddingTokenEstimator::estimate)
+                    .sum();
+            embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, totalTokens);
 
-            // 向量化并存储
+            removeExistingSegments(embeddingStore, "item_id", itemId);
+
+            List<String> ids = new ArrayList<>(segments.size());
+            List<Embedding> embeddings = new ArrayList<>(segments.size());
+            List<TextSegment> embeddedSegments = new ArrayList<>(segments.size());
             for (int i = 0; i < segments.size(); i++) {
                 TextSegment segment = segments.get(i);
                 segment.metadata().put("tenant_id", tenantId);
                 segment.metadata().put("context_id", contextId != null ? contextId : "");
                 segment.metadata().put("item_id", itemId);
                 segment.metadata().put("chunk_index", String.valueOf(i));
-
-                float[] vector = embeddingService.embed(segment.text());
-                embeddingStore.add(Embedding.from(vector), segment);
+                ids.add(buildChunkId(itemId, i));
+                embeddings.add(Embedding.from(embeddingService.embed(tenantId, segment.text())));
+                embeddedSegments.add(segment);
+            }
+            if (!ids.isEmpty()) {
+                embeddingStore.addAll(ids, embeddings, embeddedSegments);
             }
 
-            log.debug("文本摄入完成: itemId={}, chunks={}", itemId, segments.size());
-            return segments.size();
-
+            long durationMs = System.currentTimeMillis() - startMs;
+            recordWriteOperation("context_item", itemId, contextId, tenantId, settings,
+                    ids.size(), content.length(), totalTokens, durationMs, "success", null, buildMetadata(null, settings));
+            log.debug("文本摄入完成: itemId={}, chunks={}, durationMs={}", itemId, ids.size(), durationMs);
+            return TextIngestionResult.success(ids.size());
         } catch (Exception e) {
+            long durationMs = System.currentTimeMillis() - startMs;
+            recordWriteOperation("context_item", itemId, contextId, tenantId, settings,
+                    0, content != null ? content.length() : 0, EmbeddingTokenEstimator.estimate(content), durationMs, "failed", e.getMessage(),
+                    buildMetadata(null, settings));
             log.warn("文本摄入失败: itemId={}, error={}", itemId, e.getMessage());
-            return 0;
+            return TextIngestionResult.failed(e.getMessage());
         }
     }
 
-    private void updateDocumentStatus(String documentId, String status, String errorMessage, int chunkCount) {
+    public void removeByItemId(String tenantId, String itemId) {
+        EmbeddingStore<TextSegment> embeddingStore = resolveStore(tenantId);
+        if (embeddingStore == null || !StringUtils.hasText(itemId)) {
+            return;
+        }
+        removeExistingSegments(embeddingStore, "item_id", itemId);
+    }
+
+    public void removeByContextId(String tenantId, String contextId) {
+        EmbeddingStore<TextSegment> embeddingStore = resolveStore(tenantId);
+        if (embeddingStore == null || !StringUtils.hasText(contextId)) {
+            return;
+        }
+        removeExistingSegments(embeddingStore, "context_id", contextId);
+    }
+
+    private EmbeddingStore<TextSegment> resolveStore(String tenantId) {
+        return ragMilvusStoreFactory != null ? ragMilvusStoreFactory.getStore(tenantId) : null;
+    }
+
+    private Document cleanDocument(Document document, boolean cleaningEnabled) {
+        if (!cleaningEnabled) {
+            return document;
+        }
+        return new CleaningDocumentTransformer().transform(document);
+    }
+
+    private void removeExistingSegments(EmbeddingStore<TextSegment> embeddingStore, String metadataKey, String value) {
+        if (embeddingStore == null || !StringUtils.hasText(metadataKey) || !StringUtils.hasText(value)) {
+            return;
+        }
+        try {
+            Filter filter = MetadataFilterBuilder.metadataKey(metadataKey).isEqualTo(value);
+            embeddingStore.removeAll(filter);
+        } catch (Exception e) {
+            log.debug("清理历史向量片段失败: metadataKey={}, value={}, error={}", metadataKey, value, e.getMessage());
+        }
+    }
+
+    private void updateDocumentStatus(String documentId, String status, String errorMessage,
+                                      int chunkCount, int totalTokens, String embeddingModel) {
         try {
             LambdaUpdateWrapper<KnowledgeDocument> wrapper = new LambdaUpdateWrapper<>();
             wrapper.eq(KnowledgeDocument::getId, documentId)
                     .set(KnowledgeDocument::getStatus, status)
                     .set(KnowledgeDocument::getChunkCount, chunkCount)
+                    .set(KnowledgeDocument::getTotalTokens, totalTokens)
+                    .set(KnowledgeDocument::getEmbeddingModel, embeddingModel)
                     .set(KnowledgeDocument::getUpdatedAt, LocalDateTime.now());
             if (errorMessage != null) {
                 wrapper.set(KnowledgeDocument::getErrorMessage, errorMessage);
@@ -187,4 +281,45 @@ public class DocumentIngestionService {
             log.warn("更新文档状态失败: documentId={}, error={}", documentId, e.getMessage());
         }
     }
+
+    private void recordWriteOperation(String sourceType, String sourceId, String contextId,
+                                      String tenantId, RagRuntimeSettings settings, int chunkCount,
+                                      int requestChars, int requestTokens, long durationMs, String status,
+                                      String errorMessage, Map<String, Object> metadata) {
+        RagOperationLog operationLog = new RagOperationLog();
+        operationLog.setTenantId(tenantId);
+        operationLog.setOperationType("write");
+        operationLog.setSourceType(sourceType);
+        operationLog.setSourceId(sourceId);
+        operationLog.setContextId(contextId);
+        operationLog.setModelConfigId(settings.getVectorModelConfigId());
+        operationLog.setModelName(settings.getVectorModelName());
+        operationLog.setProvider(settings.getProvider());
+        operationLog.setCollectionName(settings.getCollectionName());
+        operationLog.setStatus(status);
+        operationLog.setChunkCount(chunkCount);
+        operationLog.setVectorDimension(settings.getEmbeddingDimension());
+        operationLog.setRequestChars(requestChars);
+        operationLog.setRequestTokens(requestTokens);
+        operationLog.setDurationMs(durationMs);
+        operationLog.setErrorMessage(errorMessage);
+        operationLog.setMetadata(metadata);
+        ragConfigService.recordOperation(operationLog);
+    }
+
+    private Map<String, Object> buildMetadata(String fileName, RagRuntimeSettings settings) {
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        if (StringUtils.hasText(fileName)) {
+            metadata.put("fileName", fileName);
+        }
+        metadata.put("chunkSize", settings.getChunkSize());
+        metadata.put("chunkOverlap", settings.getChunkOverlap());
+        metadata.put("textCleaningEnabled", settings.isTextCleaningEnabled());
+        return metadata;
+    }
+
+    private String buildChunkId(String sourceId, int chunkIndex) {
+        return UUID.nameUUIDFromBytes((sourceId + "#" + chunkIndex).getBytes()).toString();
+    }
+
 }

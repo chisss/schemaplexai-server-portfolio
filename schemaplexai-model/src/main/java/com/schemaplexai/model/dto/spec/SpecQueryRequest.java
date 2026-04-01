@@ -23,6 +23,9 @@ public class SpecQueryRequest {
     /** 分类筛选 */
     private String category;
 
+    /** 优先级筛选 */
+    private String priority;
+
     /** 拥有者筛选 */
     private String owner;
 

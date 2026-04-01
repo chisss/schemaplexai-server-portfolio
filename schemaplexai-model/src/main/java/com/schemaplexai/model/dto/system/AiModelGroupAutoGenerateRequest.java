@@ -15,4 +15,7 @@ public class AiModelGroupAutoGenerateRequest {
 
     /** 模型组名称，不填则自动生成 */
     private String name;
+
+    /** 限定 useCase，同一类型模型自动成组 */
+    private String useCase;
 }

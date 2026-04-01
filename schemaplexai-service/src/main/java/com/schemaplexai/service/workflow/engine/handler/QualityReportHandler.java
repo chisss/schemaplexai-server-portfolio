@@ -39,7 +39,11 @@ public class QualityReportHandler {
      */
     @SuppressWarnings("unchecked")
     public Map<String, Object> generateReport(WorkflowInstance instance) {
-        List<WorkflowNodeExecution> allExecs = nodeExecutionMapper.selectByInstanceId(instance.getId());
+        List<WorkflowNodeExecution> allExecs = nodeExecutionMapper.selectList(
+                new LambdaQueryWrapper<WorkflowNodeExecution>()
+                        .eq(WorkflowNodeExecution::getInstanceId, instance.getId())
+                        .orderByAsc(WorkflowNodeExecution::getCreatedAt)
+        );
 
         long totalNodes = allExecs.size();
         long completedNodes = allExecs.stream()
@@ -69,7 +73,10 @@ public class QualityReportHandler {
                     summary.put("startedAt", e.getStartedAt() != null ? e.getStartedAt().toString() : null);
                     summary.put("completedAt", e.getCompletedAt() != null ? e.getCompletedAt().toString() : null);
                     if (e.getOutputData() != null) {
-                        summary.put("result", e.getOutputData().get("result"));
+                        Object result = e.getOutputData().get("result");
+                        summary.put("result", result != null ? result : e.getOutputData().get("agentResult"));
+                        summary.put("qualitySummary", e.getOutputData().get("qualitySummary"));
+                        summary.put("qualityTaskId", e.getOutputData().get("qualityTaskId"));
                     }
                     return summary;
                 })

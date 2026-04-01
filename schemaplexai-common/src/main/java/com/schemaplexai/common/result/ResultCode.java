@@ -145,7 +145,19 @@ public enum ResultCode {
     // ---- CICD 90050~90059 ----
     CICD_PIPELINE_NOT_FOUND(90050, "Pipeline不存在"),
     CICD_TRIGGER_FAILED(90051, "构建触发失败"),
-    CICD_PIPELINE_NAME_DUPLICATE(90052, "Pipeline名称已存在");
+    CICD_PIPELINE_NAME_DUPLICATE(90052, "Pipeline名称已存在"),
+
+    // ---- 安全合规 91060~91069 ----
+    SECURITY_POLICY_NOT_FOUND(91060, "安全策略不存在"),
+    SECURITY_POLICY_CODE_DUPLICATE(91061, "安全策略编码已存在"),
+    SECURITY_AUDIT_EVENT_NOT_FOUND(91062, "安全审计事件不存在"),
+    SECURITY_INCIDENT_NOT_FOUND(91063, "安全事件不存在"),
+    SECURITY_RULE_PACK_NOT_FOUND(91064, "行业规则包不存在"),
+    SECURITY_RULE_ITEM_NOT_FOUND(91065, "行业规则项不存在"),
+    SECURITY_BINDING_NOT_FOUND(91066, "安全绑定关系不存在"),
+    SECURITY_CHECK_BLOCKED(91067, "请求被安全策略阻断"),
+    SECURITY_CHECK_PAUSED(91068, "请求因安全策略已暂停"),
+    SECURITY_POLICY_VERSION_NOT_FOUND(91069, "安全策略版本不存在");
 
     private final int code;
     private final String message;

@@ -16,6 +16,7 @@ public class BranchRule implements Serializable {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
     private String tenantId;
+    private String workspaceId;
     private String integrationProjectId;
     private String branchPattern;
     @TableField(typeHandler = JacksonTypeHandler.class)

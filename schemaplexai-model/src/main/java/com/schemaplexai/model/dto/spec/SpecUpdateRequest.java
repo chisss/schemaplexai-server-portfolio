@@ -16,6 +16,9 @@ public class SpecUpdateRequest {
     /** 分类 */
     private String category;
 
+    /** 优先级 */
+    private String priority;
+
     /** 描述 */
     private String description;
 
@@ -24,4 +27,10 @@ public class SpecUpdateRequest {
 
     /** 关联工作流模板ID */
     private String workflowId;
+
+    /** Jira 或需求单号 */
+    private String jiraTicket;
+
+    /** 目标研发分支 */
+    private String targetBranch;
 }

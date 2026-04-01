@@ -35,6 +35,9 @@ public class AiModelConfig {
     /** 最大输出 Token 数 */
     private final int maxTokens;
 
+    /** 模型累计 Tokens 限额 */
+    private final Integer maxQuotaTokens;
+
     /** HTTP 请求超时秒数（read timeout） */
     private final int timeoutSeconds;
 
@@ -61,6 +64,7 @@ public class AiModelConfig {
                 .modelId(model.getModelId())
                 .provider(provider)
                 .maxTokens(model.getMaxTokens() != null ? model.getMaxTokens() : 4096)
+                .maxQuotaTokens(model.getMaxQuotaTokens())
                 .timeoutSeconds(model.getTimeoutSeconds() != null ? model.getTimeoutSeconds() : 60)
                 .build();
     }

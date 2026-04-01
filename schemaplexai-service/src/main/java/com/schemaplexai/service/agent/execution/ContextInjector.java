@@ -240,10 +240,11 @@ public class ContextInjector {
      * 语义检索：优先使用 LangChain4J ContentRetriever，fallback 到原始 MilvusVectorService
      */
     private List<String> retrieveSemanticContext(String tenantId, String agentId, String query) {
+        List<String> boundContextIds = loadBoundContextIds(agentId);
         // 优先使用 LangChain4J RAG ContentRetriever
         if (ragContentRetrieverFactory != null) {
             try {
-                ContentRetriever retriever = ragContentRetrieverFactory.createRetriever(tenantId);
+                ContentRetriever retriever = ragContentRetrieverFactory.createRetriever(tenantId, boundContextIds);
                 if (retriever != null) {
                     List<Content> contents = retriever.retrieve(Query.from(query));
                     List<String> results = contents.stream()
@@ -269,6 +270,22 @@ public class ContextInjector {
         }
 
         return List.of();
+    }
+
+    private List<String> loadBoundContextIds(String agentId) {
+        if (!StringUtils.hasText(agentId)) {
+            return List.of();
+        }
+        return agentContextBindingMapper.selectList(
+                        new LambdaQueryWrapper<AgentContextBinding>()
+                                .eq(AgentContextBinding::getAgentId, agentId)
+                                .isNotNull(AgentContextBinding::getContextId)
+                                .orderByAsc(AgentContextBinding::getSortOrder))
+                .stream()
+                .map(AgentContextBinding::getContextId)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
     }
 
     /**

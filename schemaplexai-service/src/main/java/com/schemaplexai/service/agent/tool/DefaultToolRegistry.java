@@ -2,13 +2,19 @@ package com.schemaplexai.service.agent.tool;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
+import com.schemaplexai.dao.mapper.BuiltinToolMapper;
+import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.model.entity.BuiltinTool;
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.tool.executor.ToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
 import com.schemaplexai.common.model.ToolResult;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -17,6 +23,7 @@ import org.springframework.util.StringUtils;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -25,7 +32,9 @@ public class DefaultToolRegistry implements ToolRegistry {
 
     private final ObjectMapper objectMapper;
     private final AgentToolBindingMapper agentToolBindingMapper;
+    private final BuiltinToolMapper builtinToolMapper;
     private final List<ToolExecutor> toolExecutors;
+    private final SecurityRuntimeGuardService securityRuntimeGuardService;
 
     @Override
     public List<ToolDefinition> listEnabledTools(String tenantId, String agentId) {
@@ -43,11 +52,12 @@ public class DefaultToolRegistry implements ToolRegistry {
 
         List<ToolDefinition> tools = new ArrayList<>();
         for (AgentToolBinding binding : bindings) {
+            BuiltinTool builtinTool = resolveBuiltinTool(binding);
             tools.add(ToolDefinition.builder()
                     .code(binding.getToolCode())
-                    .name(binding.getToolCode())
-                    .description("Agent 绑定工具: " + binding.getToolCode())
-                    .inputSchema(objectMapper.createObjectNode())
+                    .name(builtinTool != null && StringUtils.hasText(builtinTool.getName()) ? builtinTool.getName() : binding.getToolCode())
+                    .description(resolveDescription(binding, builtinTool))
+                    .inputSchema(resolveInputSchema(builtinTool))
                     .sourceType(binding.getSourceType())
                     .userVisible(true)
                     .build());
@@ -101,7 +111,25 @@ public class DefaultToolRegistry implements ToolRegistry {
             }
 
             try {
-                results.add(executor.execute(tenantId, agentId, binding, toolCall));
+                SecurityCheckDecisionVO preDecision = securityRuntimeGuardService.evaluate(
+                        buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE, agentId, toolCall, null),
+                        null
+                );
+                if (preDecision != null && ("block".equals(preDecision.getDecision()) || "pause".equals(preDecision.getDecision()))) {
+                    results.add(failureResult(toolCall, preDecision.getMessage()));
+                    continue;
+                }
+
+                ToolResult result = executor.execute(tenantId, agentId, binding, toolCall);
+                SecurityCheckDecisionVO postDecision = securityRuntimeGuardService.evaluate(
+                        buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, agentId, toolCall, result),
+                        null
+                );
+                if (postDecision != null && ("block".equals(postDecision.getDecision()) || "pause".equals(postDecision.getDecision()))) {
+                    results.add(failureResult(toolCall, postDecision.getMessage()));
+                    continue;
+                }
+                results.add(result);
             } catch (Exception exception) {
                 log.error("工具执行异常: agentId={}, toolCode={}", agentId, toolCall.getToolCode(), exception);
                 results.add(failureResult(toolCall, "工具执行异常: " + exception.getMessage()));
@@ -118,5 +146,54 @@ public class DefaultToolRegistry implements ToolRegistry {
                 .result(objectMapper.nullNode())
                 .errorMessage(message)
                 .build();
+    }
+
+    private BuiltinTool resolveBuiltinTool(AgentToolBinding binding) {
+        String sourceType = StringUtils.hasText(binding.getSourceType())
+                ? binding.getSourceType().trim().toLowerCase()
+                : SourceTypeEnum.BUILTIN.getCode();
+        if (!SourceTypeEnum.BUILTIN.getCode().equals(sourceType)) {
+            return null;
+        }
+        return builtinToolMapper.selectOne(new LambdaQueryWrapper<BuiltinTool>()
+                .eq(BuiltinTool::getCode, binding.getToolCode())
+                .eq(BuiltinTool::getEnabled, true)
+                .last("LIMIT 1"));
+    }
+
+    private SecurityRuntimeCheckRequest buildToolCheckRequest(String scene, String agentId, ToolCall toolCall, ToolResult toolResult) {
+        var request = new SecurityRuntimeCheckRequest();
+        request.setScene(scene);
+        request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+        request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT);
+        request.setResourceId(agentId);
+        request.setAgentId(agentId);
+        request.setToolCode(toolCall != null ? toolCall.getToolCode() : null);
+        if (toolCall != null && toolCall.getArguments() != null && !toolCall.getArguments().isNull()) {
+            request.setArguments(objectMapper.convertValue(toolCall.getArguments(), Map.class));
+        }
+        if (toolResult != null) {
+            request.setContent(String.valueOf(toolResult.getResult()));
+        }
+        return request;
+    }
+
+    private String resolveDescription(AgentToolBinding binding, BuiltinTool builtinTool) {
+        if (builtinTool != null && StringUtils.hasText(builtinTool.getDescription())) {
+            return builtinTool.getDescription();
+        }
+        return "Agent 绑定工具: " + binding.getToolCode();
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode resolveInputSchema(BuiltinTool builtinTool) {
+        if (builtinTool == null || !StringUtils.hasText(builtinTool.getInputSchema())) {
+            return objectMapper.createObjectNode();
+        }
+        try {
+            return objectMapper.readTree(builtinTool.getInputSchema());
+        } catch (Exception exception) {
+            log.warn("解析内置工具 Schema 失败: toolCode={}, error={}", builtinTool.getCode(), exception.getMessage());
+            return objectMapper.createObjectNode();
+        }
     }
 }

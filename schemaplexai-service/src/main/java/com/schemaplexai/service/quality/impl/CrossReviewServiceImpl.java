@@ -4,23 +4,31 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
-import com.schemaplexai.common.enums.TaskStatusEnum;
-import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.CrossReviewMapper;
+import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.model.converter.CrossReviewConverter;
 import com.schemaplexai.model.dto.quality.CrossReviewCreateRequest;
+import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.CrossReview;
+import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.vo.quality.CrossReviewVO;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.quality.CrossReviewService;
+import com.schemaplexai.service.quality.QualityCrossReviewExecutionService;
+import com.schemaplexai.service.quality.QualityProfileResolverService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 多模型交叉审查服务实现
@@ -33,37 +41,33 @@ public class CrossReviewServiceImpl implements CrossReviewService {
     private final CrossReviewMapper crossReviewMapper;
     private final CrossReviewConverter crossReviewConverter;
     private final EntityValidator entityValidator;
-    private final RabbitTemplate rabbitTemplate;
+    private final QualityCrossReviewExecutionService qualityCrossReviewExecutionService;
+    private final QualityProfileResolverService qualityProfileResolverService;
+    private final SpecMapper specMapper;
+    private final AiModelMapper aiModelMapper;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public CrossReviewVO create(CrossReviewCreateRequest request) {
-        var entity = new CrossReview();
-        entity.setSpecId(request.getSpecId());
-        entity.setTaskId(request.getTaskId());
-        entity.setModelAId(request.getModelAId());
-        entity.setModelBId(request.getModelBId());
-        entity.setStatus(TaskStatusEnum.PENDING.getCode());
-        entity.setCreatedBy(SecurityUtil.getCurrentUserId());
-        entity.setTenantId(SecurityUtil.getCurrentTenantId());
-
-        crossReviewMapper.insert(entity);
-        log.info("创建交叉审查: reviewId={}, specId={}, modelA={}, modelB={}",
-                entity.getId(), request.getSpecId(), request.getModelAId(), request.getModelBId());
-
-        Map<String, Object> message = Map.of(
-                "reviewId", entity.getId(),
-                "specId", request.getSpecId(),
-                "taskId", request.getTaskId(),
-                "modelAId", request.getModelAId(),
-                "modelBId", request.getModelBId(),
-                "type", "cross_review"
+        List<String> modelIds = request.getModelIds();
+        if (CollectionUtils.isEmpty(modelIds) && StringUtils.hasText(request.getProfileId())) {
+            modelIds = qualityProfileResolverService.listModelIds(request.getProfileId());
+        }
+        var entity = qualityCrossReviewExecutionService.createAndExecute(
+                request.getSpecId(),
+                request.getTaskId(),
+                request.getProfileId(),
+                request.getIssueType(),
+                modelIds,
+                "manual",
+                null,
+                null
         );
-
-        rabbitTemplate.convertAndSend("sf.quality.check", message);
-        log.info("交叉审查任务已发送到MQ: reviewId={}", entity.getId());
-
-        return crossReviewConverter.toVO(entity);
+        if (entity == null) {
+            throw new IllegalArgumentException("未找到可用模型，无法发起交叉审查");
+        }
+        log.info("创建交叉审查并完成执行: reviewId={}, specId={}", entity.getId(), request.getSpecId());
+        return enrichVO(entity);
     }
 
     @Override
@@ -82,13 +86,39 @@ public class CrossReviewServiceImpl implements CrossReviewService {
         wrapper.orderByDesc(CrossReview::getCreatedAt);
 
         var result = crossReviewMapper.selectPage(pageParam, wrapper);
-        var voList = crossReviewConverter.toVOList(result.getRecords());
+        var voList = result.getRecords().stream().map(this::enrichVO).toList();
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
 
     @Override
     public CrossReviewVO getById(String id) {
         var entity = entityValidator.requireExists(crossReviewMapper, id, ResultCode.CROSS_REVIEW_NOT_FOUND);
-        return crossReviewConverter.toVO(entity);
+        return enrichVO(entity);
+    }
+
+    private CrossReviewVO enrichVO(CrossReview entity) {
+        CrossReviewVO vo = crossReviewConverter.toVO(entity);
+        Spec spec = specMapper.selectById(entity.getSpecId());
+        if (spec != null) {
+            vo.setSpecName(spec.getName());
+        }
+        Map<String, String> modelNameMap = loadModelNameMap(entity.getModelAId(), entity.getModelBId());
+        vo.setModelAName(modelNameMap.get(entity.getModelAId()));
+        vo.setModelBName(modelNameMap.get(entity.getModelBId()));
+        return vo;
+    }
+
+    private Map<String, String> loadModelNameMap(String... ids) {
+        List<String> modelIds = new ArrayList<>();
+        for (String id : ids) {
+            if (StringUtils.hasText(id)) {
+                modelIds.add(id);
+            }
+        }
+        if (modelIds.isEmpty()) {
+            return Map.of();
+        }
+        return aiModelMapper.selectBatchIds(modelIds).stream()
+                .collect(Collectors.toMap(AiModel::getId, AiModel::getName, (left, right) -> left, LinkedHashMap::new));
     }
 }

@@ -21,6 +21,9 @@ public class SpecFromTemplateRequest {
     /** 描述 */
     private String description;
 
+    /** 优先级 */
+    private String priority;
+
     /** 标签 */
     private List<String> tags;
 
@@ -30,4 +33,13 @@ public class SpecFromTemplateRequest {
 
     /** 关联工作空间ID列表 */
     private List<String> workspaceIds = new ArrayList<>();
+
+    /** 关联工作流模板ID */
+    private String workflowId;
+
+    /** Jira 或需求单号 */
+    private String jiraTicket;
+
+    /** 目标研发分支 */
+    private String targetBranch;
 }

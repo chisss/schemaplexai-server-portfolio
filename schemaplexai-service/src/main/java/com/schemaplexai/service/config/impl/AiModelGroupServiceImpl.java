@@ -102,6 +102,7 @@ public class AiModelGroupServiceImpl implements AiModelGroupService {
     @Transactional(rollbackFor = Exception.class)
     public AiModelGroupVO saveItems(String groupId, AiModelGroupItemSaveRequest request) {
         var group = requireGroup(groupId);
+        List<AiModel> selectedModels = validateSameUseCaseModels(request.getModelIds());
         // 整体替换成员列表
         itemMapper.delete(new LambdaQueryWrapper<AiModelGroupItem>()
                 .eq(AiModelGroupItem::getGroupId, groupId));
@@ -116,17 +117,23 @@ public class AiModelGroupServiceImpl implements AiModelGroupService {
                 itemMapper.insert(item);
             }
         }
-        log.info("保存模型组成员: groupId={}, count={}", groupId, CollectionUtils.isEmpty(request.getModelIds()) ? 0 : request.getModelIds().size());
+        log.info("保存模型组成员: groupId={}, count={}, useCase={}", groupId,
+                CollectionUtils.isEmpty(request.getModelIds()) ? 0 : request.getModelIds().size(),
+                CollectionUtils.isEmpty(selectedModels) ? "-" : selectedModels.getFirst().getUseCase());
         return enrichWithItems(group);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public AiModelGroupVO autoGenerate(AiModelGroupAutoGenerateRequest request) {
+        if (!StringUtils.hasText(request.getUseCase())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "自动生成模型组时必须指定 useCase");
+        }
         String tenantId = SecurityUtil.getCurrentTenantId();
         var activeModels = aiModelMapper.selectList(new LambdaQueryWrapper<AiModel>()
                 .eq(AiModel::getTenantId, tenantId)
-                .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE));
+                .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
+                .apply(StringUtils.hasText(request.getUseCase()), "lower(use_case) = lower({0})", request.getUseCase()));
 
         if (CollectionUtils.isEmpty(activeModels)) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "当前租户没有可用的激活模型");
@@ -142,7 +149,8 @@ public class AiModelGroupServiceImpl implements AiModelGroupService {
         // 创建模型组
         var group = new AiModelGroup();
         group.setName(groupName);
-        group.setDescription("按" + ("by_price".equals(request.getStrategy()) ? "价格" : "性能") + "自动生成");
+        group.setDescription("按" + ("by_price".equals(request.getStrategy()) ? "价格" : "性能") + "自动生成"
+                + (StringUtils.hasText(request.getUseCase()) ? "（" + request.getUseCase() + "）" : ""));
         group.setRoutingStrategy(request.getStrategy());
         group.setStatus(CommonConstant.STATUS_ACTIVE);
         groupMapper.insert(group);
@@ -225,14 +233,36 @@ public class AiModelGroupServiceImpl implements AiModelGroupService {
                 if (model != null) {
                     itemVO.setModelName(model.getName());
                     itemVO.setProvider(model.getProvider());
+                    itemVO.setUseCase(model.getUseCase());
                 }
                 return itemVO;
             }).collect(Collectors.toList());
             vo.setItems(itemVOs);
+            vo.setUseCase(itemVOs.getFirst().getUseCase());
         } else {
             vo.setItems(new ArrayList<>());
         }
 
         return vo;
+    }
+
+    private List<AiModel> validateSameUseCaseModels(List<String> modelIds) {
+        if (CollectionUtils.isEmpty(modelIds)) {
+            return List.of();
+        }
+        List<AiModel> models = aiModelMapper.selectBatchIds(modelIds);
+        if (models.size() != modelIds.size()) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "存在不存在的模型配置");
+        }
+        List<String> useCases = models.stream()
+                .map(AiModel::getUseCase)
+                .filter(StringUtils::hasText)
+                .map(String::toLowerCase)
+                .distinct()
+                .toList();
+        if (useCases.size() > 1) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "模型组仅允许配置同一 useCase 的模型");
+        }
+        return models;
     }
 }
