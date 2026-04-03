@@ -19,14 +19,43 @@ public class StructuralDeviationDetector implements QualityDetector {
         log.info("执行结构偏离检测: specId={}, dimensionCode={}",
                 context.specId(), context.dimensionCode());
 
-        // 简单示例：检测是否为空
-        boolean hasIssue = context.targetContent() == null || context.targetContent().isEmpty();
+        String targetContent = context.targetContent();
+        if (targetContent == null || targetContent.isBlank()) {
+            return new DetectionResult(
+                    true,
+                    DeviationSeverityEnum.WARNING.getCode(),
+                    "目标内容为空",
+                    Map.of("detector", "structural", "issueType", "empty_output")
+            );
+        }
+
+        String normalized = targetContent.toLowerCase();
+        boolean hasPlaceholder = normalized.contains("todo")
+                || normalized.contains("tbd")
+                || normalized.contains("待补充")
+                || normalized.contains("待确认")
+                || normalized.contains("placeholder");
+        boolean tooShort = targetContent.trim().length() < 48;
+        boolean missingStructure = !normalized.contains("##") && !normalized.contains("- ") && !normalized.contains("1.");
+
+        if (hasPlaceholder || tooShort || missingStructure) {
+            return new DetectionResult(
+                    true,
+                    DeviationSeverityEnum.WARNING.getCode(),
+                    "输出结构不完整，包含占位符或信息密度不足",
+                    Map.of(
+                            "detector", "structural",
+                            "issueType", hasPlaceholder ? "placeholder" : tooShort ? "too_short" : "missing_structure",
+                            "contentLength", targetContent.trim().length()
+                    )
+            );
+        }
 
         return new DetectionResult(
-                hasIssue,
-                hasIssue ? DeviationSeverityEnum.WARNING.getCode() : DeviationSeverityEnum.INFO.getCode(),
-                hasIssue ? "目标内容为空" : "检测通过",
-                Map.of("detector", "structural")
+                false,
+                DeviationSeverityEnum.INFO.getCode(),
+                "检测通过",
+                Map.of("detector", "structural", "contentLength", targetContent.trim().length())
         );
     }
 

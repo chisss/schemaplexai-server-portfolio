@@ -2,6 +2,7 @@ package com.schemaplexai.service.ai;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
+import dev.langchain4j.agent.tool.SearchBehavior;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.model.chat.request.json.JsonArraySchema;
 import dev.langchain4j.model.chat.request.json.JsonBooleanSchema;
@@ -38,15 +39,22 @@ public class LangChain4jToolSpecProvider {
                 .toList();
     }
 
-    private ToolSpecification toToolSpecification(ToolDefinition tool) {
-        return ToolSpecification.builder()
-                .name(tool.getCode())
-                .description(tool.getDescription())
-                .parameters(buildParameters(tool.getInputSchema()))
-                .build();
+    public ToolSpecification toToolSpecification(ToolDefinition tool) {
+        return toToolSpecification(tool, null);
     }
 
-    private JsonObjectSchema buildParameters(JsonNode inputSchema) {
+    public ToolSpecification toToolSpecification(ToolDefinition tool, SearchBehavior searchBehavior) {
+        ToolSpecification.Builder builder = ToolSpecification.builder()
+                .name(tool.getCode())
+                .description(tool.getDescription())
+                .parameters(buildParameters(tool.getInputSchema()));
+        if (searchBehavior != null) {
+            builder.addMetadata(ToolSpecification.METADATA_SEARCH_BEHAVIOR, searchBehavior);
+        }
+        return builder.build();
+    }
+
+    public JsonObjectSchema buildParameters(JsonNode inputSchema) {
         if (inputSchema == null || inputSchema.isNull() || inputSchema.isEmpty()) {
             return JsonObjectSchema.builder().build();
         }

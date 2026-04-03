@@ -76,13 +76,7 @@ public class McpToolExecutor implements ToolExecutor {
             }
 
             Map<String, Object> args = convertArguments(toolCall != null ? toolCall.getArguments() : null);
-            Map<String, Object> output = mcpClientService.toolsCall(
-                    mcpServer.getUrl(),
-                    mcpServer.getAuthType(),
-                    mcpServer.getAuthConfig(),
-                    toolName,
-                    args
-            );
+            Map<String, Object> output = mcpClientService.toolsCall(mcpServer, toolName, args);
             LocalDateTime endAt = LocalDateTime.now();
             logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
                     SourceTypeEnum.MCP.getCode(), toolCode,  ToolExecutionStatusEnum.SUCCESS.getCode(), startAt, endAt, args, output, null);

@@ -28,8 +28,14 @@ import com.schemaplexai.dao.mapper.ChatMessageMapper;
 import com.schemaplexai.dao.mapper.ContextEntityMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.dao.mapper.McpServerMapper;
+import com.schemaplexai.dao.mapper.QualityDeviationMapper;
+import com.schemaplexai.dao.mapper.QualityTaskMapper;
+import com.schemaplexai.dao.mapper.SecurityIncidentMapper;
 import com.schemaplexai.dao.mapper.SkillMapper;
 import com.schemaplexai.dao.mapper.TeamTemplateMapper;
+import com.schemaplexai.model.entity.QualityDeviation;
+import com.schemaplexai.model.entity.QualityTask;
+import com.schemaplexai.model.entity.SecurityIncident;
 import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.entity.Skill;
@@ -106,6 +112,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
@@ -130,6 +137,9 @@ public class AgentServiceImpl implements AgentService {
     private final SkillMapper skillMapper;
     private final McpServerMapper mcpServerMapper;
     private final TeamTemplateMapper teamTemplateMapper;
+    private final SecurityIncidentMapper securityIncidentMapper;
+    private final QualityTaskMapper qualityTaskMapper;
+    private final QualityDeviationMapper qualityDeviationMapper;
     private final AgentTeamMemberToolBindingMapper agentTeamMemberToolBindingMapper;
     private final AgentTeamMemberContextBindingMapper agentTeamMemberContextBindingMapper;
     private final AgentToolBindingMapper agentToolBindingMapper;
@@ -1044,7 +1054,9 @@ public class AgentServiceImpl implements AgentService {
         execution.setInputPrompt(dto.getPrompt());
         execution.setInputContext(dto.getContext());
         execution.setAiModel(StringUtils.hasText(dto.getModel()) ? dto.getModel() : agent.getAiModel());
-        execution.setConversationId(dto.getConversationId());
+        execution.setConversationId(StringUtils.hasText(dto.getConversationId())
+                ? dto.getConversationId()
+                : UUID.randomUUID().toString().replace("-", ""));
         execution.setStatus(QUEUED);
         agentExecutionMapper.insert(execution);
 
@@ -1185,6 +1197,7 @@ public class AgentServiceImpl implements AgentService {
                         .orderByAsc(AgentExecutionLog::getCreatedAt));
         vo.setLogs(logs.stream().map(this::toLogVO).toList());
         vo.setChildExecutions(buildChildExecutionVOs(execution));
+        fillExecutionDiagnostics(vo, execution);
         return vo;
     }
 
@@ -1198,7 +1211,8 @@ public class AgentServiceImpl implements AgentService {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
         var agent = entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
-        if (AgentTypeEnum.TEAM == AgentTypeEnum.fromCode(agent.getAgentType())) {
+        if (AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())
+                || AgentTypeEnum.TEAM == AgentTypeEnum.fromCode(agent.getAgentType())) {
             agentRuntimeOrchestrator.resume(executionId, dto);
             return;
         }
@@ -1271,6 +1285,8 @@ public class AgentServiceImpl implements AgentService {
         vo.setStatus(execution.getStatus());
         vo.setInputPrompt(execution.getInputPrompt());
         vo.setModel(execution.getAiModel());
+        vo.setConversationId(execution.getConversationId());
+        vo.setRuntimeEngine(execution.getRuntimeEngine());
         vo.setTokenInput(execution.getTokenInput());
         vo.setTokenOutput(execution.getTokenOutput());
         vo.setErrorMessage(execution.getErrorMessage());
@@ -1279,9 +1295,54 @@ public class AgentServiceImpl implements AgentService {
         vo.setTeamMemberId(execution.getTeamMemberId());
         vo.setGraphThreadId(execution.getGraphThreadId());
         vo.setCheckpointNamespace(execution.getCheckpointNamespace());
+        vo.setSandboxPolicySnapshot(execution.getSandboxPolicySnapshot());
         vo.setCreatedAt(execution.getCreatedAt());
         vo.setCompletedAt(execution.getCompletedAt());
         return vo;
+    }
+
+    private void fillExecutionDiagnostics(AgentExecutionVO vo, AgentExecution execution) {
+        SecurityIncident incident = securityIncidentMapper.selectOne(
+                new LambdaQueryWrapper<SecurityIncident>()
+                        .eq(SecurityIncident::getSourceType, SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION)
+                        .eq(SecurityIncident::getSourceId, execution.getId())
+                        .orderByDesc(SecurityIncident::getCreatedAt)
+                        .last("limit 1"));
+        if (incident != null) {
+            vo.setSecurityDecision(incident.getDecision());
+            vo.setSecurityMessage(incident.getEventTitle());
+            vo.setSecurityTraceId(incident.getTraceId());
+            vo.setSecurityIncidentId(incident.getId());
+        }
+
+        QualityTask qualityTask = qualityTaskMapper.selectOne(
+                new LambdaQueryWrapper<QualityTask>()
+                        .eq(QualityTask::getAgentExecutionId, execution.getId())
+                        .orderByDesc(QualityTask::getCreatedAt)
+                        .last("limit 1"));
+        if (qualityTask != null) {
+            vo.setQualityTaskId(qualityTask.getTaskId());
+            vo.setQualityTaskStatus(qualityTask.getStatus());
+            if (!CollectionUtils.isEmpty(qualityTask.getResultSummary())) {
+                Object qualitySummary = qualityTask.getResultSummary().get("qualitySummary");
+                if (qualitySummary != null) {
+                    vo.setQualitySummary(String.valueOf(qualitySummary));
+                }
+            }
+        }
+
+        List<QualityDeviation> deviations = qualityDeviationMapper.selectList(
+                new LambdaQueryWrapper<QualityDeviation>()
+                        .eq(QualityDeviation::getAgentExecutionId, execution.getId()));
+        if (!CollectionUtils.isEmpty(deviations)) {
+            vo.setQualityDeviationCount(deviations.size());
+            vo.setQualityWarningCount((int) deviations.stream()
+                    .filter(item -> !"info".equalsIgnoreCase(item.getSeverity()))
+                    .count());
+            if (!StringUtils.hasText(vo.getQualitySummary())) {
+                vo.setQualitySummary("质量检测已记录 " + deviations.size() + " 项观察结果");
+            }
+        }
     }
 
     private List<AgentExecutionChildVO> buildChildExecutionVOs(AgentExecution execution) {
