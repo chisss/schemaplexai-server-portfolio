@@ -1,5 +1,6 @@
 package com.schemaplexai.common.enums;
 
+import cn.hutool.core.util.StrUtil;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 
@@ -15,4 +16,16 @@ public enum AgentTypeEnum {
 
     private final String code;
     private final String description;
+
+    public static AgentTypeEnum fromCode(String code) {
+        if (StrUtil.isBlank(code)) {
+            return SOLO;
+        }
+        for (AgentTypeEnum value : values()) {
+            if (value.code.equalsIgnoreCase(code)) {
+                return value;
+            }
+        }
+        return SOLO;
+    }
 }

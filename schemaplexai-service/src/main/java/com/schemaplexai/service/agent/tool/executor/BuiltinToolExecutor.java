@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.common.enums.ToolExecutionStatusEnum;
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.service.agent.execution.SandboxGuard;
+import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.tool.audit.ToolExecutionLogService;
 import com.schemaplexai.service.agent.tool.executor.os.CommandValidator;
 import com.schemaplexai.service.agent.tool.executor.os.ShellCommandAdapter;
@@ -47,6 +49,7 @@ public class BuiltinToolExecutor implements ToolExecutor {
     private final CommandValidator commandValidator;
     private final ToolExecutionLogService logService;
     private final WorkspacePathResolver workspacePathResolver;
+    private final SandboxGuard sandboxGuard;
 
     @Override
     public String sourceType() {
@@ -55,6 +58,11 @@ public class BuiltinToolExecutor implements ToolExecutor {
 
     @Override
     public ToolResult execute(String tenantId, String agentId, AgentToolBinding binding, ToolCall toolCall) {
+        return execute(tenantId, agentId, binding, toolCall, null);
+    }
+
+    @Override
+    public ToolResult execute(String tenantId, String agentId, AgentToolBinding binding, ToolCall toolCall, SandboxPolicy sandboxPolicy) {
         LocalDateTime startAt = LocalDateTime.now();
         if (toolCall == null || !StringUtils.hasText(toolCall.getToolCode())) {
             logService.logExecution(tenantId, agentId, null, toolCall != null ? toolCall.getCallId() : null,
@@ -97,6 +105,7 @@ public class BuiltinToolExecutor implements ToolExecutor {
 
             ProcessBuilder processBuilder = new ProcessBuilder(adapter.wrapShellCommand(command));
             Path workingDirectory = resolveWorkingDirectory(args);
+            sandboxGuard.validateBuiltinExecution(sandboxPolicy, toolCode, args, workingDirectory, command);
             if (workingDirectory != null) {
                 processBuilder.directory(workingDirectory.toFile());
             }

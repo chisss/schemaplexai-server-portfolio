@@ -6,10 +6,12 @@ import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
-import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
+import com.schemaplexai.service.agent.execution.SandboxGuard;
+import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.tool.executor.ToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
@@ -18,6 +20,7 @@ import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
@@ -35,20 +38,21 @@ public class DefaultToolRegistry implements ToolRegistry {
     private final BuiltinToolMapper builtinToolMapper;
     private final List<ToolExecutor> toolExecutors;
     private final SecurityRuntimeGuardService securityRuntimeGuardService;
+    private final SandboxGuard sandboxGuard;
 
     @Override
     public List<ToolDefinition> listEnabledTools(String tenantId, String agentId) {
+        return listEnabledTools(tenantId, agentId, null, null);
+    }
+
+    @Override
+    public List<ToolDefinition> listEnabledTools(String tenantId, String agentId,
+                                                 List<AgentToolBinding> overrideBindings,
+                                                 SandboxPolicy sandboxPolicy) {
         if (!StringUtils.hasText(agentId)) {
             return List.of();
         }
-        var bindings = agentToolBindingMapper.selectList(
-                new LambdaQueryWrapper<AgentToolBinding>()
-                        .eq(AgentToolBinding::getTenantId, tenantId)
-                        .eq(AgentToolBinding::getAgentId, agentId)
-                        .eq(AgentToolBinding::getEnabled, true)
-                        .orderByAsc(AgentToolBinding::getPriority)
-                        .orderByAsc(AgentToolBinding::getCreatedAt)
-        );
+        var bindings = resolveBindings(tenantId, agentId, overrideBindings);
 
         List<ToolDefinition> tools = new ArrayList<>();
         for (AgentToolBinding binding : bindings) {
@@ -67,17 +71,19 @@ public class DefaultToolRegistry implements ToolRegistry {
 
     @Override
     public List<ToolResult> executeAll(String tenantId, String agentId, List<ToolCall> toolCalls) {
+        return executeAll(tenantId, agentId, toolCalls, null, null);
+    }
+
+    @Override
+    public List<ToolResult> executeAll(String tenantId, String agentId, List<ToolCall> toolCalls,
+                                       List<AgentToolBinding> overrideBindings,
+                                       SandboxPolicy sandboxPolicy) {
         List<ToolResult> results = new ArrayList<>();
         if (toolCalls == null || toolCalls.isEmpty()) {
             return results;
         }
 
-        var bindings = agentToolBindingMapper.selectList(
-                new LambdaQueryWrapper<AgentToolBinding>()
-                        .eq(AgentToolBinding::getTenantId, tenantId)
-                        .eq(AgentToolBinding::getAgentId, agentId)
-                        .eq(AgentToolBinding::getEnabled, true)
-        );
+        var bindings = resolveBindings(tenantId, agentId, overrideBindings);
 
         var bindingMap = new LinkedHashMap<String, AgentToolBinding>();
         for (AgentToolBinding binding : bindings) {
@@ -100,6 +106,11 @@ public class DefaultToolRegistry implements ToolRegistry {
                 results.add(failureResult(toolCall, "Agent 未绑定该工具: " + toolCall.getToolCode()));
                 continue;
             }
+            String sandboxValidationError = sandboxGuard.validateTool(sandboxPolicy, binding, toolCall);
+            if (StringUtils.hasText(sandboxValidationError)) {
+                results.add(failureResult(toolCall, sandboxValidationError));
+                continue;
+            }
 
             String sourceType = StringUtils.hasText(binding.getSourceType())
                     ? binding.getSourceType().trim().toLowerCase()
@@ -115,18 +126,18 @@ public class DefaultToolRegistry implements ToolRegistry {
                         buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE, agentId, toolCall, null),
                         null
                 );
-                if (preDecision != null && ("block".equals(preDecision.getDecision()) || "pause".equals(preDecision.getDecision()))) {
-                    results.add(failureResult(toolCall, preDecision.getMessage()));
+                if (requiresInterrupt(preDecision)) {
+                    results.add(interruptedResult(toolCall, preDecision));
                     continue;
                 }
 
-                ToolResult result = executor.execute(tenantId, agentId, binding, toolCall);
+                ToolResult result = executor.execute(tenantId, agentId, binding, toolCall, sandboxPolicy);
                 SecurityCheckDecisionVO postDecision = securityRuntimeGuardService.evaluate(
                         buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, agentId, toolCall, result),
                         null
                 );
-                if (postDecision != null && ("block".equals(postDecision.getDecision()) || "pause".equals(postDecision.getDecision()))) {
-                    results.add(failureResult(toolCall, postDecision.getMessage()));
+                if (requiresInterrupt(postDecision)) {
+                    results.add(interruptedResult(toolCall, postDecision));
                     continue;
                 }
                 results.add(result);
@@ -138,6 +149,25 @@ public class DefaultToolRegistry implements ToolRegistry {
         return results;
     }
 
+    private List<AgentToolBinding> resolveBindings(String tenantId, String agentId, List<AgentToolBinding> overrideBindings) {
+        if (!CollectionUtils.isEmpty(overrideBindings)) {
+            return overrideBindings.stream()
+                    .filter(binding -> Boolean.TRUE.equals(binding.getEnabled()))
+                    .sorted((left, right) -> Integer.compare(
+                            left.getPriority() != null ? left.getPriority() : 100,
+                            right.getPriority() != null ? right.getPriority() : 100))
+                    .toList();
+        }
+        return agentToolBindingMapper.selectList(
+                new LambdaQueryWrapper<AgentToolBinding>()
+                        .eq(AgentToolBinding::getTenantId, tenantId)
+                        .eq(AgentToolBinding::getAgentId, agentId)
+                        .eq(AgentToolBinding::getEnabled, true)
+                        .orderByAsc(AgentToolBinding::getPriority)
+                        .orderByAsc(AgentToolBinding::getCreatedAt)
+        );
+    }
+
     private ToolResult failureResult(ToolCall toolCall, String message) {
         return ToolResult.builder()
                 .callId(toolCall != null ? toolCall.getCallId() : null)
@@ -145,6 +175,25 @@ public class DefaultToolRegistry implements ToolRegistry {
                 .success(false)
                 .result(objectMapper.nullNode())
                 .errorMessage(message)
+                .build();
+    }
+
+    private boolean requiresInterrupt(SecurityCheckDecisionVO decision) {
+        if (decision == null || !StringUtils.hasText(decision.getDecision())) {
+            return false;
+        }
+        return SecurityComplianceConstant.DECISION_BLOCK.equals(decision.getDecision())
+                || SecurityComplianceConstant.DECISION_PAUSE.equals(decision.getDecision());
+    }
+
+    private ToolResult interruptedResult(ToolCall toolCall, SecurityCheckDecisionVO decision) {
+        return ToolResult.builder()
+                .callId(toolCall != null ? toolCall.getCallId() : null)
+                .toolCode(toolCall != null ? toolCall.getToolCode() : null)
+                .success(false)
+                .result(objectMapper.nullNode())
+                .errorMessage(decision != null ? decision.getMessage() : null)
+                .controlAction(decision != null ? decision.getDecision() : null)
                 .build();
     }
 

@@ -16,7 +16,7 @@ import java.time.Instant;
 @AllArgsConstructor
 public class AgentExecutionEvent {
 
-    /** QUEUED/ROUND_START/AI_RESPONSE/TOOL_CALL/TOOL_RESULT/REQUIRE_INPUT/COMPLETED/FAILED/CANCELLED */
+    /** QUEUED/ROUND_START/AI_RESPONSE/TOOL_CALL/TOOL_RESULT/REQUIRE_INPUT/USER_INPUT/RESUMED/COMPLETED/FAILED/CANCELLED */
     private String eventType;
 
     private String executionId;

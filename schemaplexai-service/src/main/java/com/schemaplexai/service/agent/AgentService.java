@@ -6,6 +6,7 @@ import com.schemaplexai.model.dto.agent.AgentContextBindingDTO;
 import com.schemaplexai.model.dto.agent.AgentCreateRequest;
 import com.schemaplexai.model.dto.agent.AgentExecuteDTO;
 import com.schemaplexai.model.dto.agent.AgentExecutionQueryDTO;
+import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.dto.agent.AgentInitInstructionsDTO;
 import com.schemaplexai.model.dto.agent.AgentQueryRequest;
 import com.schemaplexai.model.dto.agent.AgentTeamMemberBatchRequest;
@@ -140,6 +141,11 @@ public interface AgentService {
      * 获取执行详情（含日志）
      */
     AgentExecutionVO getExecution(String agentId, String executionId);
+
+    /**
+     * 提交执行输入 / 恢复执行
+     */
+    void submitExecutionInput(String agentId, String executionId, AgentExecutionInputDTO dto);
 
     /**
      * 停止执行

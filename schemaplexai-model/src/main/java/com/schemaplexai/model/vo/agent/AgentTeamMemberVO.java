@@ -25,5 +25,11 @@ public class AgentTeamMemberVO {
     private String boundToolNames;
     /** 该成员已绑定的工具详情列表 */
     private List<AgentTeamMemberToolBindingVO> boundTools;
+    /** 该成员已绑定的上下文数 */
+    private Integer boundContextCount;
+    /** 该成员已绑定的上下文标题列表（逗号分隔） */
+    private String boundContextNames;
+    /** 该成员已绑定的上下文详情列表 */
+    private List<AgentTeamMemberContextBindingVO> boundContexts;
     private LocalDateTime createdAt;
 }

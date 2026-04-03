@@ -17,6 +17,10 @@
     <dependencies>
         <dependency>
             <groupId>com.schemaplexai</groupId>
+            <artifactId>schemaplexai-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.schemaplexai</groupId>
             <artifactId>schemaplexai-service</artifactId>
         </dependency>
         <dependency>

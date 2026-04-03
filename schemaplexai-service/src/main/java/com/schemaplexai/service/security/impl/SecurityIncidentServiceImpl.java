@@ -25,7 +25,7 @@ import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.model.vo.security.SecurityIncidentActionVO;
 import com.schemaplexai.model.vo.security.SecurityIncidentVO;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
-import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
+import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.security.SecurityAuditEventService;
 import com.schemaplexai.service.security.SecurityIncidentService;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
@@ -58,7 +58,7 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentMapper agentMapper;
     private final WorkflowInstanceMapper workflowInstanceMapper;
-    private final ObjectProvider<AgentExecutionEngine> agentExecutionEngineProvider;
+    private final ObjectProvider<AgentRuntimeOrchestrator> agentRuntimeOrchestratorProvider;
     private final WorkflowInstanceService workflowInstanceService;
 
     @Override
@@ -253,7 +253,7 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
         update.setErrorMessage(null);
         agentExecutionMapper.updateById(update);
 
-        agentExecutionEngineProvider.getObject().execute(AgentExecutionContext.builder()
+        agentRuntimeOrchestratorProvider.getObject().execute(AgentExecutionContext.builder()
                 .executionId(execution.getId())
                 .agentId(execution.getAgentId())
                 .tenantId(execution.getTenantId())

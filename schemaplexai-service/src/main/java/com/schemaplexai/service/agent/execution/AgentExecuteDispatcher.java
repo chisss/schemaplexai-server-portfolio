@@ -6,6 +6,7 @@ import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -27,7 +28,7 @@ public class AgentExecuteDispatcher {
 
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentMapper agentMapper;
-    private final AgentExecutionEngine agentExecutionEngine;
+    private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
     private final ExecutionLeaseService executionLeaseService;
     private final ExecutionAdmissionService admissionService;
     private final AgentLogService agentLogService;
@@ -108,7 +109,7 @@ public class AgentExecuteDispatcher {
         // 获取准入令牌的副本用于 lambda 中的释放
         final ExecutionAdmissionService.AdmissionToken admissionTokenRef = admissionToken;
         try {
-            agentExecutionEngine.execute(context).whenComplete((ignored, throwable) -> {
+            agentRuntimeOrchestrator.execute(context).whenComplete((ignored, throwable) -> {
                 executionLeaseService.releaseLease(executionId, nodeId);
                 admissionService.release(admissionTokenRef);
                 if (throwable != null) {
