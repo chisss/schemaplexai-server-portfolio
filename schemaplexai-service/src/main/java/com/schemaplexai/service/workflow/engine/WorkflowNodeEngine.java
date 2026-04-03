@@ -19,7 +19,7 @@ import com.schemaplexai.model.entity.WorkflowNodeExecution;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
-import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
+import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import com.schemaplexai.service.mq.message.ApprovalNotificationMessage;
@@ -53,7 +53,7 @@ import java.util.Map;
  * <p>负责解析工作流定义（definition JSONB），按节点类型驱动各步骤：
  * <ul>
  *   <li>trigger/start → 自动完成，推进到下一节点</li>
- *   <li>agent → 触发 AgentExecutionEngine 异步执行，完成后继续推进</li>
+ *   <li>agent → 触发 AgentRuntimeOrchestrator 异步执行，完成后继续推进</li>
  *   <li>human_review → 置为 pending，等待人工 approve/reject</li>
  *   <li>deviation_analysis → 委托 {@link DeviationAnalysisHandler} 执行</li>
  *   <li>quality_report → 委托 {@link QualityReportHandler} 生成</li>
@@ -72,7 +72,7 @@ public class WorkflowNodeEngine {
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentMapper agentMapper;
     private final SpecMapper specMapper;
-    private final ObjectProvider<AgentExecutionEngine> agentExecutionEngineProvider;
+    private final ObjectProvider<AgentRuntimeOrchestrator> agentRuntimeOrchestratorProvider;
     private final AgentContextPublisher agentContextPublisher;
     private final RabbitTemplate rabbitTemplate;
     private final DeviationAnalysisHandler deviationAnalysisHandler;
@@ -345,7 +345,7 @@ public class WorkflowNodeEngine {
                 .maxToolCallsPerRound(4)
                 .build();
 
-        agentExecutionEngineProvider.getObject().execute(ctx)
+        agentRuntimeOrchestratorProvider.getObject().execute(ctx)
                 .thenAccept(result -> {
                     String callbackStatus = result != null && StringUtils.hasText(result.getStatus())
                             ? result.getStatus() : AgentExecutionStatusEnum.FAILED.getCode();

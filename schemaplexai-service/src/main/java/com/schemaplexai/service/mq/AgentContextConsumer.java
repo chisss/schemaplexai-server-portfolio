@@ -125,16 +125,19 @@ public class AgentContextConsumer {
     @Async("agentExecutorPool")
     protected void indexOutputToMilvus(AgentContextMessage message, String summary) {
         try {
-            // 使用 "output:{executionId}" 作为 Milvus item_id，与 context_item 空间区分
-            String syntheticItemId = "output:" + message.getExecutionId();
-            milvusVectorService.upsertContextItem(
-                    syntheticItemId,
+            // 复用 executionId 作为向量主键，兼容历史集合对主键长度的限制
+            boolean indexed = milvusVectorService.upsertContextItem(
+                    message.getExecutionId(),
                     message.getTenantId(),
                     message.getTeamAgentId(),
                     message.getInstanceId(),  // 用 instanceId 作为 contextId
                     summary
             );
-            log.debug("Agent产出已索引到 Milvus: executionId={}", message.getExecutionId());
+            if (indexed) {
+                log.debug("Agent产出已索引到 Milvus: executionId={}", message.getExecutionId());
+            } else {
+                log.debug("Agent产出跳过 Milvus 索引: executionId={}", message.getExecutionId());
+            }
         } catch (Exception e) {
             log.warn("Milvus 索引失败（不影响主流程）: {}", e.getMessage());
         }

@@ -12,6 +12,7 @@ import io.milvus.v2.common.DataType;
 import io.milvus.v2.common.IndexParam;
 import io.milvus.v2.service.collection.request.AddFieldReq;
 import io.milvus.v2.service.collection.request.CreateCollectionReq;
+import io.milvus.v2.service.collection.request.DescribeCollectionReq;
 import io.milvus.v2.service.collection.request.HasCollectionReq;
 import io.milvus.v2.service.collection.request.LoadCollectionReq;
 import io.milvus.v2.service.index.request.CreateIndexReq;
@@ -53,6 +54,8 @@ public class MilvusVectorService {
     private static final String FIELD_AGENT_ID = "agent_id";
     private static final String FIELD_CONTEXT_ID = "context_id";
     private static final String FIELD_CONTENT_SUMMARY = "content_summary";
+    private static final String FIELD_LEGACY_TEXT = "text";
+    private static final String FIELD_METADATA = "metadata";
     private static final String FIELD_VECTOR = "vector";
     /** 相似度阈值（IP度量，越高越相似，阈值0.6 = 中等相似） */
     private static final float SIMILARITY_THRESHOLD = 0.6f;
@@ -144,13 +147,23 @@ public class MilvusVectorService {
             float[] vector = embeddingService.embed(tenantId, content);
             String summary = content != null && content.length() > 500
                     ? content.substring(0, 500) : content;
+            CollectionLayout collectionLayout = resolveCollectionLayout(collectionName);
 
             JsonObject row = new JsonObject();
-            row.addProperty(FIELD_ITEM_ID, itemId);
-            row.addProperty(FIELD_TENANT_ID, tenantId != null ? tenantId : "");
-            row.addProperty(FIELD_AGENT_ID, agentId != null ? agentId : "");
-            row.addProperty(FIELD_CONTEXT_ID, contextId != null ? contextId : "");
-            row.addProperty(FIELD_CONTENT_SUMMARY, summary);
+            row.addProperty(collectionLayout.primaryFieldName(), itemId);
+            if (collectionLayout.legacySchema()) {
+                row.addProperty(collectionLayout.textFieldName(), summary);
+                JsonObject metadata = new JsonObject();
+                metadata.addProperty(FIELD_TENANT_ID, tenantId != null ? tenantId : "");
+                metadata.addProperty(FIELD_AGENT_ID, agentId != null ? agentId : "");
+                metadata.addProperty(FIELD_CONTEXT_ID, contextId != null ? contextId : "");
+                row.add(collectionLayout.metadataFieldName(), metadata);
+            } else {
+                row.addProperty(FIELD_TENANT_ID, tenantId != null ? tenantId : "");
+                row.addProperty(FIELD_AGENT_ID, agentId != null ? agentId : "");
+                row.addProperty(FIELD_CONTEXT_ID, contextId != null ? contextId : "");
+                row.addProperty(collectionLayout.textFieldName(), summary);
+            }
             JsonArray vectorArray = new JsonArray();
             for (float v : vector) vectorArray.add(v);
             row.add(FIELD_VECTOR, vectorArray);
@@ -190,12 +203,12 @@ public class MilvusVectorService {
                     ? settings.getCollectionName()
                     : DEFAULT_COLLECTION;
             ensureCollection(tenantId);
+            CollectionLayout collectionLayout = resolveCollectionLayout(collectionName);
             embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, EmbeddingTokenEstimator.estimate(query));
             float[] queryVector = embeddingService.embed(tenantId, query);
 
             // 构建过滤条件：租户隔离 + (agent 匹配 OR 全局条目)
-            String filter = String.format("tenant_id == \"%s\" && (agent_id == \"%s\" || agent_id == \"\")",
-                    tenantId, agentId != null ? agentId : "");
+            String filter = buildFilterExpression(collectionLayout, tenantId, agentId);
 
             float similarityThreshold = (float) settings.getRetrievalMinScore();
 
@@ -204,7 +217,7 @@ public class MilvusVectorService {
                     .data(Collections.singletonList(new FloatVec(queryVector)))
                     .filter(filter)
                     .topK(topK)
-                    .outputFields(Arrays.asList(FIELD_CONTENT_SUMMARY, FIELD_ITEM_ID))
+                    .outputFields(Collections.singletonList(collectionLayout.textFieldName()))
                     .build());
 
             if (resp == null || resp.getSearchResults() == null) return results;
@@ -212,7 +225,7 @@ public class MilvusVectorService {
             for (List<SearchResp.SearchResult> resultList : resp.getSearchResults()) {
                 for (SearchResp.SearchResult result : resultList) {
                     if (result.getScore() >= similarityThreshold) {
-                        Object summary = result.getEntity().get(FIELD_CONTENT_SUMMARY);
+                        Object summary = result.getEntity().get(collectionLayout.textFieldName());
                         if (summary != null && !summary.toString().isBlank()) {
                             results.add(summary.toString());
                         }
@@ -258,5 +271,43 @@ public class MilvusVectorService {
         } catch (Exception e) {
             log.warn("Milvus delete 异常: itemId={}, error={}", itemId, e.getMessage());
         }
+    }
+
+    private CollectionLayout resolveCollectionLayout(String collectionName) {
+        try {
+            var response = milvusClient.describeCollection(DescribeCollectionReq.builder()
+                    .collectionName(collectionName)
+                    .build());
+            if (response != null) {
+                List<String> fieldNames = response.getFieldNames() == null ? List.of() : response.getFieldNames();
+                String textFieldName = fieldNames.contains(FIELD_CONTENT_SUMMARY) ? FIELD_CONTENT_SUMMARY
+                        : fieldNames.contains(FIELD_LEGACY_TEXT) ? FIELD_LEGACY_TEXT : FIELD_CONTENT_SUMMARY;
+                String metadataFieldName = fieldNames.contains(FIELD_METADATA) ? FIELD_METADATA : null;
+                boolean legacySchema = fieldNames.contains(FIELD_LEGACY_TEXT) && fieldNames.contains(FIELD_METADATA);
+                String primaryFieldName = StringUtils.hasText(response.getPrimaryFieldName())
+                        ? response.getPrimaryFieldName() : FIELD_ITEM_ID;
+                return new CollectionLayout(primaryFieldName, textFieldName, metadataFieldName, legacySchema);
+            }
+        } catch (Exception exception) {
+            log.debug("读取 Milvus 集合结构失败，回退默认布局: collectionName={}, error={}",
+                    collectionName, exception.getMessage());
+        }
+        return new CollectionLayout(FIELD_ITEM_ID, FIELD_CONTENT_SUMMARY, null, false);
+    }
+
+    private String buildFilterExpression(CollectionLayout collectionLayout, String tenantId, String agentId) {
+        String effectiveAgentId = agentId != null ? agentId : "";
+        if (collectionLayout.legacySchema() && StringUtils.hasText(collectionLayout.metadataFieldName())) {
+            return String.format("metadata[\"tenant_id\"] == \"%s\" && (metadata[\"agent_id\"] == \"%s\" || metadata[\"agent_id\"] == \"\")",
+                    tenantId, effectiveAgentId);
+        }
+        return String.format("tenant_id == \"%s\" && (agent_id == \"%s\" || agent_id == \"\")",
+                tenantId, effectiveAgentId);
+    }
+
+    private record CollectionLayout(String primaryFieldName,
+                                    String textFieldName,
+                                    String metadataFieldName,
+                                    boolean legacySchema) {
     }
 }

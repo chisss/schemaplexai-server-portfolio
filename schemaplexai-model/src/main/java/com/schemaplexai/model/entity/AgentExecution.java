@@ -37,6 +37,21 @@ public class AgentExecution implements Serializable {
     /** 会话标识，支持多轮对话 */
     private String conversationId;
 
+    /** 运行时引擎 */
+    private String runtimeEngine;
+
+    /** 父执行 ID */
+    private String parentExecutionId;
+
+    /** Team 成员 ID */
+    private String teamMemberId;
+
+    /** LangGraph4J 线程 ID */
+    private String graphThreadId;
+
+    /** Checkpoint 命名空间 */
+    private String checkpointNamespace;
+
     /** 执行指令（可选补充说明） */
     private String instruction;
 
@@ -53,6 +68,10 @@ public class AgentExecution implements Serializable {
     /** 输入上下文数据 */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> inputContext;
+
+    /** 本次执行的沙箱策略快照 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> sandboxPolicySnapshot;
 
     /** 输出结果 */
     private String outputResult;

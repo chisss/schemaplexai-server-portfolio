@@ -98,6 +98,15 @@ public class ContextInjector {
      */
     public String buildSystemPrompt(String agentId, String extraContext,
                                     String tenantId, String teamAgentId) {
+        return buildSystemPrompt(agentId, extraContext, tenantId, teamAgentId, null);
+    }
+
+    /**
+     * 完整版 System Prompt 构建（支持运行时附加系统上下文）
+     */
+    public String buildSystemPrompt(String agentId, String extraContext,
+                                    String tenantId, String teamAgentId,
+                                    List<String> additionalSystemContexts) {
         // 尝试从 Redis 读取静态部分（L4+L1）
         String cachedStaticPart = contextCacheService.getAgentPrompt(agentId);
         String staticPart;
@@ -111,8 +120,17 @@ public class ContextInjector {
 
         // 动态部分（L2.5 + L_team + L3）
         String dynamicPart = buildDynamicPart(agentId, tenantId, teamAgentId, extraContext);
+        String runtimePart = buildRuntimeSystemPart(additionalSystemContexts);
 
-        return dynamicPart.isBlank() ? staticPart : staticPart + "\n\n---\n\n" + dynamicPart;
+        StringBuilder promptBuilder = new StringBuilder(staticPart);
+        if (StringUtils.hasText(runtimePart)) {
+            promptBuilder.append("\n\n---\n\n").append(runtimePart);
+        }
+        if (StringUtils.hasText(dynamicPart)) {
+            promptBuilder.append("\n\n---\n\n").append(dynamicPart);
+        }
+
+        return promptBuilder.toString();
     }
 
     /**
@@ -187,6 +205,20 @@ public class ContextInjector {
         }
 
         return String.join("\n\n---\n\n", sections);
+    }
+
+    private String buildRuntimeSystemPart(List<String> additionalSystemContexts) {
+        if (additionalSystemContexts == null || additionalSystemContexts.isEmpty()) {
+            return "";
+        }
+        List<String> normalizedContexts = additionalSystemContexts.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .toList();
+        if (normalizedContexts.isEmpty()) {
+            return "";
+        }
+        return "## 运行时角色补充上下文\n" + truncate(String.join("\n\n", normalizedContexts), BUDGET_L3);
     }
 
     /**

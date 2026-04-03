@@ -24,7 +24,6 @@ import com.schemaplexai.model.vo.agent.AgentVO;
 import com.schemaplexai.model.vo.agent.AvailableToolVO;
 import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.service.agent.AgentService;
-import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -40,11 +39,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-
-import java.util.List;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.time.Instant;
 import java.util.List;
 
 /**
@@ -237,15 +233,7 @@ public class AgentController {
     @Operation(summary = "提交 Human-in-Loop 输入")
     public R<Void> submitExecutionInput(@PathVariable String id, @PathVariable String execId,
                                         @Valid @RequestBody AgentExecutionInputDTO dto) {
-        // 复用读取权限校验
-        agentService.getExecution(id, execId);
-        executionEventStreamService.publish(AgentExecutionEvent.builder()
-                .eventType("USER_INPUT")
-                .executionId(execId)
-                .message(dto.getMessage())
-                .payload(dto.getOptions())
-                .timestamp(Instant.now())
-                .build());
+        agentService.submitExecutionInput(id, execId, dto);
         return R.ok();
     }
 

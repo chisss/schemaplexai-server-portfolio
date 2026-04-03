@@ -41,6 +41,7 @@ public class MyBatisPlusConfig {
             "sf_agent_config",
             "sf_agent_team_member",
             "sf_agent_team_member_tool_binding",
+            "sf_agent_team_member_context_binding",
             "sf_agent_context_binding",
             "sf_steering_document",
             // Spec 子表（通过 spec_id 关联父表）

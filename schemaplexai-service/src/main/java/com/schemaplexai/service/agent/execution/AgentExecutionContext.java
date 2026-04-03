@@ -1,8 +1,10 @@
 package com.schemaplexai.service.agent.execution;
 
+import com.schemaplexai.model.entity.AgentToolBinding;
 import lombok.Builder;
 import lombok.Data;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -34,8 +36,35 @@ public class AgentExecutionContext {
     /** 当 agentModelType=model_group 时，绑定的模型组 ID */
     private String agentModelGroupId;
 
+    /** 父执行 ID（Team 子执行场景） */
+    private String parentExecutionId;
+
+    /** Team Agent ID（团队场景下用于注入团队共享上下文） */
+    private String teamAgentId;
+
+    /** Team 成员 ID */
+    private String teamMemberId;
+
+    /** Team 成员角色名 */
+    private String teamMemberRoleName;
+
+    /** Team 成员角色类型 */
+    private String teamMemberRoleType;
+
+    /** 运行时引擎编码 */
+    private String runtimeEngine;
+
     /** 附加上下文变量（键值对） */
     private Map<String, Object> inputContext;
+
+    /** 运行时附加系统上下文 */
+    private List<String> additionalSystemContexts;
+
+    /** 运行时工具绑定覆盖 */
+    private List<AgentToolBinding> overrideToolBindings;
+
+    /** 执行期沙箱策略 */
+    private SandboxPolicy sandboxPolicy;
 
     /** 会话标识（前端传入或自动生成，支持多轮对话） */
     private String conversationId;

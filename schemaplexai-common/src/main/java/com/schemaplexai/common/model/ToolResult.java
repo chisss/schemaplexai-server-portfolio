@@ -16,4 +16,5 @@ public class ToolResult {
     private boolean success;
     private JsonNode result;
     private String errorMessage;
+    private String controlAction;
 }

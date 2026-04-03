@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.tool.executor;
 
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.common.model.ToolResult;
 
@@ -18,4 +19,11 @@ public interface ToolExecutor {
      * 执行工具调用
      */
     ToolResult execute(String tenantId, String agentId, AgentToolBinding binding, ToolCall toolCall);
+
+    /**
+     * 执行工具调用（带沙箱策略）
+     */
+    default ToolResult execute(String tenantId, String agentId, AgentToolBinding binding, ToolCall toolCall, SandboxPolicy sandboxPolicy) {
+        return execute(tenantId, agentId, binding, toolCall);
+    }
 }

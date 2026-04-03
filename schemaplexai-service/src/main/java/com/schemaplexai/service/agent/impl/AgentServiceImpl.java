@@ -4,8 +4,10 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
+import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.common.enums.AgentStatusEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
+import com.schemaplexai.common.enums.AgentTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
@@ -16,6 +18,7 @@ import com.schemaplexai.dao.mapper.AgentExecutionLogMapper;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberMapper;
+import com.schemaplexai.dao.mapper.AgentTeamMemberContextBindingMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
 import com.schemaplexai.dao.mapper.AiModelGroupItemMapper;
@@ -42,6 +45,7 @@ import com.schemaplexai.model.dto.agent.AgentConfigRequest;
 import com.schemaplexai.model.dto.agent.AgentContextBindingDTO;
 import com.schemaplexai.model.dto.agent.AgentCreateRequest;
 import com.schemaplexai.model.dto.agent.AgentExecuteDTO;
+import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.dto.agent.AgentExecutionQueryDTO;
 import com.schemaplexai.model.dto.agent.AgentInitInstructionsDTO;
 import com.schemaplexai.model.dto.agent.AgentQueryRequest;
@@ -51,7 +55,6 @@ import com.schemaplexai.model.dto.agent.AgentUpdateRequest;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
-import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentConfig;
@@ -61,15 +64,18 @@ import com.schemaplexai.model.entity.AgentExecutionLog;
 import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.AiModelGroupItem;
 import com.schemaplexai.model.entity.AgentTeamMember;
+import com.schemaplexai.model.entity.AgentTeamMemberContextBinding;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.AgentTeamMemberToolBinding;
 import com.schemaplexai.model.entity.ChatMessageEntity;
 import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
 import com.schemaplexai.model.vo.agent.AgentExecuteResultVO;
+import com.schemaplexai.model.vo.agent.AgentExecutionChildVO;
 import com.schemaplexai.model.vo.agent.AgentExecutionLogVO;
 import com.schemaplexai.model.vo.agent.AgentExecutionVO;
 import com.schemaplexai.model.vo.agent.AgentInstructionsCheckVO;
+import com.schemaplexai.model.vo.agent.AgentTeamMemberContextBindingVO;
 import com.schemaplexai.model.vo.agent.AgentTeamMemberVO;
 import com.schemaplexai.model.vo.agent.AgentTeamMemberToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
@@ -79,6 +85,7 @@ import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
 import com.schemaplexai.service.agent.AgentService;
+import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.agent.validator.AgentValidator;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
@@ -124,6 +131,7 @@ public class AgentServiceImpl implements AgentService {
     private final McpServerMapper mcpServerMapper;
     private final TeamTemplateMapper teamTemplateMapper;
     private final AgentTeamMemberToolBindingMapper agentTeamMemberToolBindingMapper;
+    private final AgentTeamMemberContextBindingMapper agentTeamMemberContextBindingMapper;
     private final AgentToolBindingMapper agentToolBindingMapper;
     private final AgentConverter agentConverter;
     private final AgentConfigConverter agentConfigConverter;
@@ -135,7 +143,7 @@ public class AgentServiceImpl implements AgentService {
     private final EntityValidator entityValidator;
     private final ContextEntityMapper contextEntityMapper;
     private final ContextItemMapper contextItemMapper;
-    private final AgentExecutionEngine agentExecutionEngine;
+    private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
     private final ExecutionEventStreamService executionEventStreamService;
     private final SecurityRuntimeGuardService securityRuntimeGuardService;
 
@@ -223,7 +231,7 @@ public class AgentServiceImpl implements AgentService {
         agentMapper.insert(agent);
 
         // solo 类型：自动预绑定全部内置工具
-        if ("solo".equalsIgnoreCase(agent.getAgentType())) {
+        if (AgentTypeEnum.SOLO == AgentTypeEnum.fromCode(agent.getAgentType())) {
             prebindBuiltinToolsForSoloAgent(agent);
         }
 
@@ -287,6 +295,9 @@ public class AgentServiceImpl implements AgentService {
                 agentTeamMemberToolBindingMapper.delete(
                         new LambdaQueryWrapper<AgentTeamMemberToolBinding>()
                                 .in(AgentTeamMemberToolBinding::getMemberId, memberIds));
+                agentTeamMemberContextBindingMapper.delete(
+                        new LambdaQueryWrapper<AgentTeamMemberContextBinding>()
+                                .in(AgentTeamMemberContextBinding::getMemberId, memberIds));
             }
         }
         agentTeamMemberMapper.delete(
@@ -358,6 +369,7 @@ public class AgentServiceImpl implements AgentService {
                         .orderByAsc(AgentTeamMember::getSortOrder));
         var memberVOs = agentTeamMemberConverter.toVOList(members);
         enrichTeamMemberBoundTools(memberVOs);
+        enrichTeamMemberBoundContexts(memberVOs);
         return memberVOs;
     }
 
@@ -378,6 +390,9 @@ public class AgentServiceImpl implements AgentService {
                 agentTeamMemberToolBindingMapper.delete(
                         new LambdaQueryWrapper<AgentTeamMemberToolBinding>()
                                 .in(AgentTeamMemberToolBinding::getMemberId, memberIds));
+                agentTeamMemberContextBindingMapper.delete(
+                        new LambdaQueryWrapper<AgentTeamMemberContextBinding>()
+                                .in(AgentTeamMemberContextBinding::getMemberId, memberIds));
             }
         }
         // 全量覆盖：先删后插
@@ -429,6 +444,9 @@ public class AgentServiceImpl implements AgentService {
         agentTeamMemberToolBindingMapper.delete(
                 new LambdaQueryWrapper<AgentTeamMemberToolBinding>()
                         .eq(AgentTeamMemberToolBinding::getMemberId, memberId));
+        agentTeamMemberContextBindingMapper.delete(
+                new LambdaQueryWrapper<AgentTeamMemberContextBinding>()
+                        .eq(AgentTeamMemberContextBinding::getMemberId, memberId));
         agentTeamMemberMapper.deleteById(memberId);
         // 成员删除后回算配置完成状态
         recomputeConfigCompleted(agentId);
@@ -800,6 +818,63 @@ public class AgentServiceImpl implements AgentService {
         return vo;
     }
 
+    private void enrichTeamMemberBoundContexts(List<AgentTeamMemberVO> memberVOs) {
+        if (CollectionUtils.isEmpty(memberVOs)) {
+            return;
+        }
+        var memberIds = memberVOs.stream()
+                .map(AgentTeamMemberVO::getId)
+                .filter(StringUtils::hasText)
+                .toList();
+        if (CollectionUtils.isEmpty(memberIds)) {
+            return;
+        }
+        var bindings = agentTeamMemberContextBindingMapper.selectList(
+                new LambdaQueryWrapper<AgentTeamMemberContextBinding>()
+                        .in(AgentTeamMemberContextBinding::getMemberId, memberIds)
+                        .orderByAsc(AgentTeamMemberContextBinding::getSortOrder)
+                        .orderByAsc(AgentTeamMemberContextBinding::getCreatedAt));
+        var grouped = bindings.stream()
+                .map(this::toMemberContextBindingVO)
+                .collect(Collectors.groupingBy(
+                        AgentTeamMemberContextBindingVO::getMemberId,
+                        LinkedHashMap::new,
+                        Collectors.toList()));
+
+        for (AgentTeamMemberVO memberVO : memberVOs) {
+            var memberContexts = grouped.getOrDefault(memberVO.getId(), List.of());
+            memberVO.setBoundContexts(memberContexts);
+            memberVO.setBoundContextCount(memberContexts.size());
+            String contextNames = memberContexts.stream()
+                    .map(AgentTeamMemberContextBindingVO::getTitle)
+                    .filter(StringUtils::hasText)
+                    .distinct()
+                    .collect(Collectors.joining(","));
+            memberVO.setBoundContextNames(StringUtils.hasText(contextNames) ? contextNames : null);
+        }
+    }
+
+    private AgentTeamMemberContextBindingVO toMemberContextBindingVO(AgentTeamMemberContextBinding binding) {
+        var vo = new AgentTeamMemberContextBindingVO();
+        vo.setId(binding.getId());
+        vo.setMemberId(binding.getMemberId());
+        vo.setContextId(binding.getContextId());
+        vo.setSourceType(binding.getSourceType());
+        vo.setSourceConfig(binding.getSourceConfig());
+        vo.setContent(binding.getContent());
+        vo.setTitle(binding.getTitle());
+        vo.setStatus(binding.getStatus());
+        vo.setSortOrder(binding.getSortOrder());
+        vo.setCreatedAt(binding.getCreatedAt());
+        if (StringUtils.hasText(binding.getContextId())) {
+            ContextEntity context = contextEntityMapper.selectById(binding.getContextId());
+            if (context != null) {
+                vo.setContextName(context.getName());
+            }
+        }
+        return vo;
+    }
+
     /**
      * 回算 Agent 配置完成状态
      * 规则：
@@ -985,7 +1060,7 @@ public class AgentServiceImpl implements AgentService {
             update.setCompletedAt(LocalDateTime.now());
             agentExecutionMapper.updateById(update);
             executionEventStreamService.publish(AgentExecutionEvent.builder()
-                    .eventType("BLOCKED")
+                    .eventType(AgentExecutionEventTypeEnum.BLOCKED.getCode())
                     .executionId(execution.getId())
                     .message("执行已被安全策略阻断")
                     .timestamp(Instant.now())
@@ -993,7 +1068,7 @@ public class AgentServiceImpl implements AgentService {
             return AgentExecuteResultVO.builder()
                     .executionId(execution.getId())
                     .conversationId(execution.getConversationId())
-                    .status("blocked")
+                    .status(AgentExecutionEventTypeEnum.BLOCKED.getCode().toLowerCase())
                     .queuedAt(execution.getCreatedAt())
                     .message("执行已被安全策略阻断")
                     .securityDecision(securityDecision)
@@ -1006,7 +1081,7 @@ public class AgentServiceImpl implements AgentService {
             update.setErrorMessage("执行因安全策略暂停，等待人工处理");
             agentExecutionMapper.updateById(update);
             executionEventStreamService.publish(AgentExecutionEvent.builder()
-                    .eventType("PAUSED")
+                    .eventType(AgentExecutionEventTypeEnum.PAUSED.getCode())
                     .executionId(execution.getId())
                     .message("执行因安全策略暂停")
                     .timestamp(Instant.now())
@@ -1014,7 +1089,7 @@ public class AgentServiceImpl implements AgentService {
             return AgentExecuteResultVO.builder()
                     .executionId(execution.getId())
                     .conversationId(execution.getConversationId())
-                    .status("paused")
+                    .status(AgentExecutionStatusEnum.PAUSED.getCode())
                     .queuedAt(execution.getCreatedAt())
                     .message("执行因安全策略暂停，等待人工处理")
                     .securityDecision(securityDecision)
@@ -1022,13 +1097,13 @@ public class AgentServiceImpl implements AgentService {
         }
 
         executionEventStreamService.publish(AgentExecutionEvent.builder()
-                .eventType("QUEUED")
+                .eventType(AgentExecutionEventTypeEnum.QUEUED.getCode())
                 .executionId(execution.getId())
                 .message("执行已加入队列")
                 .timestamp(Instant.now())
                 .build());
 
-        agentExecutionEngine.execute(AgentExecutionContext.builder()
+        agentRuntimeOrchestrator.execute(AgentExecutionContext.builder()
                 .executionId(execution.getId())
                 .agentId(agentId)
                 .tenantId(SecurityUtil.getCurrentTenantId())
@@ -1100,13 +1175,40 @@ public class AgentServiceImpl implements AgentService {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
         var vo = toExecutionVO(execution);
+        if (StringUtils.hasText(execution.getTeamMemberId())) {
+            vo.setTeamMemberRoleName(resolveMemberRoleName(execution.getTeamMemberId()));
+        }
         // 附加执行日志
         var logs = agentExecutionLogMapper.selectList(
                 new LambdaQueryWrapper<AgentExecutionLog>()
                         .eq(AgentExecutionLog::getExecutionId, executionId)
                         .orderByAsc(AgentExecutionLog::getCreatedAt));
         vo.setLogs(logs.stream().map(this::toLogVO).toList());
+        vo.setChildExecutions(buildChildExecutionVOs(execution));
         return vo;
+    }
+
+    @Override
+    public void submitExecutionInput(String agentId, String executionId, AgentExecutionInputDTO dto) {
+        var execution = agentExecutionMapper.selectOne(
+                new LambdaQueryWrapper<AgentExecution>()
+                        .eq(AgentExecution::getId, executionId)
+                        .eq(AgentExecution::getAgentId, agentId));
+        if (execution == null) {
+            throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
+        }
+        var agent = entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
+        if (AgentTypeEnum.TEAM == AgentTypeEnum.fromCode(agent.getAgentType())) {
+            agentRuntimeOrchestrator.resume(executionId, dto);
+            return;
+        }
+        executionEventStreamService.publish(AgentExecutionEvent.builder()
+                .eventType(AgentExecutionEventTypeEnum.USER_INPUT.getCode())
+                .executionId(executionId)
+                .message(dto.getMessage())
+                .payload(dto.getOptions())
+                .timestamp(Instant.now())
+                .build());
     }
 
     @Override
@@ -1129,7 +1231,7 @@ public class AgentServiceImpl implements AgentService {
         update.setCompletedAt(LocalDateTime.now());
         agentExecutionMapper.updateById(update);
         executionEventStreamService.publish(AgentExecutionEvent.builder()
-                .eventType("CANCELLED")
+                .eventType(AgentExecutionEventTypeEnum.CANCELLED.getCode())
                 .executionId(executionId)
                 .message("执行已取消")
                 .timestamp(Instant.now())
@@ -1172,6 +1274,95 @@ public class AgentServiceImpl implements AgentService {
         vo.setTokenInput(execution.getTokenInput());
         vo.setTokenOutput(execution.getTokenOutput());
         vo.setErrorMessage(execution.getErrorMessage());
+        vo.setOutputResult(execution.getOutputResult());
+        vo.setParentExecutionId(execution.getParentExecutionId());
+        vo.setTeamMemberId(execution.getTeamMemberId());
+        vo.setGraphThreadId(execution.getGraphThreadId());
+        vo.setCheckpointNamespace(execution.getCheckpointNamespace());
+        vo.setCreatedAt(execution.getCreatedAt());
+        vo.setCompletedAt(execution.getCompletedAt());
+        return vo;
+    }
+
+    private List<AgentExecutionChildVO> buildChildExecutionVOs(AgentExecution execution) {
+        if (execution == null || StringUtils.hasText(execution.getParentExecutionId())) {
+            return List.of();
+        }
+        List<AgentExecution> childExecutions = agentExecutionMapper.selectList(
+                new LambdaQueryWrapper<AgentExecution>()
+                        .eq(AgentExecution::getParentExecutionId, execution.getId())
+                        .orderByAsc(AgentExecution::getCreatedAt));
+        if (CollectionUtils.isEmpty(childExecutions)) {
+            return List.of();
+        }
+        Map<String, String> memberRoleNameMap = resolveMemberRoleNameMap(childExecutions);
+        Map<String, List<AgentExecutionLogVO>> childLogMap = resolveChildExecutionLogMap(childExecutions);
+        return childExecutions.stream()
+                .map(childExecution -> toChildExecutionVO(
+                        childExecution,
+                        memberRoleNameMap.get(childExecution.getTeamMemberId()),
+                        childLogMap.getOrDefault(childExecution.getId(), List.of())
+                ))
+                .toList();
+    }
+
+    private String resolveMemberRoleName(String teamMemberId) {
+        if (!StringUtils.hasText(teamMemberId)) {
+            return null;
+        }
+        AgentTeamMember member = agentTeamMemberMapper.selectById(teamMemberId);
+        return member != null ? member.getRoleName() : null;
+    }
+
+    private Map<String, String> resolveMemberRoleNameMap(List<AgentExecution> childExecutions) {
+        List<String> memberIds = childExecutions.stream()
+                .map(AgentExecution::getTeamMemberId)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
+        if (CollectionUtils.isEmpty(memberIds)) {
+            return Map.of();
+        }
+        return agentTeamMemberMapper.selectList(
+                        new LambdaQueryWrapper<AgentTeamMember>()
+                                .in(AgentTeamMember::getId, memberIds))
+                .stream()
+                .collect(Collectors.toMap(AgentTeamMember::getId, AgentTeamMember::getRoleName, (left, right) -> left));
+    }
+
+    private Map<String, List<AgentExecutionLogVO>> resolveChildExecutionLogMap(List<AgentExecution> childExecutions) {
+        List<String> executionIds = childExecutions.stream()
+                .map(AgentExecution::getId)
+                .filter(StringUtils::hasText)
+                .toList();
+        if (CollectionUtils.isEmpty(executionIds)) {
+            return Map.of();
+        }
+        return agentExecutionLogMapper.selectList(
+                        new LambdaQueryWrapper<AgentExecutionLog>()
+                                .in(AgentExecutionLog::getExecutionId, executionIds)
+                                .orderByAsc(AgentExecutionLog::getCreatedAt))
+                .stream()
+                .collect(Collectors.groupingBy(
+                        AgentExecutionLog::getExecutionId,
+                        LinkedHashMap::new,
+                        Collectors.mapping(this::toLogVO, Collectors.toList())
+                ));
+    }
+
+    private AgentExecutionChildVO toChildExecutionVO(AgentExecution execution,
+                                                     String teamMemberRoleName,
+                                                     List<AgentExecutionLogVO> logs) {
+        AgentExecutionChildVO vo = new AgentExecutionChildVO();
+        vo.setExecutionId(execution.getId());
+        vo.setParentExecutionId(execution.getParentExecutionId());
+        vo.setTeamMemberId(execution.getTeamMemberId());
+        vo.setTeamMemberRoleName(teamMemberRoleName);
+        vo.setStatus(execution.getStatus());
+        vo.setModel(execution.getAiModel());
+        vo.setErrorMessage(execution.getErrorMessage());
+        vo.setOutputResult(execution.getOutputResult());
+        vo.setLogs(logs);
         vo.setCreatedAt(execution.getCreatedAt());
         vo.setCompletedAt(execution.getCompletedAt());
         return vo;

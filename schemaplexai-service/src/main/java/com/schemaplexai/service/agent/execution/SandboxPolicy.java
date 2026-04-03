@@ -1,5 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
+import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
+import com.schemaplexai.common.enums.SandboxProfileEnum;
 import com.schemaplexai.common.enums.WorkspaceScope;
 import lombok.Builder;
 import lombok.Data;
@@ -17,7 +19,10 @@ public class SandboxPolicy {
     private String tenantId;
     private String agentId;
     private String executionId;
+    private String teamMemberId;
     private WorkspaceScope workspaceScope;
+    private SandboxProfileEnum sandboxProfile;
+    private AgentRuntimeEngineEnum runtimeEngine;
     private Set<String> allowedToolCodes;
     private Set<Path> allowedPathPrefixes;
     private int maxExecutionMinutes;

@@ -35,6 +35,24 @@ public class AgentExecutionVO {
     /** 错误信息 */
     private String errorMessage;
 
+    /** 最终输出结果 */
+    private String outputResult;
+
+    /** 父执行 ID */
+    private String parentExecutionId;
+
+    /** Team 成员 ID */
+    private String teamMemberId;
+
+    /** Team 成员角色名 */
+    private String teamMemberRoleName;
+
+    /** LangGraph4J 线程 ID */
+    private String graphThreadId;
+
+    /** Checkpoint 命名空间 */
+    private String checkpointNamespace;
+
     /** 创建时间 */
     private LocalDateTime createdAt;
 
@@ -43,4 +61,7 @@ public class AgentExecutionVO {
 
     /** 执行日志（getExecution 详情时附带） */
     private List<AgentExecutionLogVO> logs;
+
+    /** Team 子执行列表（仅 Team 父执行详情时附带） */
+    private List<AgentExecutionChildVO> childExecutions;
 }
