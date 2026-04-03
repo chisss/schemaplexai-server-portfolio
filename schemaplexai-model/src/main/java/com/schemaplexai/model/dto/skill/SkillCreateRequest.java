@@ -25,6 +25,9 @@ public class SkillCreateRequest {
     /** 描述 */
     private String description;
 
+    /** Skill 激活提示词 */
+    private String skillPrompt;
+
     /** 版本 */
     private String version;
 
@@ -34,6 +37,12 @@ public class SkillCreateRequest {
 
     /** 参数定义 */
     private List<Object> parameters;
+
+    /** Skill 资源清单 */
+    private List<Object> resources;
+
+    /** Skill 渐进式披露配置 */
+    private Map<String, Object> exposureConfig;
 
     /** 实现方式 {type: script/mcp/api, content: ...} */
     private Map<String, Object> implementation;

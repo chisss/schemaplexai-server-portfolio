@@ -50,6 +50,25 @@ public class AgentRuntimeOrchestrator {
     public CompletableFuture<AgentExecutionResult> resume(String executionId, AgentExecutionInputDTO input) {
         AgentExecution execution = requireExecution(executionId);
         Agent agent = requireAgent(execution.getAgentId());
+        AgentRuntimeEngineEnum runtimeEngine = resolveRuntimeEngine(agent);
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .executionId(execution.getId())
+                .agentId(execution.getAgentId())
+                .tenantId(execution.getTenantId())
+                .inputPrompt(execution.getInputPrompt())
+                .model(execution.getAiModel())
+                .agentModelType(agent.getAiModelType())
+                .agentModelGroupId(agent.getAiModelGroupId())
+                .inputContext(execution.getInputContext())
+                .conversationId(execution.getConversationId())
+                .runtimeEngine(runtimeEngine.getCode())
+                .build();
+        SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
+        AgentExecution update = new AgentExecution();
+        update.setId(execution.getId());
+        update.setRuntimeEngine(runtimeEngine.getCode());
+        update.setSandboxPolicySnapshot(sandboxPolicyResolver.toSnapshot(sandboxPolicy));
+        agentExecutionMapper.updateById(update);
         return strategyFactory.getStrategy(agent.getAgentType()).resume(agent, execution, input);
     }
 

@@ -30,8 +30,14 @@ public class McpServer implements Serializable {
     /** 名称 */
     private String name;
 
+    /** 描述 */
+    private String description;
+
     /** MCP Server URL */
     private String url;
+
+    /** 传输类型: streamable_http / sse / stdio */
+    private String transportType;
 
     /** 认证类型: none/api_key/oauth */
     private String authType;
@@ -39,6 +45,24 @@ public class McpServer implements Serializable {
     /** 认证配置(加密存储) */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> authConfig;
+
+    /** 自定义请求头 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> headers;
+
+    /** 服务类型: generic / database */
+    private String serverType;
+
+    /** 预置模板编码 */
+    private String presetCode;
+
+    /** 连接配置 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> connectionConfig;
+
+    /** 传输配置，如 stdio command/environment */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> transportConfig;
 
     /** 发现的工具列表 */
     @TableField(typeHandler = JacksonTypeHandler.class)

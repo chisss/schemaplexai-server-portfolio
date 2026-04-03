@@ -101,6 +101,9 @@ public class SkillServiceImpl implements SkillService {
         if (request.getDescription() != null) {
             skill.setDescription(request.getDescription());
         }
+        if (request.getSkillPrompt() != null) {
+            skill.setSkillPrompt(request.getSkillPrompt());
+        }
         if (StringUtils.hasText(request.getVersion())) {
             skill.setVersion(request.getVersion());
         }
@@ -109,6 +112,12 @@ public class SkillServiceImpl implements SkillService {
         }
         if (request.getParameters() != null) {
             skill.setParameters(request.getParameters());
+        }
+        if (request.getResources() != null) {
+            skill.setResources(request.getResources());
+        }
+        if (request.getExposureConfig() != null) {
+            skill.setExposureConfig(request.getExposureConfig());
         }
         if (request.getImplementation() != null) {
             skill.setImplementation(request.getImplementation());

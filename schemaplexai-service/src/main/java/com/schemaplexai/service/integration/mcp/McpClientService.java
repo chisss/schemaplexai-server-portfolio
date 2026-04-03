@@ -1,22 +1,20 @@
 package com.schemaplexai.service.integration.mcp;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.model.entity.McpServer;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.mcp.client.McpClient;
+import dev.langchain4j.service.tool.ToolExecutionResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * MCP 协议客户端服务
@@ -24,78 +22,45 @@ import java.util.Map;
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class McpClientService {
 
-    private static final MediaType JSON_TYPE = MediaType.parse("application/json; charset=utf-8");
-
-    private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
-
-    public McpClientService(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .readTimeout(Duration.ofSeconds(30))
-                .writeTimeout(Duration.ofSeconds(10))
-                .build();
-    }
+    private final LangChain4jMcpClientFactory mcpClientFactory;
 
     /**
      * 健康检查 - 向 MCP Server 发送 ping 请求
-     *
-     * @param serverUrl  MCP Server 地址
-     * @param authType   认证类型
-     * @param authConfig 认证配置
      * @return true 表示健康
      */
-    public boolean healthCheck(String serverUrl, String authType, Map<String, Object> authConfig) {
-        try {
-            // MCP 协议: 发送 initialize 请求检查服务是否可达
-            Map<String, Object> request = buildJsonRpcRequest("initialize", Map.of(
-                    "protocolVersion", "2024-11-05",
-                    "capabilities", Map.of(),
-                    "clientInfo", Map.of("name", "SchemaPlexAI", "version", "1.0.0")
-            ));
-
-            String responseBody = sendRequest(serverUrl, request, authType, authConfig);
-            if (responseBody != null) {
-                Map<String, Object> response = objectMapper.readValue(responseBody, new TypeReference<>() {});
-                // 检查是否返回 result（非 error）
-                return response.containsKey("result");
-            }
-            return false;
+    public boolean healthCheck(McpServer server) {
+        try (McpClient mcpClient = mcpClientFactory.create(server)) {
+            mcpClient.checkHealth();
+            return true;
         } catch (Exception e) {
-            log.warn("MCP Server 健康检查失败: url={}, error={}", serverUrl, e.getMessage());
+            log.warn("MCP Server 健康检查失败: serverId={}, error={}", server != null ? server.getId() : null, e.getMessage());
             return false;
         }
     }
 
     /**
      * 发现工具 - 调用 MCP Server 的 tools/list 端点
-     *
-     * @param serverUrl  MCP Server 地址
-     * @param authType   认证类型
-     * @param authConfig 认证配置
      * @return 工具列表
      */
-    @SuppressWarnings("unchecked")
-    public List<Map<String, Object>> discoverTools(String serverUrl, String authType, Map<String, Object> authConfig) {
-        try {
-            Map<String, Object> request = buildJsonRpcRequest("tools/list", Map.of());
-            String responseBody = sendRequest(serverUrl, request, authType, authConfig);
-            if (responseBody != null) {
-                Map<String, Object> response = objectMapper.readValue(responseBody, new TypeReference<>() {});
-                if (response.containsKey("result")) {
-                    Map<String, Object> result = (Map<String, Object>) response.get("result");
-                    Object tools = result.get("tools");
-                    if (tools instanceof List<?> toolList) {
-                        return (List<Map<String, Object>>) toolList;
-                    }
-                }
+    public List<Map<String, Object>> discoverTools(McpServer server) {
+        try (McpClient mcpClient = mcpClientFactory.create(server)) {
+            List<ToolSpecification> toolSpecifications = mcpClient.listTools();
+            List<Map<String, Object>> tools = new ArrayList<>(toolSpecifications.size());
+            for (ToolSpecification toolSpecification : toolSpecifications) {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("name", toolSpecification.name());
+                payload.put("description", toolSpecification.description());
+                payload.put("inputSchema", objectMapper.convertValue(toolSpecification.parameters(), Map.class));
+                payload.put("metadata", toolSpecification.metadata());
+                tools.add(payload);
             }
-            return new ArrayList<>();
+            return tools;
         } catch (Exception e) {
-            log.error("MCP Server 工具发现失败: url={}, error={}", serverUrl, e.getMessage());
+            log.error("MCP Server 工具发现失败: serverId={}, error={}", server != null ? server.getId() : null, e.getMessage());
             return new ArrayList<>();
         }
     }
@@ -103,84 +68,36 @@ public class McpClientService {
     /**
      * 调用 MCP 工具
      *
-     * @param serverUrl  MCP Server 地址
      * @param toolName   工具名称
      * @param arguments  工具参数
-     * @param authType   认证类型
-     * @param authConfig 认证配置
      * @return 工具执行结果
      */
     @SuppressWarnings("unchecked")
-    public Map<String, Object> toolsCall(String serverUrl, String authType, Map<String, Object> authConfig,
-                                         String toolName, Map<String, Object> arguments) {
-        try {
-            Map<String, Object> params = new HashMap<>();
-            params.put("name", toolName);
-            params.put("arguments", arguments != null ? arguments : Map.of());
-
-            Map<String, Object> request = buildJsonRpcRequest("tools/call", params);
-            String responseBody = sendRequest(serverUrl, request, authType, authConfig);
-            if (responseBody != null) {
-                Map<String, Object> response = objectMapper.readValue(responseBody, new TypeReference<>() {});
-                if (response.containsKey("result")) {
-                    Object result = response.get("result");
-                    if (result instanceof Map<?, ?> resultMap) {
-                        return (Map<String, Object>) resultMap;
-                    }
-                    return Map.of("content", result);
-                }
-                if (response.containsKey("error")) {
-                    Object errorObj = response.get("error");
-                    String errorMsg = errorObj instanceof Map ?
-                        String.valueOf(((Map<?, ?>) errorObj).get("message")) : String.valueOf(errorObj);
-                    throw new RuntimeException("MCP 调用失败: " + errorMsg);
+    public Map<String, Object> toolsCall(McpServer server, String toolName, Map<String, Object> arguments) {
+        try (McpClient mcpClient = mcpClientFactory.create(server)) {
+            ToolExecutionRequest request = ToolExecutionRequest.builder()
+                    .id(UUID.randomUUID().toString())
+                    .name(toolName)
+                    .arguments(objectMapper.writeValueAsString(arguments != null ? arguments : Map.of()))
+                    .build();
+            ToolExecutionResult result = mcpClient.executeTool(request);
+            if (result.result() instanceof Map<?, ?> resultMap) {
+                return (Map<String, Object>) resultMap;
+            }
+            if (result.result() != null) {
+                try {
+                    return objectMapper.convertValue(result.result(), Map.class);
+                } catch (IllegalArgumentException exception) {
+                    log.debug("MCP 工具结果不是对象结构，降级为文本封装: tool={}, error={}", toolName, exception.getMessage());
                 }
             }
-            throw new RuntimeException("MCP Server 无响应");
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("content", result.resultText());
+            payload.put("attributes", result.attributes());
+            return payload;
         } catch (Exception e) {
             log.error("MCP 工具调用失败: tool={}, error={}", toolName, e.getMessage());
             throw new RuntimeException("MCP 工具调用失败: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * 构建 JSON-RPC 2.0 请求体
-     */
-    private Map<String, Object> buildJsonRpcRequest(String method, Map<String, Object> params) {
-        Map<String, Object> request = new HashMap<>();
-        request.put("jsonrpc", "2.0");
-        request.put("id", System.currentTimeMillis());
-        request.put("method", method);
-        request.put("params", params);
-        return request;
-    }
-
-    /**
-     * 发送 HTTP 请求到 MCP Server
-     */
-    private String sendRequest(String serverUrl, Map<String, Object> body, String authType, Map<String, Object> authConfig) throws IOException {
-        String jsonBody = objectMapper.writeValueAsString(body);
-        Request.Builder requestBuilder = new Request.Builder()
-                .url(serverUrl)
-                .post(RequestBody.create(jsonBody, JSON_TYPE))
-                .header("Content-Type", "application/json");
-
-        // 添加认证头
-        if ("api_key".equals(authType) && authConfig != null) {
-            String apiKey = String.valueOf(authConfig.getOrDefault("api_key", ""));
-            String headerName = String.valueOf(authConfig.getOrDefault("header_name", "Authorization"));
-            requestBuilder.header(headerName, apiKey);
-        } else if ("oauth".equals(authType) && authConfig != null) {
-            String token = String.valueOf(authConfig.getOrDefault("access_token", ""));
-            requestBuilder.header("Authorization", "Bearer " + token);
-        }
-
-        try (Response response = httpClient.newCall(requestBuilder.build()).execute()) {
-            if (response.isSuccessful() && response.body() != null) {
-                return response.body().string();
-            }
-            log.warn("MCP Server 请求失败: url={}, code={}", serverUrl, response.code());
-            return null;
         }
     }
 }

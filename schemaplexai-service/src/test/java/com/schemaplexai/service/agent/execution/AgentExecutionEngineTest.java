@@ -5,13 +5,18 @@ import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.common.model.ToolResult;
+import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
+import com.schemaplexai.service.quality.detector.QualityDetector;
+import com.schemaplexai.service.quality.orchestrator.QualityOrchestrator;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -95,7 +100,7 @@ class AgentExecutionEngineTest {
     }
 
     @Test
-    void shouldPauseTeamRuntimeWhenToolRequiresHumanReview() {
+    void shouldPauseSoloRuntimeWhenToolRequiresHumanReview() {
         AgentLogService agentLogService = mock(AgentLogService.class);
         ExecutionEventStreamService executionEventStreamService = mock(ExecutionEventStreamService.class);
         AgentExecutionEngine engine = new AgentExecutionEngine(
@@ -111,7 +116,7 @@ class AgentExecutionEngineTest {
         );
 
         AgentExecutionContext context = AgentExecutionContext.builder()
-                .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
+                .runtimeEngine(AgentRuntimeEngineEnum.SOLO_LANGCHAIN4J.getCode())
                 .build();
         ToolResult pausedTool = ToolResult.builder()
                 .toolCode("shell_command")
@@ -139,5 +144,75 @@ class AgentExecutionEngineTest {
         verify(agentLogService).updateExecutionStatus("exec-1", AgentExecutionStatusEnum.PAUSED.getCode(),
                 "命中高危工具，等待人工复核", 10L, 20L, null);
         verify(executionEventStreamService).publish(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void shouldBuildResumeUserMessageWithOptions() throws Exception {
+        AgentExecutionEngine engine = new AgentExecutionEngine(
+                null,
+                null,
+                null,
+                null,
+                new ObjectMapper(),
+                null,
+                null,
+                null,
+                null
+        );
+        AgentExecutionInputDTO input = new AgentExecutionInputDTO();
+        input.setMessage("请继续完成剩余测试");
+        input.setOptions(Map.of(
+                "incidentId", "inc-1",
+                "approved", true
+        ));
+
+        Method method = AgentExecutionEngine.class.getDeclaredMethod("buildResumeUserMessage", AgentExecutionInputDTO.class);
+        method.setAccessible(true);
+        String result = (String) method.invoke(engine, input);
+
+        assertThat(result).contains("## 人工补充输入");
+        assertThat(result).contains("请继续完成剩余测试");
+        assertThat(result).contains("incidentId");
+        assertThat(result).contains("inc-1");
+        assertThat(result).contains("approved");
+        assertThat(result).contains("不要重复已完成部分");
+    }
+
+    @Test
+    void shouldGenerateQualityReflectionFeedbackWhenDetectorFindsIssue() throws Exception {
+        QualityOrchestrator qualityOrchestrator = mock(QualityOrchestrator.class);
+        when(qualityOrchestrator.executeDetection(null, "structural", "TODO: 待补充"))
+                .thenReturn(new QualityDetector.DetectionResult(
+                        true,
+                        "warning",
+                        "结构不完整",
+                        Map.of("missingSection", "验证")
+                ));
+        AgentExecutionEngine engine = new AgentExecutionEngine(
+                null,
+                null,
+                null,
+                null,
+                new ObjectMapper(),
+                null,
+                null,
+                null,
+                qualityOrchestrator
+        );
+
+        Method method = AgentExecutionEngine.class.getDeclaredMethod("buildQualityReflectionFeedback", String.class, int.class);
+        method.setAccessible(true);
+        Object feedback = method.invoke(engine, "TODO: 待补充", 0);
+
+        assertThat(feedback).isNotNull();
+        Method messageMethod = feedback.getClass().getDeclaredMethod("message");
+        messageMethod.setAccessible(true);
+        Method promptMethod = feedback.getClass().getDeclaredMethod("prompt");
+        promptMethod.setAccessible(true);
+
+        assertThat((String) messageMethod.invoke(feedback)).contains("结构不完整");
+        assertThat((String) promptMethod.invoke(feedback)).contains("质量检测发现当前输出仍有问题");
+        assertThat((String) promptMethod.invoke(feedback)).contains("missingSection");
+        assertThat((String) promptMethod.invoke(feedback)).contains("验证");
     }
 }

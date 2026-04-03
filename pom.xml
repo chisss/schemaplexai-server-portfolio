@@ -48,6 +48,7 @@
         <redisson.version>3.37.0</redisson.version>
         <jgit.version>6.10.0.202406032230-r</jgit.version>
         <langchain4j.version>1.12.2</langchain4j.version>
+        <langchain4j.beta.version>1.12.2-beta22</langchain4j.beta.version>
         <langgraph4j.version>1.6.5</langgraph4j.version>
     </properties>
 

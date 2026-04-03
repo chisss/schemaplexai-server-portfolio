@@ -154,13 +154,7 @@ public class SkillToolExecutor implements ToolExecutor {
         }
         mergedArguments.putAll(convertArguments(toolCall != null ? toolCall.getArguments() : null));
 
-        Map<String, Object> output = mcpClientService.toolsCall(
-                mcpServer.getUrl(),
-                mcpServer.getAuthType(),
-                mcpServer.getAuthConfig(),
-                toolName,
-                mergedArguments
-        );
+        Map<String, Object> output = mcpClientService.toolsCall(mcpServer, toolName, mergedArguments);
 
         Map<String, Object> wrappedOutput = new LinkedHashMap<>();
         wrappedOutput.put("skillId", skill.getId());

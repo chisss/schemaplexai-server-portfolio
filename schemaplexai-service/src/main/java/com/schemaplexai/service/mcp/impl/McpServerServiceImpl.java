@@ -2,7 +2,10 @@ package com.schemaplexai.service.mcp.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.enums.McpServerTypeEnum;
 import com.schemaplexai.common.enums.McpServerStatusEnum;
+import com.schemaplexai.common.enums.McpTransportTypeEnum;
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.McpServerMapper;
@@ -13,6 +16,7 @@ import com.schemaplexai.model.dto.mcp.McpServerUpdateRequest;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.vo.mcp.McpServerVO;
 import com.schemaplexai.service.common.EntityValidator;
+import com.schemaplexai.service.integration.mcp.DatabaseMcpPresetResolver;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import com.schemaplexai.service.mcp.McpServerService;
 import com.schemaplexai.service.mcp.validator.McpServerValidator;
@@ -40,6 +44,7 @@ public class McpServerServiceImpl implements McpServerService {
     private final McpServerValidator mcpServerValidator;
     private final EntityValidator entityValidator;
     private final McpClientService mcpClientService;
+    private final DatabaseMcpPresetResolver databaseMcpPresetResolver;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -47,11 +52,13 @@ public class McpServerServiceImpl implements McpServerService {
         mcpServerValidator.validateNameUnique(request.getName());
 
         var mcpServer = mcpServerConverter.fromCreateRequest(request);
+        normalizeBeforePersist(mcpServer);
         mcpServerMapper.insert(mcpServer);
         log.info("注册MCP Server成功: mcpServerId={}, name={}", mcpServer.getId(), mcpServer.getName());
 
         var vo = mcpServerConverter.toVO(mcpServer);
         vo.setAuthConfig(maskConfig(mcpServer.getAuthConfig()));
+        vo.setConnectionConfig(maskConfig(mcpServer.getConnectionConfig()));
         return vo;
     }
 
@@ -63,9 +70,13 @@ public class McpServerServiceImpl implements McpServerService {
         if (StringUtils.hasText(request.getStatus())) {
             wrapper.eq(McpServer::getStatus, request.getStatus());
         }
+        if (StringUtils.hasText(request.getServerType())) {
+            wrapper.eq(McpServer::getServerType, request.getServerType());
+        }
         if (StringUtils.hasText(request.getKeyword())) {
             wrapper.and(w -> w.like(McpServer::getName, request.getKeyword())
-                    .or().like(McpServer::getUrl, request.getKeyword()));
+                    .or().like(McpServer::getUrl, request.getKeyword())
+                    .or().like(McpServer::getDescription, request.getKeyword()));
         }
         wrapper.orderByDesc(McpServer::getCreatedAt);
 
@@ -73,6 +84,7 @@ public class McpServerServiceImpl implements McpServerService {
         var voList = mcpServerConverter.toVOList(result.getRecords());
         for (McpServerVO vo : voList) {
             vo.setAuthConfig(maskConfig(vo.getAuthConfig()));
+            vo.setConnectionConfig(maskConfig(vo.getConnectionConfig()));
         }
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
@@ -82,6 +94,7 @@ public class McpServerServiceImpl implements McpServerService {
         var mcpServer = entityValidator.requireExists(mcpServerMapper, id, ResultCode.MCP_SERVER_NOT_FOUND);
         var vo = mcpServerConverter.toVO(mcpServer);
         vo.setAuthConfig(maskConfig(mcpServer.getAuthConfig()));
+        vo.setConnectionConfig(maskConfig(mcpServer.getConnectionConfig()));
         return vo;
     }
 
@@ -93,8 +106,14 @@ public class McpServerServiceImpl implements McpServerService {
         if (StringUtils.hasText(request.getName())) {
             mcpServer.setName(request.getName());
         }
+        if (request.getDescription() != null) {
+            mcpServer.setDescription(request.getDescription());
+        }
         if (StringUtils.hasText(request.getUrl())) {
             mcpServer.setUrl(request.getUrl());
+        }
+        if (StringUtils.hasText(request.getTransportType())) {
+            mcpServer.setTransportType(request.getTransportType());
         }
         if (request.getAuthType() != null) {
             mcpServer.setAuthType(request.getAuthType());
@@ -102,15 +121,32 @@ public class McpServerServiceImpl implements McpServerService {
         if (request.getAuthConfig() != null) {
             mcpServer.setAuthConfig(request.getAuthConfig());
         }
+        if (request.getHeaders() != null) {
+            mcpServer.setHeaders(request.getHeaders());
+        }
+        if (StringUtils.hasText(request.getServerType())) {
+            mcpServer.setServerType(request.getServerType());
+        }
+        if (request.getPresetCode() != null) {
+            mcpServer.setPresetCode(request.getPresetCode());
+        }
+        if (request.getConnectionConfig() != null) {
+            mcpServer.setConnectionConfig(request.getConnectionConfig());
+        }
+        if (request.getTransportConfig() != null) {
+            mcpServer.setTransportConfig(request.getTransportConfig());
+        }
         if (StringUtils.hasText(request.getStatus())) {
             mcpServer.setStatus(request.getStatus());
         }
 
+        normalizeBeforePersist(mcpServer);
         mcpServerMapper.updateById(mcpServer);
         log.info("更新MCP Server成功: mcpServerId={}", id);
 
         var vo = mcpServerConverter.toVO(mcpServer);
         vo.setAuthConfig(maskConfig(mcpServer.getAuthConfig()));
+        vo.setConnectionConfig(maskConfig(mcpServer.getConnectionConfig()));
         return vo;
     }
 
@@ -126,9 +162,7 @@ public class McpServerServiceImpl implements McpServerService {
     public McpServerVO healthCheck(String id) {
         var mcpServer = entityValidator.requireExists(mcpServerMapper, id, ResultCode.MCP_SERVER_NOT_FOUND);
 
-        // 调用 MCP 协议的 initialize 请求进行健康检查
-        boolean healthy = mcpClientService.healthCheck(
-                mcpServer.getUrl(), mcpServer.getAuthType(), mcpServer.getAuthConfig());
+        boolean healthy = mcpClientService.healthCheck(mcpServer);
 
         mcpServer.setLastHealthCheck(LocalDateTime.now());
         if (healthy) {
@@ -142,6 +176,7 @@ public class McpServerServiceImpl implements McpServerService {
 
         var vo = mcpServerConverter.toVO(mcpServer);
         vo.setAuthConfig(maskConfig(mcpServer.getAuthConfig()));
+        vo.setConnectionConfig(maskConfig(mcpServer.getConnectionConfig()));
         return vo;
     }
 
@@ -150,9 +185,7 @@ public class McpServerServiceImpl implements McpServerService {
     public McpServerVO discoverTools(String id) {
         var mcpServer = entityValidator.requireExists(mcpServerMapper, id, ResultCode.MCP_SERVER_NOT_FOUND);
 
-        // 调用 MCP 协议的 tools/list 请求发现工具
-        List<Map<String, Object>> tools = mcpClientService.discoverTools(
-                mcpServer.getUrl(), mcpServer.getAuthType(), mcpServer.getAuthConfig());
+        List<Map<String, Object>> tools = mcpClientService.discoverTools(mcpServer);
 
         mcpServer.setTools(new java.util.ArrayList<>(tools));
         mcpServerMapper.updateById(mcpServer);
@@ -160,7 +193,48 @@ public class McpServerServiceImpl implements McpServerService {
 
         var vo = mcpServerConverter.toVO(mcpServer);
         vo.setAuthConfig(maskConfig(mcpServer.getAuthConfig()));
+        vo.setConnectionConfig(maskConfig(mcpServer.getConnectionConfig()));
         return vo;
+    }
+
+    private void normalizeBeforePersist(McpServer mcpServer) {
+        if (!StringUtils.hasText(mcpServer.getTransportType())) {
+            mcpServer.setTransportType(McpTransportTypeEnum.STREAMABLE_HTTP.getCode());
+        }
+        if (!StringUtils.hasText(mcpServer.getServerType())) {
+            mcpServer.setServerType(McpServerTypeEnum.GENERIC.getCode());
+        }
+        if (mcpServer.getHeaders() == null) {
+            mcpServer.setHeaders(Map.of());
+        }
+        if (mcpServer.getConnectionConfig() == null) {
+            mcpServer.setConnectionConfig(Map.of());
+        }
+        if (mcpServer.getTransportConfig() == null) {
+            mcpServer.setTransportConfig(Map.of());
+        }
+
+        databaseMcpPresetResolver.applyDefaults(mcpServer);
+        databaseMcpPresetResolver.validate(mcpServer);
+
+        McpTransportTypeEnum transportType = McpTransportTypeEnum.fromCode(mcpServer.getTransportType());
+        if (transportType == null) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "不支持的 MCP 传输类型: " + mcpServer.getTransportType());
+        }
+        if ((transportType == McpTransportTypeEnum.STREAMABLE_HTTP || transportType == McpTransportTypeEnum.SSE)
+                && !StringUtils.hasText(mcpServer.getUrl())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "当前传输类型必须填写 URL");
+        }
+        if (transportType == McpTransportTypeEnum.STDIO
+                && !mcpServer.getTransportConfig().containsKey("command")
+                && !McpServerTypeEnum.DATABASE.getCode().equalsIgnoreCase(mcpServer.getServerType())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "STDIO 类型 MCP Server 必须提供 transportConfig.command");
+        }
+        if (transportType == McpTransportTypeEnum.STDIO
+                && McpServerTypeEnum.DATABASE.getCode().equalsIgnoreCase(mcpServer.getServerType())
+                && !StringUtils.hasText(mcpServer.getPresetCode())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "数据库类型 MCP Server 必须选择 presetCode");
+        }
     }
 
     /**

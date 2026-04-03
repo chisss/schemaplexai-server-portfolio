@@ -36,6 +36,9 @@ public class Skill implements Serializable {
     /** 描述 */
     private String description;
 
+    /** Skill 激活提示词 */
+    private String skillPrompt;
+
     /** 版本 */
     private String version;
 
@@ -45,6 +48,14 @@ public class Skill implements Serializable {
     /** 参数定义 */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private List<Object> parameters;
+
+    /** Skill 资源清单 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private List<Object> resources;
+
+    /** Skill 渐进式披露配置 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> exposureConfig;
 
     /** 实现方式 {type: script/mcp/api, content: ...} */
     @TableField(typeHandler = JacksonTypeHandler.class)

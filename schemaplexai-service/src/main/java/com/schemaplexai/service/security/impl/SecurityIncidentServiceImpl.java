@@ -13,6 +13,7 @@ import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.SecurityIncidentActionMapper;
 import com.schemaplexai.dao.mapper.SecurityIncidentMapper;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
+import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.dto.security.SecurityAuditContext;
 import com.schemaplexai.model.dto.security.SecurityIncidentActionRequest;
 import com.schemaplexai.model.dto.security.SecurityIncidentQueryRequest;
@@ -24,7 +25,6 @@ import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.model.vo.security.SecurityIncidentActionVO;
 import com.schemaplexai.model.vo.security.SecurityIncidentVO;
-import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.security.SecurityAuditEventService;
 import com.schemaplexai.service.security.SecurityIncidentService;
@@ -249,22 +249,15 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
         }
         var update = new AgentExecution();
         update.setId(execution.getId());
-        update.setStatus(AgentExecutionStatusEnum.QUEUED.getCode());
         update.setErrorMessage(null);
         agentExecutionMapper.updateById(update);
-
-        agentRuntimeOrchestratorProvider.getObject().execute(AgentExecutionContext.builder()
-                .executionId(execution.getId())
-                .agentId(execution.getAgentId())
-                .tenantId(execution.getTenantId())
-                .inputPrompt(execution.getInputPrompt())
-                .model(execution.getAiModel())
-                .agentModelType(agent.getAiModelType())
-                .agentModelGroupId(agent.getAiModelGroupId())
-                .inputContext(execution.getInputContext())
-                .conversationId(execution.getConversationId())
-                .stream(false)
-                .build());
+        AgentExecutionInputDTO resumeInput = new AgentExecutionInputDTO();
+        resumeInput.setMessage("安全事件已由管理员恢复，请在遵守当前安全约束的前提下继续未完成的任务。");
+        resumeInput.setOptions(Map.of(
+                "incidentId", incident.getId(),
+                "traceId", incident.getTraceId()
+        ));
+        agentRuntimeOrchestratorProvider.getObject().resume(execution.getId(), resumeInput);
     }
 
     private SecurityIncident requireIncident(String id) {

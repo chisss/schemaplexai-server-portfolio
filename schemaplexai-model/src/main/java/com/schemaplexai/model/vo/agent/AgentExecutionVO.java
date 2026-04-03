@@ -4,6 +4,7 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Agent 执行详情 VO
@@ -25,6 +26,12 @@ public class AgentExecutionVO {
 
     /** 使用模型 */
     private String model;
+
+    /** 会话 ID */
+    private String conversationId;
+
+    /** 运行时引擎 */
+    private String runtimeEngine;
 
     /** 输入 Token 数 */
     private Long tokenInput;
@@ -52,6 +59,36 @@ public class AgentExecutionVO {
 
     /** Checkpoint 命名空间 */
     private String checkpointNamespace;
+
+    /** 沙箱策略快照 */
+    private Map<String, Object> sandboxPolicySnapshot;
+
+    /** 最近一次安全决策 */
+    private String securityDecision;
+
+    /** 最近一次安全提示 */
+    private String securityMessage;
+
+    /** 最近一次安全链路 ID */
+    private String securityTraceId;
+
+    /** 最近一次安全事件 ID */
+    private String securityIncidentId;
+
+    /** 最近一次质量任务 ID */
+    private String qualityTaskId;
+
+    /** 最近一次质量任务状态 */
+    private String qualityTaskStatus;
+
+    /** 最近一次质量摘要 */
+    private String qualitySummary;
+
+    /** 质量偏离总数 */
+    private Integer qualityDeviationCount;
+
+    /** 质量预警数 */
+    private Integer qualityWarningCount;
 
     /** 创建时间 */
     private LocalDateTime createdAt;

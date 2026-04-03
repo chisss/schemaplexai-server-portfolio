@@ -168,6 +168,7 @@ public class WorkflowNodeEngine {
             log.warn("节点执行记录不存在: instanceId={}, nodeId={}", instanceId, nodeId);
             return;
         }
+        WorkflowInstance instance = instanceMapper.selectById(instanceId);
 
         Map<String, Object> outputData = new HashMap<>();
         outputData.put("agentStatus", agentExecutionStatus);
@@ -175,12 +176,26 @@ public class WorkflowNodeEngine {
         outputData.put("agentResult", result);
         outputData.put("completedAt", LocalDateTime.now().toString());
 
+        if (AgentExecutionStatusEnum.PAUSED.getCode().equals(agentExecutionStatus)) {
+            nodeExec.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+            nodeExec.setErrorMessage(StringUtils.hasText(result) ? result : "Agent 执行暂停，等待人工处理");
+            nodeExec.setOutputData(outputData);
+            nodeExecutionMapper.updateById(nodeExec);
+            pauseWorkflowInstance(instance, nodeExec, nodeExec.getErrorMessage());
+            log.warn("Agent节点执行暂停: instanceId={}, nodeId={}, agentStatus={}", instanceId, nodeId, agentExecutionStatus);
+            return;
+        }
+
         boolean agentSucceeded = AgentExecutionStatusEnum.COMPLETED.getCode().equals(agentExecutionStatus)
                 || AgentExecutionStatusEnum.STOPPED.getCode().equals(agentExecutionStatus);
 
         if (agentSucceeded) {
-            WorkflowInstance instance = instanceMapper.selectById(instanceId);
             if (instance != null) {
+                if (WorkflowInstanceStatusEnum.PAUSED.getCode().equals(instance.getStatus())) {
+                    instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+                    instance.setUpdatedAt(LocalDateTime.now());
+                    instanceMapper.updateById(instance);
+                }
                 outputData.putAll(workflowArtifactService.persistAgentArtifactIfNecessary(instance, nodeExec, result));
                 outputData.putAll(builtinQualityAssuranceService.analyzeAgentNode(instance, nodeExec, result));
             }
@@ -299,6 +314,14 @@ public class WorkflowNodeEngine {
                 buildNodeSecurityCheckRequest(instance, nodeExec, agentId, fullInstruction),
                 null
         );
+        if (securityDecision != null && SecurityComplianceConstant.DECISION_PAUSE.equals(securityDecision.getDecision())) {
+            nodeExec.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+            nodeExec.setErrorMessage(securityDecision.getMessage());
+            nodeExec.setOutputData(Map.of("securityDecision", securityDecision));
+            nodeExecutionMapper.updateById(nodeExec);
+            pauseWorkflowInstance(instance, nodeExec, securityDecision.getMessage());
+            return;
+        }
         if (securityDecision != null && SecurityComplianceConstant.DECISION_BLOCK.equals(securityDecision.getDecision())) {
             nodeExec.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
             nodeExec.setErrorMessage(securityDecision.getMessage());
@@ -373,6 +396,17 @@ public class WorkflowNodeEngine {
 
         log.info("Agent节点已触发异步执行: instanceId={}, nodeId={}, agentId={}, executionId={}",
                 instance.getId(), nodeId, agentId, executionId);
+    }
+
+    private void pauseWorkflowInstance(WorkflowInstance instance, WorkflowNodeExecution nodeExec, String reason) {
+        if (instance == null) {
+            return;
+        }
+        instance.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+        instance.setUpdatedAt(LocalDateTime.now());
+        instanceMapper.updateById(instance);
+        log.warn("工作流因 Agent 节点暂停而进入暂停状态: instanceId={}, nodeId={}, reason={}",
+                instance.getId(), nodeExec.getNodeId(), reason);
     }
 
     private SecurityRuntimeCheckRequest buildNodeSecurityCheckRequest(WorkflowInstance instance,

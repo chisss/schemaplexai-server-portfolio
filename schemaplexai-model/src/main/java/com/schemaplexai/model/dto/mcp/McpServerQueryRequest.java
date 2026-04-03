@@ -17,6 +17,9 @@ public class McpServerQueryRequest {
     /** 状态 */
     private String status;
 
+    /** 服务类型 */
+    private String serverType;
+
     /** 关键字搜索 */
     private String keyword;
 }
