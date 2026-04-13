@@ -26,5 +26,6 @@ public class DeviationVO {
     private LocalDateTime resolvedAt;
     private String sourceType;
     private String taskId;
+    private String agentExecutionId;
     private LocalDateTime createdAt;
 }

@@ -1,6 +1,7 @@
 package com.schemaplexai.service.workflow.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.enums.ReviewDecisionStatusEnum;
 import com.schemaplexai.common.enums.ReviewCommentLevelEnum;
 import com.schemaplexai.common.enums.ReviewSessionStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
@@ -8,22 +9,33 @@ import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.ReviewCommentMapper;
 import com.schemaplexai.dao.mapper.ReviewSessionMapper;
+import com.schemaplexai.dao.mapper.SpecMapper;
+import com.schemaplexai.dao.mapper.UserMapper;
+import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.model.converter.ReviewCommentConverter;
 import com.schemaplexai.model.converter.ReviewSessionConverter;
 import com.schemaplexai.model.dto.workflow.ReviewCommentCreateRequest;
+import com.schemaplexai.model.dto.workflow.ReviewDecisionRequest;
 import com.schemaplexai.model.dto.workflow.ReviewSessionCreateRequest;
 import com.schemaplexai.model.entity.ReviewComment;
 import com.schemaplexai.model.entity.ReviewSession;
+import com.schemaplexai.model.entity.Spec;
+import com.schemaplexai.model.entity.User;
+import com.schemaplexai.model.entity.WorkflowNodeExecution;
 import com.schemaplexai.model.vo.workflow.ReviewCommentVO;
 import com.schemaplexai.model.vo.workflow.ReviewSessionVO;
 import com.schemaplexai.model.vo.workflow.ReviewSummaryVO;
+import com.schemaplexai.service.notification.InAppMessageService;
+import com.schemaplexai.service.workflow.WorkflowInstanceService;
 import com.schemaplexai.service.workflow.ReviewSessionService;
 import com.schemaplexai.service.workflow.validator.ReviewValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
+import java.net.URI;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -42,15 +54,22 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
     private final ReviewSessionConverter sessionConverter;
     private final ReviewCommentConverter commentConverter;
     private final ReviewValidator reviewValidator;
+    private final WorkflowInstanceService workflowInstanceService;
+    private final InAppMessageService inAppMessageService;
+    private final SpecMapper specMapper;
+    private final UserMapper userMapper;
+    private final WorkflowNodeExecutionMapper workflowNodeExecutionMapper;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ReviewSessionVO create(ReviewSessionCreateRequest request) {
         var session = new ReviewSession();
-        session.setTenantId(SecurityUtil.getCurrentTenantId());
+        session.setTenantId(request.getTenantId() != null ? request.getTenantId() : SecurityUtil.getCurrentTenantId());
         session.setSpecId(request.getSpecId());
+        session.setWorkflowInstanceId(request.getWorkflowInstanceId());
+        session.setWorkflowNodeId(request.getWorkflowNodeId());
         session.setDocumentType(request.getDocumentType());
-        session.setOwner(SecurityUtil.getCurrentUserId());
+        session.setOwner(request.getOwner() != null ? request.getOwner() : SecurityUtil.getCurrentUserId());
 
         // 构建评审人列表，每人初始状态为 pending
         List<Object> reviewers = request.getReviewers().stream()
@@ -70,6 +89,9 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         session.setDeadline(LocalDateTime.now().plusHours(hours));
         session.setTimeoutStrategy(request.getTimeoutStrategy());
         session.setStatus(ReviewSessionStatusEnum.PENDING.getCode());
+        session.setDecisionStatus(ReviewDecisionStatusEnum.PENDING.getCode());
+        session.setReviewActionUrl(normalizeReviewActionUrl(request.getReviewActionUrl()));
+        session.setMessageTemplateId(request.getMessageTemplateId());
 
         sessionMapper.insert(session);
 
@@ -122,6 +144,21 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
     }
 
     @Override
+    public ReviewSessionVO getLatestByWorkflowNode(String workflowInstanceId, String workflowNodeId) {
+        if (workflowInstanceId == null || workflowNodeId == null) {
+            return null;
+        }
+        ReviewSession session = sessionMapper.selectOne(
+                new LambdaQueryWrapper<ReviewSession>()
+                        .eq(ReviewSession::getWorkflowInstanceId, workflowInstanceId)
+                        .eq(ReviewSession::getWorkflowNodeId, workflowNodeId)
+                        .orderByDesc(ReviewSession::getCreatedAt)
+                        .last("LIMIT 1")
+        );
+        return session == null ? null : enrichWithSummary(session);
+    }
+
+    @Override
     public List<ReviewSessionVO> getMyPending() {
         var currentUserId = SecurityUtil.getCurrentUserId();
 
@@ -137,6 +174,60 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                 .filter(s -> isReviewerInSession(s, currentUserId))
                 .map(this::enrichWithSummary)
                 .toList();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReviewSessionVO approve(String sessionId, ReviewDecisionRequest request) {
+        ReviewSession session = requirePendingSession(sessionId);
+        reviewValidator.validateIsReviewer(session);
+        updateReviewerStatus(session, SecurityUtil.getCurrentUserId(), "approved");
+        session.setDecisionStatus(ReviewDecisionStatusEnum.APPROVED.getCode());
+        session.setStatus(ReviewSessionStatusEnum.COMPLETED.getCode());
+        session.setUpdatedAt(LocalDateTime.now());
+        sessionMapper.updateById(session);
+        archivePendingReviewMessages(session);
+        workflowInstanceService.approveNode(session.getWorkflowInstanceId(), session.getWorkflowNodeId(),
+                request != null ? request.getComment() : null);
+        return enrichWithSummary(session);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReviewSessionVO reject(String sessionId, ReviewDecisionRequest request) {
+        ReviewSession session = requirePendingSession(sessionId);
+        reviewValidator.validateIsReviewer(session);
+        updateReviewerStatus(session, SecurityUtil.getCurrentUserId(), "rejected");
+        session.setDecisionStatus(ReviewDecisionStatusEnum.REJECTED.getCode());
+        session.setStatus(ReviewSessionStatusEnum.COMPLETED.getCode());
+        session.setUpdatedAt(LocalDateTime.now());
+        sessionMapper.updateById(session);
+        archivePendingReviewMessages(session);
+        workflowInstanceService.rejectNode(session.getWorkflowInstanceId(), session.getWorkflowNodeId(),
+                request != null ? request.getComment() : null,
+                request != null ? request.getRollbackToNodeId() : null);
+        return enrichWithSummary(session);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReviewSessionVO requestModify(String sessionId, ReviewDecisionRequest request) {
+        ReviewSession session = requirePendingSession(sessionId);
+        reviewValidator.validateIsReviewer(session);
+        updateReviewerStatus(session, SecurityUtil.getCurrentUserId(), "request_modify");
+        session.setDecisionStatus(ReviewDecisionStatusEnum.REQUEST_MODIFY.getCode());
+        session.setStatus(ReviewSessionStatusEnum.COMPLETED.getCode());
+        session.setUpdatedAt(LocalDateTime.now());
+        sessionMapper.updateById(session);
+        String modifyInstruction = null;
+        if (request != null) {
+            modifyInstruction = StringUtils.hasText(request.getModifyInstruction())
+                    ? request.getModifyInstruction() : request.getComment();
+        }
+        archivePendingReviewMessages(session);
+        workflowInstanceService.requestModify(session.getWorkflowInstanceId(), session.getWorkflowNodeId(),
+                modifyInstruction);
+        return enrichWithSummary(session);
     }
 
     @Override
@@ -206,11 +297,25 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         return session;
     }
 
+    private ReviewSession requirePendingSession(String id) {
+        ReviewSession session = requireExists(id);
+        if (!ReviewDecisionStatusEnum.PENDING.getCode().equals(session.getDecisionStatus())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "当前评审任务已处理");
+        }
+        if (!ReviewSessionStatusEnum.PENDING.getCode().equals(session.getStatus())
+                && !ReviewSessionStatusEnum.IN_PROGRESS.getCode().equals(session.getStatus())) {
+            throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
+        }
+        return session;
+    }
+
     /**
      * 丰富会话 VO，包含评审意见和汇总信息
      */
     private ReviewSessionVO enrichWithSummary(ReviewSession session) {
         var vo = sessionConverter.toVO(session);
+        vo.setReviewActionUrl(normalizeReviewActionUrl(vo.getReviewActionUrl()));
+        enrichMetadata(session, vo);
 
         // 查询评审意见
         var comments = commentMapper.selectList(
@@ -225,6 +330,29 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         vo.setSummary(summary);
 
         return vo;
+    }
+
+    private String normalizeReviewActionUrl(String reviewActionUrl) {
+        if (!StringUtils.hasText(reviewActionUrl)) {
+            return reviewActionUrl;
+        }
+        try {
+            URI uri = URI.create(reviewActionUrl);
+            if (uri.isAbsolute()) {
+                StringBuilder normalized = new StringBuilder(StringUtils.hasText(uri.getPath()) ? uri.getPath() : "/");
+                if (StringUtils.hasText(uri.getQuery())) {
+                    normalized.append("?").append(uri.getQuery());
+                }
+                if (StringUtils.hasText(uri.getFragment())) {
+                    normalized.append("#").append(uri.getFragment());
+                }
+                return normalized.toString();
+            }
+        } catch (IllegalArgumentException ex) {
+            log.warn("评审入口地址格式非法，按原值返回: reviewActionUrl={}", reviewActionUrl);
+            return reviewActionUrl;
+        }
+        return reviewActionUrl.startsWith("/") ? reviewActionUrl : "/" + reviewActionUrl;
     }
 
     /**
@@ -256,7 +384,7 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                 ? session.getReviewers().stream()
                 .filter(Map.class::isInstance)
                 .map(r -> (Map<String, Object>) r)
-                .filter(r -> "submitted".equals(r.get("status")))
+                .filter(r -> isSubmittedStatus(String.valueOf(r.get("status"))))
                 .count()
                 : 0;
 
@@ -264,6 +392,64 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         summary.setSubmittedCount((int) submittedCount);
 
         return summary;
+    }
+
+    private void archivePendingReviewMessages(ReviewSession session) {
+        WorkflowNodeExecution nodeExecution = findWorkflowNodeExecution(session);
+        if (nodeExecution == null || !StringUtils.hasText(nodeExecution.getId())) {
+            return;
+        }
+        inAppMessageService.archiveBySource("workflow_human_review", nodeExecution.getId());
+    }
+
+    private void enrichMetadata(ReviewSession session, ReviewSessionVO vo) {
+        if (session == null || vo == null) {
+            return;
+        }
+        Spec spec = StringUtils.hasText(session.getSpecId()) ? specMapper.selectById(session.getSpecId()) : null;
+        if (spec != null) {
+            vo.setSpecName(spec.getName());
+        }
+        String ownerId = StringUtils.hasText(session.getOwner())
+                ? session.getOwner()
+                : spec != null ? spec.getOwner() : null;
+        vo.setOwnerName(resolveUserDisplayName(ownerId));
+
+        WorkflowNodeExecution nodeExecution = findWorkflowNodeExecution(session);
+        if (nodeExecution != null && StringUtils.hasText(nodeExecution.getNodeLabel())) {
+            vo.setWorkflowNodeLabel(nodeExecution.getNodeLabel());
+        }
+    }
+
+    private WorkflowNodeExecution findWorkflowNodeExecution(ReviewSession session) {
+        if (session == null || !StringUtils.hasText(session.getWorkflowInstanceId())
+                || !StringUtils.hasText(session.getWorkflowNodeId())) {
+            return null;
+        }
+        return workflowNodeExecutionMapper.selectOne(
+                new LambdaQueryWrapper<WorkflowNodeExecution>()
+                        .eq(WorkflowNodeExecution::getInstanceId, session.getWorkflowInstanceId())
+                        .eq(WorkflowNodeExecution::getNodeId, session.getWorkflowNodeId())
+                        .orderByDesc(WorkflowNodeExecution::getCreatedAt)
+                        .last("LIMIT 1")
+        );
+    }
+
+    private String resolveUserDisplayName(String userId) {
+        if (!StringUtils.hasText(userId)) {
+            return null;
+        }
+        User user = userMapper.selectById(userId);
+        if (user == null) {
+            return userId;
+        }
+        if (StringUtils.hasText(user.getRealName())) {
+            return user.getRealName();
+        }
+        if (StringUtils.hasText(user.getUsername())) {
+            return user.getUsername();
+        }
+        return userId;
     }
 
     /**
@@ -319,5 +505,11 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                 .filter(Map.class::isInstance)
                 .map(r -> (Map<String, Object>) r)
                 .allMatch(r -> "submitted".equals(r.get("status")));
+    }
+
+    private boolean isSubmittedStatus(String status) {
+        return StringUtils.hasText(status)
+                && !ReviewSessionStatusEnum.PENDING.getCode().equals(status)
+                && !"pending".equals(status);
     }
 }

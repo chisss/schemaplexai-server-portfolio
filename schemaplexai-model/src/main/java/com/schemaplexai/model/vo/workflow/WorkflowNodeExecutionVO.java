@@ -27,6 +27,10 @@ public class WorkflowNodeExecutionVO {
 
     private String errorMessage;
 
+    private String reviewSessionId;
+
+    private String actionUrl;
+
     private LocalDateTime startedAt;
 
     private LocalDateTime completedAt;

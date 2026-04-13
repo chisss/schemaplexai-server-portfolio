@@ -8,14 +8,19 @@ import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.entity.Agent;
+import com.schemaplexai.model.entity.AgentConfig;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
+import com.schemaplexai.service.agent.handler.AgentConfigHandler;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -29,12 +34,14 @@ public class AgentRuntimeOrchestrator {
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentRuntimeStrategyFactory strategyFactory;
     private final SandboxPolicyResolver sandboxPolicyResolver;
+    private final AgentConfigHandler agentConfigHandler;
 
     public CompletableFuture<AgentExecutionResult> execute(AgentExecutionContext context) {
         AgentExecution execution = requireExecution(context.getExecutionId());
         Agent agent = requireAgent(context.getAgentId());
         AgentRuntimeEngineEnum runtimeEngine = resolveRuntimeEngine(agent);
         context.setRuntimeEngine(runtimeEngine.getCode());
+        applyOutputFormatContext(agent.getId(), context);
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
         context.setSandboxPolicy(sandboxPolicy);
 
@@ -63,6 +70,7 @@ public class AgentRuntimeOrchestrator {
                 .conversationId(execution.getConversationId())
                 .runtimeEngine(runtimeEngine.getCode())
                 .build();
+        applyOutputFormatContext(agent.getId(), context);
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
         AgentExecution update = new AgentExecution();
         update.setId(execution.getId());
@@ -92,5 +100,45 @@ public class AgentRuntimeOrchestrator {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
         return execution;
+    }
+
+    private void applyOutputFormatContext(String agentId, AgentExecutionContext context) {
+        List<String> additionalContexts = new ArrayList<>(
+                context.getAdditionalSystemContexts() == null ? List.of() : context.getAdditionalSystemContexts()
+        );
+        String outputFormat = agentConfigHandler.loadConfigs(agentId).stream()
+                .filter(config -> "output_format".equals(config.getConfigKey()))
+                .map(AgentConfig::getConfigValue)
+                .filter(StringUtils::hasText)
+                .findFirst()
+                .orElse(null);
+        if (!StringUtils.hasText(outputFormat)) {
+            context.setAdditionalSystemContexts(additionalContexts);
+            return;
+        }
+        switch (outputFormat.trim()) {
+            case "markdown" -> additionalContexts.add("""
+输出格式要求：
+1. 请始终使用 Markdown 输出。
+2. 使用清晰的标题、列表、表格或代码块组织内容。
+3. 除非任务明确要求，不要输出 JSON。
+""".trim());
+            case "structured_json" -> additionalContexts.add("""
+输出格式要求：
+1. 请严格输出单个 JSON 对象。
+2. 不要添加 Markdown 标题、代码块围栏或额外说明文字。
+3. JSON 字段名使用英文小写下划线风格。
+""".trim());
+            case "plain_text" -> additionalContexts.add("""
+输出格式要求：
+1. 请使用纯文本输出。
+2. 不要使用 Markdown 标题、表格或代码块围栏。
+3. 内容保持简洁直接。
+""".trim());
+            default -> {
+                // 未识别的配置值直接忽略，保持兼容。
+            }
+        }
+        context.setAdditionalSystemContexts(additionalContexts);
     }
 }

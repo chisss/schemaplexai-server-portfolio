@@ -49,6 +49,9 @@ public class WorkflowTemplate implements Serializable {
     /** 是否内置 */
     private Boolean isBuiltin;
 
+    /** 模板状态: draft/published/archived */
+    private String status;
+
     /** 创建人 */
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;

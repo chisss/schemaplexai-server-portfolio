@@ -14,7 +14,11 @@ import com.schemaplexai.model.dto.workspace.WorkspaceCreateRequest;
 import com.schemaplexai.model.dto.workspace.WorkspaceQueryRequest;
 import com.schemaplexai.model.dto.workspace.WorkspaceUpdateRequest;
 import com.schemaplexai.model.entity.Workspace;
+import com.schemaplexai.model.vo.artifact.ArtifactVO;
+import com.schemaplexai.model.vo.workspace.WorkspaceFileContentVO;
+import com.schemaplexai.model.vo.workspace.WorkspaceFileVO;
 import com.schemaplexai.model.vo.workspace.WorkspaceVO;
+import com.schemaplexai.service.artifact.ArtifactService;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.integration.git.GitOperationService;
 import com.schemaplexai.service.workspace.WorkspacePathResolver;
@@ -27,12 +31,17 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.stream.Stream;
 
 /**
  * 工作空间服务实现
@@ -48,6 +57,9 @@ public class WorkspaceServiceImpl implements WorkspaceService {
     private final EntityValidator entityValidator;
     private final WorkspacePathResolver workspacePathResolver;
     private final GitOperationService gitOperationService;
+    private final ArtifactService artifactService;
+
+    private static final long TEXT_PREVIEW_LIMIT = 512 * 1024L;
 
     @Override
     public WorkspaceVO create(WorkspaceCreateRequest request) {
@@ -61,9 +73,7 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         entity.setTenantId(tenantId);
         entity.setSourceType(sourceType);
         entity.setWorkspaceStatus(WorkspaceStatusEnum.READY.getCode());
-        if (WorkspaceSourceTypeEnum.MANUAL.getCode().equals(sourceType)) {
-            entity.setLocalPath(null);
-        }
+        applyWorkspaceCapabilities(entity, sourceType);
 
         workspaceMapper.insert(entity);
 
@@ -73,9 +83,7 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         if (WorkspaceSourceTypeEnum.LOCAL.getCode().equals(sourceType)) {
             return createLocalWorkspace(entity, request);
         }
-
-        log.info("创建手动工作空间成功: workspaceId={}", entity.getId());
-        return getById(entity.getId());
+        return createManualWorkspace(entity);
     }
 
     @Override
@@ -160,7 +168,11 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         String sourceType = normalizeSourceType(workspace.getSourceType());
 
         if (WorkspaceSourceTypeEnum.MANUAL.getCode().equals(sourceType)) {
-            return workspaceConverter.toVO(workspace);
+            Path workspacePath = resolveAndValidateSyncPath(workspace);
+            ensureDirectoryExists(workspacePath);
+            long diskUsageMb = gitOperationService.calculateDiskUsageMb(workspacePath.toString());
+            updateSyncStatus(id, WorkspaceStatusEnum.READY.getCode(), null, diskUsageMb, LocalDateTime.now());
+            return getById(id);
         }
 
         Path localPath = resolveAndValidateSyncPath(workspace);
@@ -225,10 +237,29 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         }
     }
 
+    private WorkspaceVO createManualWorkspace(Workspace workspace) {
+        Path workspacePath = workspacePathResolver.resolveWorkspacePath(workspace.getTenantId(), workspace.getId());
+        ensureWorkspacePathReady(workspacePath);
+        ensureDirectoryExists(workspacePath);
+
+        Workspace updateEntity = new Workspace();
+        updateEntity.setId(workspace.getId());
+        updateEntity.setLocalPath(workspacePath.toString());
+        updateEntity.setWorkspaceStatus(WorkspaceStatusEnum.READY.getCode());
+        updateEntity.setDiskUsageMb(gitOperationService.calculateDiskUsageMb(workspacePath.toString()));
+        updateEntity.setLastSyncAt(LocalDateTime.now());
+        updateEntity.setErrorMessage(null);
+        workspaceMapper.updateById(updateEntity);
+
+        log.info("创建手动工作空间成功: workspaceId={}, path={}", workspace.getId(), workspacePath);
+        return getById(workspace.getId());
+    }
+
     private WorkspaceVO createLocalWorkspace(Workspace workspace, WorkspaceCreateRequest request) {
         Path localPath = StringUtils.hasText(request.getLocalPath())
                 ? workspacePathResolver.validateWithinWorkspaceRoot(request.getLocalPath())
                 : workspacePathResolver.resolveWorkspacePath(workspace.getTenantId(), workspace.getId());
+        ensureDirectoryExists(localPath);
 
         Workspace updateEntity = new Workspace();
         updateEntity.setId(workspace.getId());
@@ -259,6 +290,14 @@ public class WorkspaceServiceImpl implements WorkspaceService {
             }
         } catch (Exception ex) {
             log.warn("实时计算工作空间磁盘占用失败: workspaceId={}", workspace.getId(), ex);
+        }
+    }
+
+    private void ensureDirectoryExists(Path path) {
+        try {
+            Files.createDirectories(path);
+        } catch (IOException e) {
+            throw new BusinessException(ResultCode.WORKSPACE_PATH_CONFLICT, "无法创建工作空间目录: " + path);
         }
     }
 
@@ -361,5 +400,195 @@ public class WorkspaceServiceImpl implements WorkspaceService {
             log.error("创建分支失败: workspaceId={}, branch={}", id, branchName, e);
             throw new BusinessException(ResultCode.BAD_REQUEST, "创建分支失败: " + e.getMessage());
         }
+    }
+
+    @Override
+    public List<WorkspaceFileVO> listFiles(String id, String path) {
+        Workspace workspace = entityValidator.requireExists(workspaceMapper, id, ResultCode.WORKSPACE_NOT_FOUND);
+        requireBrowsable(workspace);
+        Path targetPath = resolveWorkspaceFilePath(workspace, path);
+        if (!Files.exists(targetPath) || !Files.isDirectory(targetPath)) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "目录不存在: " + defaultIfBlank(path, "/"));
+        }
+        try (Stream<Path> stream = Files.list(targetPath)) {
+            return stream
+                    .sorted(Comparator
+                            .comparing((Path item) -> !Files.isDirectory(item))
+                            .thenComparing(item -> item.getFileName().toString().toLowerCase(Locale.ROOT)))
+                    .map(item -> buildWorkspaceFileVO(relativePathWithinWorkspace(workspace, item), item))
+                    .toList();
+        } catch (IOException e) {
+            log.error("列出工作空间文件失败: workspaceId={}, path={}", id, path, e);
+            throw new BusinessException(ResultCode.FAIL, "读取工作空间目录失败");
+        }
+    }
+
+    @Override
+    public WorkspaceFileContentVO readFile(String id, String path) {
+        Workspace workspace = entityValidator.requireExists(workspaceMapper, id, ResultCode.WORKSPACE_NOT_FOUND);
+        requireBrowsable(workspace);
+        Path filePath = resolveWorkspaceFilePath(workspace, path);
+        requireRegularFile(filePath, path);
+        if (!isPreviewable(filePath)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "当前文件类型不支持在线预览");
+        }
+        try {
+            WorkspaceFileContentVO vo = new WorkspaceFileContentVO();
+            WorkspaceFileVO base = buildWorkspaceFileVO(relativePathWithinWorkspace(workspace, filePath), filePath);
+            vo.setPath(base.getPath());
+            vo.setName(base.getName());
+            vo.setDirectory(base.getDirectory());
+            vo.setSize(base.getSize());
+            vo.setModifiedAt(base.getModifiedAt());
+            vo.setPreviewable(base.getPreviewable());
+            vo.setDownloadable(base.getDownloadable());
+            vo.setMimeType(resolveMimeType(filePath));
+            long fileSize = Files.size(filePath);
+            vo.setTruncated(fileSize > TEXT_PREVIEW_LIMIT);
+            byte[] bytes = Files.readAllBytes(filePath);
+            if (bytes.length > TEXT_PREVIEW_LIMIT) {
+                vo.setContent(new String(bytes, 0, (int) TEXT_PREVIEW_LIMIT, StandardCharsets.UTF_8));
+            } else {
+                vo.setContent(new String(bytes, StandardCharsets.UTF_8));
+            }
+            return vo;
+        } catch (IOException e) {
+            log.error("读取工作空间文件失败: workspaceId={}, path={}", id, path, e);
+            throw new BusinessException(ResultCode.FAIL, "读取工作空间文件失败");
+        }
+    }
+
+    @Override
+    public WorkspaceFileDownload downloadFile(String id, String path) {
+        Workspace workspace = entityValidator.requireExists(workspaceMapper, id, ResultCode.WORKSPACE_NOT_FOUND);
+        requireDownloadable(workspace);
+        Path filePath = resolveWorkspaceFilePath(workspace, path);
+        requireRegularFile(filePath, path);
+        try {
+            return new WorkspaceFileDownload(filePath.getFileName().toString(), resolveMimeType(filePath), Files.readAllBytes(filePath));
+        } catch (IOException e) {
+            log.error("下载工作空间文件失败: workspaceId={}, path={}", id, path, e);
+            throw new BusinessException(ResultCode.FAIL, "下载工作空间文件失败");
+        }
+    }
+
+    @Override
+    public List<ArtifactVO> listArtifacts(String id) {
+        entityValidator.requireExists(workspaceMapper, id, ResultCode.WORKSPACE_NOT_FOUND);
+        return artifactService.listByWorkspaceId(id);
+    }
+
+    private WorkspaceFileVO buildWorkspaceFileVO(Path relativePath, Path absolutePath) {
+        WorkspaceFileVO vo = new WorkspaceFileVO();
+        vo.setPath(normalizeRelativePath(relativePath));
+        vo.setName(absolutePath.getFileName().toString());
+        vo.setDirectory(Files.isDirectory(absolutePath));
+        try {
+            vo.setSize(Files.isDirectory(absolutePath) ? null : Files.size(absolutePath));
+            FileTime lastModifiedTime = Files.getLastModifiedTime(absolutePath);
+            vo.setModifiedAt(LocalDateTime.ofInstant(lastModifiedTime.toInstant(), java.time.ZoneId.systemDefault()));
+        } catch (IOException e) {
+            vo.setSize(null);
+            vo.setModifiedAt(null);
+        }
+        vo.setPreviewable(!Boolean.TRUE.equals(vo.getDirectory()) && isPreviewable(absolutePath));
+        vo.setDownloadable(!Boolean.TRUE.equals(vo.getDirectory()));
+        return vo;
+    }
+
+    private void requireBrowsable(Workspace workspace) {
+        if (!"browsable".equalsIgnoreCase(workspace.getBrowseCapability())) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "当前工作空间不支持浏览文件");
+        }
+    }
+
+    private void requireDownloadable(Workspace workspace) {
+        if (!"downloadable".equalsIgnoreCase(workspace.getDownloadCapability())) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "当前工作空间不支持下载文件");
+        }
+    }
+
+    private void requireRegularFile(Path filePath, String path) {
+        if (!Files.exists(filePath) || !Files.isRegularFile(filePath)) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "文件不存在: " + defaultIfBlank(path, "/"));
+        }
+    }
+
+    private Path resolveWorkspaceFilePath(Workspace workspace, String relativePath) {
+        Path rootPath = resolveAndValidateSyncPath(workspace);
+        ensureDirectoryExists(rootPath);
+        if (!StringUtils.hasText(relativePath) || "/".equals(relativePath.trim())) {
+            return rootPath;
+        }
+        Path resolved = rootPath.resolve(relativePath).normalize();
+        if (!resolved.startsWith(rootPath)) {
+            throw new BusinessException(ResultCode.WORKSPACE_PATH_CONFLICT, "文件路径越界");
+        }
+        return resolved;
+    }
+
+    private Path relativePathWithinWorkspace(Workspace workspace, Path filePath) {
+        Path rootPath = resolveAndValidateSyncPath(workspace);
+        return rootPath.relativize(filePath);
+    }
+
+    private String normalizeRelativePath(Path relativePath) {
+        if (relativePath == null || Objects.equals(relativePath.toString(), "")) {
+            return "";
+        }
+        return relativePath.toString().replace('\\', '/');
+    }
+
+    private boolean isPreviewable(Path filePath) {
+        String lower = filePath.getFileName().toString().toLowerCase(Locale.ROOT);
+        return lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".txt")
+                || lower.endsWith(".json") || lower.endsWith(".yml") || lower.endsWith(".yaml")
+                || lower.endsWith(".html") || lower.endsWith(".csv");
+    }
+
+    private String resolveMimeType(Path filePath) {
+        try {
+            String mimeType = Files.probeContentType(filePath);
+            if (StringUtils.hasText(mimeType)) {
+                return mimeType;
+            }
+        } catch (IOException ignored) {
+            // ignore
+        }
+        String lower = filePath.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".md") || lower.endsWith(".markdown")) {
+            return "text/markdown";
+        }
+        if (lower.endsWith(".json")) {
+            return "application/json";
+        }
+        if (lower.endsWith(".yml") || lower.endsWith(".yaml")) {
+            return "application/yaml";
+        }
+        if (lower.endsWith(".html")) {
+            return "text/html";
+        }
+        if (lower.endsWith(".csv")) {
+            return "text/csv";
+        }
+        return "text/plain";
+    }
+
+    private void applyWorkspaceCapabilities(Workspace workspace, String sourceType) {
+        if (workspace == null) {
+            return;
+        }
+        if (WorkspaceSourceTypeEnum.LOCAL.getCode().equals(sourceType)) {
+            workspace.setAccessMode("server_path");
+        } else {
+            workspace.setAccessMode("managed");
+        }
+        workspace.setWriteCapability("writable");
+        workspace.setBrowseCapability("browsable");
+        workspace.setDownloadCapability("downloadable");
+    }
+
+    private String defaultIfBlank(String value, String fallback) {
+        return StringUtils.hasText(value) ? value : fallback;
     }
 }

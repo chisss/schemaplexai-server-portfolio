@@ -115,6 +115,10 @@ public class SandboxPolicyResolver {
         Path root = StringUtils.hasText(runtimePolicy != null ? runtimePolicy.getWorkspaceRootPath() : null)
                 ? workspacePathResolver.validateWithinWorkspaceRoot(runtimePolicy.getWorkspaceRootPath())
                 : workspacePathResolver.getWorkspaceRoot();
-        return Set.of(root);
+        Path currentProjectRoot = Path.of("").toAbsolutePath().normalize();
+        Set<Path> allowedPrefixes = new LinkedHashSet<>();
+        allowedPrefixes.add(root);
+        allowedPrefixes.add(currentProjectRoot);
+        return allowedPrefixes;
     }
 }

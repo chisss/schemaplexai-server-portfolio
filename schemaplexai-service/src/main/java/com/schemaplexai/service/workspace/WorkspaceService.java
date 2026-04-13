@@ -4,6 +4,9 @@ import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.model.dto.workspace.WorkspaceCreateRequest;
 import com.schemaplexai.model.dto.workspace.WorkspaceQueryRequest;
 import com.schemaplexai.model.dto.workspace.WorkspaceUpdateRequest;
+import com.schemaplexai.model.vo.artifact.ArtifactVO;
+import com.schemaplexai.model.vo.workspace.WorkspaceFileContentVO;
+import com.schemaplexai.model.vo.workspace.WorkspaceFileVO;
 import com.schemaplexai.model.vo.workspace.WorkspaceVO;
 import com.schemaplexai.service.integration.git.GitOperationService;
 
@@ -42,4 +45,19 @@ public interface WorkspaceService {
      * 创建分支
      */
     GitOperationService.BranchInfo createBranch(String id, String branchName, String startPoint);
+
+    List<WorkspaceFileVO> listFiles(String id, String path);
+
+    WorkspaceFileContentVO readFile(String id, String path);
+
+    WorkspaceFileDownload downloadFile(String id, String path);
+
+    List<ArtifactVO> listArtifacts(String id);
+
+    record WorkspaceFileDownload(
+            String fileName,
+            String mimeType,
+            byte[] content
+    ) {
+    }
 }

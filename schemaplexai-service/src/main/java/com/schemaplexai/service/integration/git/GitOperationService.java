@@ -229,26 +229,10 @@ public class GitOperationService {
         // JGit 的 worktree API 需要通过 Process 执行
         try {
             boolean branchExists = branchExists(mirrorPath, branchName);
-            ProcessBuilder pb = branchExists
-                    ? new ProcessBuilder("git", "worktree", "add", "--force", worktreePath, branchName)
-                    : new ProcessBuilder(
-                            "git", "worktree", "add",
-                            "-b", branchName,
-                            worktreePath,
-                            StringUtils.hasText(startBranch) ? startBranch : "HEAD"
-                    );
-            pb.directory(new File(mirrorPath));
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-            boolean finished = process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                throw new IllegalStateException("git worktree add 超时: " + worktreePath);
-            }
-            String output = new String(process.getInputStream().readAllBytes());
-            int exitCode = process.exitValue();
-            if (exitCode != 0) {
-                throw new IllegalStateException("git worktree add 失败: " + output);
+            String output = runWorktreeAdd(mirrorPath, branchName, worktreePath, startBranch, branchExists);
+            if (!branchExists && shouldRetryWithExistingBranch(output) && branchExists(mirrorPath, branchName)) {
+                log.warn("检测到分支已被其他流程并发创建，改为复用已存在分支: branch={}", branchName);
+                runWorktreeAdd(mirrorPath, branchName, worktreePath, startBranch, true);
             }
             log.info("工作树创建成功: branch={}, worktree={}", branchName, worktreePath);
         } catch (InterruptedException e) {
@@ -257,6 +241,38 @@ public class GitOperationService {
         } catch (IOException e) {
             throw new IllegalStateException("执行 git worktree add 失败", e);
         }
+    }
+
+    private String runWorktreeAdd(String mirrorPath, String branchName, String worktreePath,
+                                  String startBranch, boolean branchExists) throws IOException, InterruptedException {
+        ProcessBuilder pb = branchExists
+                ? new ProcessBuilder("git", "worktree", "add", "--force", worktreePath, branchName)
+                : new ProcessBuilder(
+                        "git", "worktree", "add",
+                        "-b", branchName,
+                        worktreePath,
+                        StringUtils.hasText(startBranch) ? startBranch : "HEAD"
+                );
+        pb.directory(new File(mirrorPath));
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        boolean finished = process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            throw new IllegalStateException("git worktree add 超时: " + worktreePath);
+        }
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        if (process.exitValue() != 0) {
+            if (!branchExists && shouldRetryWithExistingBranch(output)) {
+                return output;
+            }
+            throw new IllegalStateException("git worktree add 失败: " + output);
+        }
+        return output;
+    }
+
+    private boolean shouldRetryWithExistingBranch(String output) {
+        return StringUtils.hasText(output) && output.contains("reference already exists");
     }
 
     /**
@@ -631,21 +647,99 @@ public class GitOperationService {
     }
 
     public boolean commitChanges(String worktreePath, String message) throws GitAPIException, IOException {
-        log.info("提交工作树变更: worktree={}", worktreePath);
-        try (Git git = Git.open(new File(worktreePath))) {
-            if (git.status().call().isClean()) {
+        return commitChanges(worktreePath, message, List.of());
+    }
+
+    public boolean commitChanges(String worktreePath, String message, List<String> forceIncludePaths) throws GitAPIException, IOException {
+        List<String> normalizedForceIncludePaths = normalizeForceIncludePaths(worktreePath, forceIncludePaths);
+        log.info("提交工作树变更: worktree={}, forceIncludePaths={}", worktreePath, normalizedForceIncludePaths);
+        if (!normalizedForceIncludePaths.isEmpty()) {
+            return commitChangesWithCli(worktreePath, message, normalizedForceIncludePaths);
+        }
+        try {
+            try (Git git = Git.open(new File(worktreePath))) {
+                if (git.status().call().isClean()) {
+                    log.info("工作树无变更，跳过提交: worktree={}", worktreePath);
+                    return false;
+                }
+                git.add().addFilepattern(".").call();
+                git.commit()
+                        .setMessage(message)
+                        .setAuthor("SchemaPlexAI", "noreply@schemaplexai.local")
+                        .setCommitter("SchemaPlexAI", "noreply@schemaplexai.local")
+                        .call();
+                log.info("工作树提交成功: worktree={}", worktreePath);
+                return true;
+            }
+        } catch (Exception ex) {
+            log.warn("JGit 提交工作树失败，回退到 git CLI: worktree={}, error={}", worktreePath, ex.getMessage());
+            return commitChangesWithCli(worktreePath, message, List.of());
+        }
+    }
+
+    private boolean commitChangesWithCli(String worktreePath, String message) throws IOException {
+        return commitChangesWithCli(worktreePath, message, List.of());
+    }
+
+    private boolean commitChangesWithCli(String worktreePath, String message, List<String> forceIncludePaths) throws IOException {
+        if (forceIncludePaths.isEmpty()) {
+            String statusOutput = runGitCommand(worktreePath, "git", "status", "--porcelain");
+            if (!StringUtils.hasText(statusOutput)) {
                 log.info("工作树无变更，跳过提交: worktree={}", worktreePath);
                 return false;
             }
-            git.add().addFilepattern(".").call();
-            git.commit()
-                    .setMessage(message)
-                    .setAuthor("SchemaPlexAI", "noreply@schemaplexai.local")
-                    .setCommitter("SchemaPlexAI", "noreply@schemaplexai.local")
-                    .call();
-            log.info("工作树提交成功: worktree={}", worktreePath);
-            return true;
         }
+        runGitCommand(worktreePath, "git", "add", "-A");
+        if (!forceIncludePaths.isEmpty()) {
+            List<String> addCommand = new ArrayList<>(List.of("git", "add", "-f", "--"));
+            addCommand.addAll(forceIncludePaths);
+            runGitCommand(worktreePath, addCommand.toArray(new String[0]));
+        }
+        String stagedOutput = runGitCommand(worktreePath, "git", "diff", "--cached", "--name-only");
+        if (!StringUtils.hasText(stagedOutput)) {
+            log.info("工作树无可提交变更，跳过提交: worktree={}", worktreePath);
+            return false;
+        }
+        runGitCommand(
+                worktreePath,
+                "git",
+                "-c",
+                "user.name=SchemaPlexAI",
+                "-c",
+                "user.email=noreply@schemaplexai.local",
+                "commit",
+                "-m",
+                message
+        );
+        log.info("通过 git CLI 提交工作树成功: worktree={}", worktreePath);
+        return true;
+    }
+
+    private List<String> normalizeForceIncludePaths(String worktreePath, List<String> forceIncludePaths) {
+        if (!StringUtils.hasText(worktreePath) || forceIncludePaths == null || forceIncludePaths.isEmpty()) {
+            return List.of();
+        }
+        Path worktreeRoot = Path.of(worktreePath).toAbsolutePath().normalize();
+        List<String> normalizedPaths = new ArrayList<>();
+        for (String forceIncludePath : forceIncludePaths) {
+            if (!StringUtils.hasText(forceIncludePath)) {
+                continue;
+            }
+            String relativePath = forceIncludePath.trim().replace('\\', '/');
+            Path absolutePath = worktreeRoot.resolve(relativePath).normalize();
+            if (!absolutePath.startsWith(worktreeRoot)) {
+                log.warn("跳过越界的强制提交路径: worktree={}, path={}", worktreePath, forceIncludePath);
+                continue;
+            }
+            if (!Files.exists(absolutePath)) {
+                log.warn("跳过不存在的强制提交路径: worktree={}, path={}", worktreePath, forceIncludePath);
+                continue;
+            }
+            if (!normalizedPaths.contains(relativePath)) {
+                normalizedPaths.add(relativePath);
+            }
+        }
+        return normalizedPaths;
     }
 
     /**

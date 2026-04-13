@@ -16,5 +16,6 @@ public interface QualityCrossReviewExecutionService {
                                  List<String> modelIds,
                                  String sourceType,
                                  String sourceAgentId,
-                                 String targetContent);
+                                 String targetContent,
+                                 String tenantId);
 }

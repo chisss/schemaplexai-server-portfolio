@@ -16,6 +16,8 @@ public record SpecVersionVO(
         Integer versionNumber,
         /** 变更说明 */
         String changeSummary,
+        /** 关联工作流节点ID */
+        String workflowNodeId,
         /** 创建人 */
         String createdBy,
         /** 创建时间 */

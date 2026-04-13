@@ -16,6 +16,7 @@ import com.schemaplexai.model.dto.workflow.WorkflowTemplateUpdateRequest;
 import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.entity.WorkflowTemplate;
 import com.schemaplexai.model.vo.workflow.WorkflowAiArrangeVO;
+import com.schemaplexai.model.vo.workflow.WorkflowTemplateStatsVO;
 import com.schemaplexai.model.vo.workflow.WorkflowTemplateVO;
 import com.schemaplexai.service.workflow.WorkflowTemplateService;
 import com.schemaplexai.service.workflow.validator.WorkflowValidator;
@@ -27,6 +28,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 工作流模板服务实现
@@ -161,5 +163,50 @@ public class WorkflowTemplateServiceImpl implements WorkflowTemplateService {
         result.setStatus(WorkflowInstanceStatusEnum.PENDING.getCode());
         result.setExplanation("AI编排功能正在准备中，请稍后查看执行结果。");
         return result;
+    }
+
+    @Override
+    public WorkflowTemplateStatsVO getStats() {
+        // 统计 published 状态的模板数量
+        var activeCount = templateMapper.selectCount(
+                new LambdaQueryWrapper<WorkflowTemplate>()
+                        .eq(WorkflowTemplate::getStatus, "published")
+        );
+
+        // 统计24小时内的实例运行数和成功率
+        var since = LocalDateTime.now().minusHours(24);
+        var recentInstances = instanceMapper.selectList(
+                new LambdaQueryWrapper<WorkflowInstance>()
+                        .ge(WorkflowInstance::getCreatedAt, since)
+        );
+        long totalRuns = recentInstances.size();
+        long completedRuns = recentInstances.stream()
+                .filter(i -> WorkflowInstanceStatusEnum.COMPLETED.getCode().equals(i.getStatus()))
+                .count();
+        double avgSuccessRate = totalRuns > 0 ? (completedRuns * 100.0 / totalRuns) : 0.0;
+
+        var stats = new WorkflowTemplateStatsVO();
+        stats.setActiveWorkflows(activeCount);
+        stats.setAvgSuccessRate(Math.round(avgSuccessRate * 10) / 10.0);
+        stats.setTotalRuns24h(totalRuns);
+        return stats;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public WorkflowTemplateVO toggleStatus(String id) {
+        var template = requireExists(id);
+        String currentStatus = template.getStatus();
+        // published → archived, 其他 → published
+        String newStatus = "published".equals(currentStatus) ? "archived" : "published";
+
+        var updateEntity = new WorkflowTemplate();
+        updateEntity.setId(id);
+        updateEntity.setStatus(newStatus);
+        updateEntity.setUpdatedAt(LocalDateTime.now());
+        templateMapper.updateById(updateEntity);
+
+        log.info("切换工作流模板状态: templateId={}, {} -> {}", id, currentStatus, newStatus);
+        return templateConverter.toVO(templateMapper.selectById(id));
     }
 }

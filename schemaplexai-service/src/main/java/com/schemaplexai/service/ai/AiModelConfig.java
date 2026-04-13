@@ -8,6 +8,7 @@ import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Map;
 
 /**
  * AI 模型运行时连接配置
@@ -16,9 +17,17 @@ import java.util.Base64;
  * Provider 实现通过此对象获取 apiKey/baseUrl/modelId 等连接参数，不再依赖 Spring @Value 静态配置。
  */
 @Getter
-@Builder
+@Builder(toBuilder = true)
 @AllArgsConstructor
 public class AiModelConfig {
+
+    private static final int DEFAULT_CONTEXT_WINDOW_TOKENS = 32_768;
+    private static final int MIN_CONTEXT_WINDOW_TOKENS = 16_384;
+    private static final int CONTEXT_WINDOW_OUTPUT_BUFFER_TOKENS = 8_192;
+
+    public static final String PROTOCOL_ANTHROPIC = "anthropic";
+    public static final String PROTOCOL_OPENAI = "openai";
+    public static final String PROTOCOL_GEMINI = "gemini";
 
     /** 解码后的 API Key（明文） */
     private final String apiKey;
@@ -32,8 +41,14 @@ public class AiModelConfig {
     /** 提供商标识（小写），如 claude / openai / gemini / deepseek */
     private final String provider;
 
+    /** 实际请求协议，如 anthropic / openai / gemini */
+    private final String protocol;
+
     /** 最大输出 Token 数 */
     private final int maxTokens;
+
+    /** 模型上下文窗口 Token 数（用于动态预算规划） */
+    private final int contextWindowTokens;
 
     /** 模型累计 Tokens 限额 */
     private final Integer maxQuotaTokens;
@@ -41,16 +56,23 @@ public class AiModelConfig {
     /** HTTP 请求超时秒数（read timeout） */
     private final int timeoutSeconds;
 
+    /** 模型调用重试次数 */
+    private final int retryCount;
+
+    /** 模型调用重试间隔（秒） */
+    private final int retryIntervalSeconds;
+
     /**
      * 从 sf_ai_model 实体构建运行时配置
      */
     public static AiModelConfig from(AiModel model) {
-        String provider = StringUtils.hasText(model.getProvider())
-                ? model.getProvider().toLowerCase()
-                : "openai";
+        String provider = normalizeProvider(model);
+        String protocol = resolveProtocol(model, provider);
 
         String baseUrl = normalizeBaseUrl(
-                StringUtils.hasText(model.getBaseUrl()) ? model.getBaseUrl() : defaultBaseUrl(provider)
+                StringUtils.hasText(model.getBaseUrl()) ? model.getBaseUrl() : defaultBaseUrl(provider),
+                provider,
+                protocol
         );
 
         String rawKey = model.getApiKeyEncrypted();
@@ -63,21 +85,37 @@ public class AiModelConfig {
                 .baseUrl(baseUrl)
                 .modelId(model.getModelId())
                 .provider(provider)
+                .protocol(protocol)
                 .maxTokens(model.getMaxTokens() != null ? model.getMaxTokens() : 4096)
+                .contextWindowTokens(resolveContextWindowTokens(model))
                 .maxQuotaTokens(model.getMaxQuotaTokens())
                 .timeoutSeconds(model.getTimeoutSeconds() != null ? model.getTimeoutSeconds() : 60)
+                .retryCount(model.getRetryCount() != null ? Math.max(model.getRetryCount(), 0) : 0)
+                .retryIntervalSeconds(model.getRetryIntervalSeconds() != null
+                        ? Math.max(model.getRetryIntervalSeconds(), 1) : 1)
                 .build();
     }
 
-    private static String normalizeBaseUrl(String baseUrl) {
-        if (!StringUtils.hasText(baseUrl)) return "";
+    public static String resolveProtocol(AiModel model) {
+        return resolveProtocol(model, normalizeProvider(model));
+    }
+
+    public static String normalizeBaseUrl(String baseUrl, String provider, String protocol) {
+        if (!StringUtils.hasText(baseUrl)) {
+            return "";
+        }
         String trimmed = baseUrl.trim();
         while (trimmed.endsWith("/")) {
             trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
-        // Anthropic 官方 API 根地址（不含 /v1）→ 自动补上 /v1
-        // MiniMax / Zhipu 等代理已含 /anthropic 等路径，跳过处理
-        if (!trimmed.equals("https://api.anthropic.com") && trimmed.contains("anthropic") || trimmed.contains("claude")) {
+        trimmed = stripKnownEndpointSuffix(trimmed);
+        if (PROTOCOL_ANTHROPIC.equals(protocol)) {
+            if (!trimmed.endsWith("/v1")) {
+                trimmed = trimmed + "/v1";
+            }
+            return trimmed;
+        }
+        if (PROTOCOL_OPENAI.equals(protocol) && !trimmed.endsWith("/v1")) {
             trimmed = trimmed + "/v1";
         }
         return trimmed;
@@ -98,6 +136,122 @@ public class AiModelConfig {
      * 基于 provider + modelId + baseUrl + apiKey 哈希
      */
     public String cacheKey() {
-        return provider + "|" + modelId + "|" + baseUrl + "|" + maxTokens + "|" + timeoutSeconds + "|" + apiKey.hashCode();
+        return provider + "|" + protocol + "|" + modelId + "|" + baseUrl + "|" + maxTokens + "|"
+                + contextWindowTokens + "|"
+                + timeoutSeconds + "|" + apiKey.hashCode();
+    }
+
+    public int resolvedContextWindowTokens() {
+        if (contextWindowTokens > 0) {
+            return contextWindowTokens;
+        }
+        return Math.max(maxTokens * 6, 16_384);
+    }
+
+    private static String normalizeProvider(AiModel model) {
+        return model != null && StringUtils.hasText(model.getProvider())
+                ? model.getProvider().trim().toLowerCase()
+                : PROTOCOL_OPENAI;
+    }
+
+    private static String resolveProtocol(AiModel model, String provider) {
+        String explicitProtocol = resolveExplicitProtocol(model != null ? model.getDefaultParams() : null);
+        if (StringUtils.hasText(explicitProtocol)) {
+            return explicitProtocol;
+        }
+        if ("gemini".equals(provider) || "google".equals(provider)) {
+            return PROTOCOL_GEMINI;
+        }
+        if ("anthropic".equals(provider) || "claude".equals(provider)) {
+            String baseUrl = model != null ? model.getBaseUrl() : null;
+            if (usesAnthropicMessagesProtocol(baseUrl)) {
+                return PROTOCOL_ANTHROPIC;
+            }
+            if (looksLikeOpenAiCompatibleClaudeProxy(baseUrl)) {
+                return PROTOCOL_OPENAI;
+            }
+            return PROTOCOL_ANTHROPIC;
+        }
+        return PROTOCOL_OPENAI;
+    }
+
+    private static String resolveExplicitProtocol(Map<String, Object> defaultParams) {
+        if (defaultParams == null || defaultParams.isEmpty()) {
+            return "";
+        }
+        Object rawValue = firstPresent(defaultParams, "protocol", "apiProtocol", "compatibilityProtocol");
+        if (rawValue == null) {
+            return "";
+        }
+        String normalized = String.valueOf(rawValue).trim().toLowerCase();
+        return switch (normalized) {
+            case "anthropic", "messages", "anthropic-compatible", "anthropic_compatible" -> PROTOCOL_ANTHROPIC;
+            case "openai", "chat_completions", "chat-completions", "openai-compatible", "openai_compatible" ->
+                    PROTOCOL_OPENAI;
+            case "gemini", "google" -> PROTOCOL_GEMINI;
+            default -> "";
+        };
+    }
+
+    private static Object firstPresent(Map<String, Object> values, String... keys) {
+        for (String key : keys) {
+            if (values.containsKey(key) && values.get(key) != null) {
+                return values.get(key);
+            }
+        }
+        return null;
+    }
+
+    private static boolean usesAnthropicMessagesProtocol(String baseUrl) {
+        if (!StringUtils.hasText(baseUrl)) {
+            return true;
+        }
+        String normalized = baseUrl.trim().toLowerCase();
+        return normalized.contains("api.anthropic.com") || normalized.contains("/anthropic");
+    }
+
+    private static boolean looksLikeOpenAiCompatibleClaudeProxy(String baseUrl) {
+        return StringUtils.hasText(baseUrl) && baseUrl.trim().toLowerCase().contains("/claude");
+    }
+
+    private static String stripKnownEndpointSuffix(String baseUrl) {
+        if (baseUrl.endsWith("/chat/completions")) {
+            return baseUrl.substring(0, baseUrl.length() - "/chat/completions".length());
+        }
+        if (baseUrl.endsWith("/messages")) {
+            return baseUrl.substring(0, baseUrl.length() - "/messages".length());
+        }
+        return baseUrl;
+    }
+
+    private static int resolveContextWindowTokens(AiModel model) {
+        if (model == null || model.getDefaultParams() == null || model.getDefaultParams().isEmpty()) {
+            return fallbackContextWindowTokens(model);
+        }
+        Object raw = firstPresent(model.getDefaultParams(),
+                "contextWindowTokens",
+                "context_window",
+                "contextWindow",
+                "maxContextTokens",
+                "max_context_tokens",
+                "maxInputTokens",
+                "max_input_tokens");
+        if (raw == null) {
+            return fallbackContextWindowTokens(model);
+        }
+        try {
+            int parsed = Integer.parseInt(String.valueOf(raw).trim());
+            return parsed > 0 ? parsed : fallbackContextWindowTokens(model);
+        } catch (NumberFormatException ex) {
+            return fallbackContextWindowTokens(model);
+        }
+    }
+
+    private static int fallbackContextWindowTokens(AiModel model) {
+        int outputReserve = model != null && model.getMaxTokens() != null
+                ? Math.max(model.getMaxTokens(), 0)
+                : 0;
+        return Math.max(DEFAULT_CONTEXT_WINDOW_TOKENS,
+                Math.max(MIN_CONTEXT_WINDOW_TOKENS, outputReserve + CONTEXT_WINDOW_OUTPUT_BUFFER_TOKENS));
     }
 }

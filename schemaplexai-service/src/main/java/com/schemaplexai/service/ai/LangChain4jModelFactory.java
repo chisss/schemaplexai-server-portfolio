@@ -1,5 +1,6 @@
 package com.schemaplexai.service.ai;
 
+import com.schemaplexai.service.ai.http.LangChainOkHttpClientBuilder;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
@@ -30,30 +31,66 @@ public class LangChain4jModelFactory {
     }
 
     private ChatModel buildModel(AiModelConfig config) {
-        Duration timeout = Duration.ofSeconds(Math.max(config.getTimeoutSeconds(), 60));
-        log.info("创建 LangChain4j 模型实例: provider={}, modelId={}", config.getProvider(), config.getModelId());
-        return switch (config.getProvider()) {
-            case "claude", "anthropic" -> AnthropicChatModel.builder()
+        Duration timeout = resolveTimeout(config);
+        log.info("创建 LangChain4j 模型实例: provider={}, protocol={}, modelId={}, baseUrl={}",
+                config.getProvider(), config.getProtocol(), config.getModelId(), config.getBaseUrl());
+        return switch (config.getProtocol()) {
+            case AiModelConfig.PROTOCOL_ANTHROPIC -> AnthropicChatModel.builder()
                     .apiKey(config.getApiKey())
                     .modelName(config.getModelId())
                     .maxTokens(config.getMaxTokens())
                     .timeout(timeout)
                     .baseUrl(config.getBaseUrl())
                     .build();
-            case "gemini", "google" -> GoogleAiGeminiChatModel.builder()
+            case AiModelConfig.PROTOCOL_GEMINI -> GoogleAiGeminiChatModel.builder()
                     .apiKey(config.getApiKey())
                     .baseUrl(config.getBaseUrl())
                     .modelName(config.getModelId())
                     .maxOutputTokens(config.getMaxTokens())
                     .timeout(timeout)
                     .build();
-            default -> OpenAiChatModel.builder()
-                    .apiKey(config.getApiKey())
-                    .baseUrl(config.getBaseUrl())
-                    .modelName(config.getModelId())
-                    .maxCompletionTokens(config.getMaxTokens())
-                    .timeout(timeout)
-                    .build();
+            default -> buildOpenAiCompatibleModel(config, timeout);
         };
+    }
+
+    private ChatModel buildOpenAiCompatibleModel(AiModelConfig config, Duration timeout) {
+        OpenAiChatModel.OpenAiChatModelBuilder builder = OpenAiChatModel.builder()
+                .apiKey(config.getApiKey())
+                .baseUrl(config.getBaseUrl())
+                .modelName(config.getModelId())
+                .timeout(timeout);
+        if (shouldUseLegacyMaxTokens(config)) {
+            builder.maxTokens(config.getMaxTokens());
+        } else {
+            builder.maxCompletionTokens(config.getMaxTokens());
+        }
+        if (shouldUseOkHttpClient(config)) {
+            builder.httpClientBuilder(new LangChainOkHttpClientBuilder());
+        }
+        return builder.build();
+    }
+
+    private boolean shouldUseOkHttpClient(AiModelConfig config) {
+        if (config == null || !AiModelConfig.PROTOCOL_OPENAI.equals(config.getProtocol())) {
+            return false;
+        }
+        return "anthropic".equals(config.getProvider())
+                || "claude".equals(config.getProvider())
+                || (config.getBaseUrl() != null && config.getBaseUrl().contains("/claude"));
+    }
+
+    boolean shouldUseLegacyMaxTokens(AiModelConfig config) {
+        if (config == null || !AiModelConfig.PROTOCOL_OPENAI.equals(config.getProtocol())) {
+            return false;
+        }
+        return "anthropic".equals(config.getProvider())
+                || "claude".equals(config.getProvider())
+                || (config.getBaseUrl() != null && config.getBaseUrl().contains("/claude"));
+    }
+
+    Duration resolveTimeout(AiModelConfig config) {
+        int timeoutSeconds = config != null && config.getTimeoutSeconds() > 0
+                ? config.getTimeoutSeconds() : 60;
+        return Duration.ofSeconds(Math.max(timeoutSeconds, 1));
     }
 }

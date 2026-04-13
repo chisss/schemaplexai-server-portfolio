@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper">
+
+    <resultMap id="WorkflowNodeExecutionResultMap" type="com.schemaplexai.model.entity.WorkflowNodeExecution">
+        <result column="input_data" property="inputData" typeHandler="com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler"/>
+        <result column="output_data" property="outputData" typeHandler="com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler"/>
+    </resultMap>
+
+    <select id="selectByInstanceId" resultMap="WorkflowNodeExecutionResultMap">
+        SELECT *
+        FROM sf_workflow_node_execution
+        WHERE instance_id = #{instanceId}
+        ORDER BY created_at
+    </select>
+</mapper>

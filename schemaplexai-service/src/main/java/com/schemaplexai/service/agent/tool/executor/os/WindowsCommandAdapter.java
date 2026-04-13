@@ -2,6 +2,8 @@ package com.schemaplexai.service.agent.tool.executor.os;
 
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -14,8 +16,9 @@ public class WindowsCommandAdapter implements ShellCommandAdapter {
             case "sys.read" -> "type " + quoteForCmd(argAsString(args, "path"));
             case "sys.write", "sys.edit" -> "powershell -NoProfile -NonInteractive -Command \"Set-Content -LiteralPath "
                     + quoteForPowerShell(argAsString(args, "path"))
-                    + " -Value "
-                    + quoteForPowerShell(argAsString(args, "content"))
+                    + " -Value ("
+                    + decodeBase64Expression(argAsString(args, "content"))
+                    + ")"
                     + "\"";
             case "sys.bash" -> argAsString(args, "command");
             case "sys.glob" -> "dir /s /b " + quoteForCmd(resolveGlobPath(args));
@@ -99,5 +102,12 @@ public class WindowsCommandAdapter implements ShellCommandAdapter {
             return path + "*";
         }
         return path + "\\*";
+    }
+
+    private String decodeBase64Expression(String value) {
+        String encoded = Base64.getEncoder().encodeToString((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+        return "[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
+                + encoded
+                + "'))";
     }
 }

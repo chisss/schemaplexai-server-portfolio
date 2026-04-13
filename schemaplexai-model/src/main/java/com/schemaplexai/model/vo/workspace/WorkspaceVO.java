@@ -31,6 +31,18 @@ public class WorkspaceVO {
     /** 本地路径 */
     private String localPath;
 
+    /** 访问模式 */
+    private String accessMode;
+
+    /** 写入能力 */
+    private String writeCapability;
+
+    /** 浏览能力 */
+    private String browseCapability;
+
+    /** 下载能力 */
+    private String downloadCapability;
+
     /** 状态 */
     private String workspaceStatus;
 

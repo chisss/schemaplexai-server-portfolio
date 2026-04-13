@@ -238,8 +238,10 @@ public class BudgetServiceImpl implements BudgetService {
                 .distinct()
                 .toList());
         return executions.stream()
-                .filter(execution -> matchBudget(budget, execution, specMap.get(execution.getSpecId())))
-                .map(execution -> estimateCost(execution, modelMap.get(execution.getAiModel())))
+                .filter(execution -> matchBudget(budget, execution,
+                        StringUtils.hasText(execution.getSpecId()) ? specMap.get(execution.getSpecId()) : null))
+                .map(execution -> estimateCost(execution,
+                        StringUtils.hasText(execution.getAiModel()) ? modelMap.get(execution.getAiModel()) : null))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 

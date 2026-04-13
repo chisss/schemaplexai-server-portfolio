@@ -15,6 +15,7 @@ import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
+import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.mq.AgentContextPublisher;
@@ -36,6 +37,7 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -66,8 +68,10 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         ContextItemMapper contextItemMapper = mock(ContextItemMapper.class);
         AgentExecutionEngine agentExecutionEngine = mock(AgentExecutionEngine.class);
         AgentLogService agentLogService = mock(AgentLogService.class);
+        AgentLoopQualityChecker qualityChecker = mock(AgentLoopQualityChecker.class);
         ExecutionEventStreamService executionEventStreamService = mock(ExecutionEventStreamService.class);
         AgentContextPublisher agentContextPublisher = mock(AgentContextPublisher.class);
+        when(qualityChecker.buildImmediateFeedback(any(), any(), any(), anyInt(), any())).thenReturn(null);
 
         TeamAgentRuntimeStrategy strategy = new TeamAgentRuntimeStrategy(
                 agentExecutionMapper,
@@ -77,6 +81,7 @@ class TeamAgentRuntimeStrategyCheckpointTest {
                 contextItemMapper,
                 agentExecutionEngine,
                 agentLogService,
+                qualityChecker,
                 executionEventStreamService,
                 agentContextPublisher
         );

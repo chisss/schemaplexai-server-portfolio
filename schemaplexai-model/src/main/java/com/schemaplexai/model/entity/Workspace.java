@@ -49,6 +49,18 @@ public class Workspace implements Serializable {
     /** 本地克隆路径 */
     private String localPath;
 
+    /** 访问模式: managed/server_path/reference_only */
+    private String accessMode;
+
+    /** 写入能力: writable/read_only */
+    private String writeCapability;
+
+    /** 浏览能力: browsable/hidden */
+    private String browseCapability;
+
+    /** 下载能力: downloadable/none */
+    private String downloadCapability;
+
     /** 状态: cloning/ready/syncing/error/archived */
     private String workspaceStatus;
 

@@ -73,10 +73,19 @@ public class QualityReportHandler {
                     summary.put("startedAt", e.getStartedAt() != null ? e.getStartedAt().toString() : null);
                     summary.put("completedAt", e.getCompletedAt() != null ? e.getCompletedAt().toString() : null);
                     if (e.getOutputData() != null) {
-                        Object result = e.getOutputData().get("result");
-                        summary.put("result", result != null ? result : e.getOutputData().get("agentResult"));
-                        summary.put("qualitySummary", e.getOutputData().get("qualitySummary"));
-                        summary.put("qualityTaskId", e.getOutputData().get("qualityTaskId"));
+                        Object tracePayload = e.getOutputData().get("tracePayload");
+                        Object handoffPayload = e.getOutputData().get("handoffPayload");
+                        if (tracePayload instanceof Map<?, ?> traceMap) {
+                            Object result = traceMap.get("result");
+                            summary.put("result", result);
+                            summary.put("qualitySummary", traceMap.get("qualitySummary"));
+                            summary.put("qualityTaskId", traceMap.get("qualityTaskId"));
+                        }
+                        if (handoffPayload instanceof Map<?, ?> handoffMap && summary.get("result") == null) {
+                            summary.put("result", handoffMap.get("summary"));
+                            summary.put("qualitySummary", handoffMap.get("qualitySummary"));
+                            summary.put("qualityTaskId", handoffMap.get("qualityTaskId"));
+                        }
                     }
                     return summary;
                 })

@@ -4,15 +4,18 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.dao.mapper.ArtifactMapper;
 import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.CrossReviewMapper;
 import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.model.converter.CrossReviewConverter;
 import com.schemaplexai.model.dto.quality.CrossReviewCreateRequest;
 import com.schemaplexai.model.entity.AiModel;
+import com.schemaplexai.model.entity.Artifact;
 import com.schemaplexai.model.entity.CrossReview;
 import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.vo.quality.CrossReviewVO;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.quality.CrossReviewService;
 import com.schemaplexai.service.quality.QualityCrossReviewExecutionService;
@@ -45,6 +48,7 @@ public class CrossReviewServiceImpl implements CrossReviewService {
     private final QualityProfileResolverService qualityProfileResolverService;
     private final SpecMapper specMapper;
     private final AiModelMapper aiModelMapper;
+    private final ArtifactMapper artifactMapper;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -53,6 +57,8 @@ public class CrossReviewServiceImpl implements CrossReviewService {
         if (CollectionUtils.isEmpty(modelIds) && StringUtils.hasText(request.getProfileId())) {
             modelIds = qualityProfileResolverService.listModelIds(request.getProfileId());
         }
+        Spec spec = specMapper.selectById(request.getSpecId());
+        String targetContent = resolveTargetContent(request, spec);
         var entity = qualityCrossReviewExecutionService.createAndExecute(
                 request.getSpecId(),
                 request.getTaskId(),
@@ -61,13 +67,52 @@ public class CrossReviewServiceImpl implements CrossReviewService {
                 modelIds,
                 "manual",
                 null,
-                null
+                targetContent,
+                spec != null ? spec.getTenantId() : SecurityUtil.getCurrentTenantId()
         );
         if (entity == null) {
             throw new IllegalArgumentException("未找到可用模型，无法发起交叉审查");
         }
         log.info("创建交叉审查并完成执行: reviewId={}, specId={}", entity.getId(), request.getSpecId());
         return enrichVO(entity);
+    }
+
+    private String resolveTargetContent(CrossReviewCreateRequest request, Spec spec) {
+        if (StringUtils.hasText(request.getTargetContent())) {
+            return request.getTargetContent().trim();
+        }
+        String artifactId = StringUtils.hasText(request.getArtifactId())
+                ? request.getArtifactId()
+                : spec != null ? spec.getPrimaryArtifactId() : null;
+        if (!StringUtils.hasText(artifactId)) {
+            return null;
+        }
+        Artifact artifact = artifactMapper.selectById(artifactId);
+        String resolvedContent = resolveArtifactContent(artifact);
+        if (!StringUtils.hasText(resolvedContent)) {
+            return null;
+        }
+        return resolvedContent.trim();
+    }
+
+    @SuppressWarnings("unchecked")
+    private String resolveArtifactContent(Artifact artifact) {
+        if (artifact == null) {
+            return null;
+        }
+        if (artifact.getMetadataJson() != null) {
+            Object bundleItems = artifact.getMetadataJson().get("bundleItems");
+            if (bundleItems instanceof List<?> list && !list.isEmpty()) {
+                Object firstItem = list.getFirst();
+                if (firstItem instanceof Map<?, ?> map) {
+                    Object content = ((Map<String, Object>) map).get("content");
+                    if (content != null && StringUtils.hasText(String.valueOf(content))) {
+                        return String.valueOf(content);
+                    }
+                }
+            }
+        }
+        return artifact.getContentText();
     }
 
     @Override

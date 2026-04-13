@@ -41,6 +41,14 @@ public class TeamGraphState extends AgentState {
         return value(TeamGraphConstants.STATE_USER_INPUT, (String) null);
     }
 
+    public String qualityGateDecision() {
+        return value(TeamGraphConstants.STATE_QUALITY_GATE_DECISION, (String) null);
+    }
+
+    public String qualityGateSummary() {
+        return value(TeamGraphConstants.STATE_QUALITY_GATE_SUMMARY, (String) null);
+    }
+
     @SuppressWarnings("unchecked")
     public Map<String, Object> userOptions() {
         return value(TeamGraphConstants.STATE_USER_OPTIONS)

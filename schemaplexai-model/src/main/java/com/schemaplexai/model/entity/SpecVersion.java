@@ -36,6 +36,9 @@ public class SpecVersion implements Serializable {
     /** 变更说明 */
     private String changeSummary;
 
+    /** 关联工作流节点ID */
+    private String workflowNodeId;
+
     /** 创建人 */
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;

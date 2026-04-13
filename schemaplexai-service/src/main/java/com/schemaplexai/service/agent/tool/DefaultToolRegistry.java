@@ -19,6 +19,7 @@ import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -37,7 +38,7 @@ public class DefaultToolRegistry implements ToolRegistry {
     private final AgentToolBindingMapper agentToolBindingMapper;
     private final BuiltinToolMapper builtinToolMapper;
     private final List<ToolExecutor> toolExecutors;
-    private final SecurityRuntimeGuardService securityRuntimeGuardService;
+    private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
     private final SandboxGuard sandboxGuard;
 
     @Override
@@ -122,7 +123,7 @@ public class DefaultToolRegistry implements ToolRegistry {
             }
 
             try {
-                SecurityCheckDecisionVO preDecision = securityRuntimeGuardService.evaluate(
+                SecurityCheckDecisionVO preDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
                         buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE, agentId, toolCall, null),
                         null
                 );
@@ -132,7 +133,7 @@ public class DefaultToolRegistry implements ToolRegistry {
                 }
 
                 ToolResult result = executor.execute(tenantId, agentId, binding, toolCall, sandboxPolicy);
-                SecurityCheckDecisionVO postDecision = securityRuntimeGuardService.evaluate(
+                SecurityCheckDecisionVO postDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
                         buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, agentId, toolCall, result),
                         null
                 );

@@ -2,6 +2,8 @@ package com.schemaplexai.service.agent.tool.executor.os;
 
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -12,10 +14,11 @@ public class MacCommandAdapter implements ShellCommandAdapter {
     public String adaptCommand(String toolCode, Map<String, Object> args) {
         return switch (toolCode) {
             case "sys.read" -> "cat " + quote(argAsString(args, "path"));
-            case "sys.write", "sys.edit" -> "printf %s " + quote(argAsString(args, "content")) + " > " + quote(argAsString(args, "path"));
+            case "sys.write", "sys.edit" -> "printf %s " + quote(encodeBase64(argAsString(args, "content")))
+                    + " | base64 -D > " + quote(argAsString(args, "path"));
             case "sys.bash" -> argAsString(args, "command");
             case "sys.glob" -> "find " + quote(defaultIfBlank(argAsString(args, "path"), ".")) + " -name " + quote(argAsString(args, "pattern"));
-            case "sys.grep" -> "grep -r " + quote(argAsString(args, "pattern")) + " " + quote(defaultIfBlank(argAsString(args, "path"), "."));
+            case "sys.grep" -> "grep -rE " + quote(argAsString(args, "pattern")) + " " + quote(defaultIfBlank(argAsString(args, "path"), "."));
             case "sys.ls" -> "ls " + quote(defaultIfBlank(argAsString(args, "path"), "."));
             case "sys.mkdir" -> "mkdir -p " + quote(argAsString(args, "path"));
             case "sys.rm" -> "rm -rf " + quote(argAsString(args, "path"));
@@ -54,5 +57,9 @@ public class MacCommandAdapter implements ShellCommandAdapter {
             return "";
         }
         return value.replace("'", "'\"'\"'");
+    }
+
+    private String encodeBase64(String value) {
+        return Base64.getEncoder().encodeToString((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
     }
 }

@@ -51,7 +51,20 @@ public class DeviationAnalysisHandler {
                         && AgentExecutionStatusEnum.COMPLETED.getCode().equals(e.getStatus()))
                 .map(e -> {
                     Map<String, Object> out = e.getOutputData();
-                    return out != null ? str(out, "result") : null;
+                    if (out == null) {
+                        return null;
+                    }
+                    Object tracePayload = out.get("tracePayload");
+                    if (tracePayload instanceof Map<?, ?> traceMap) {
+                        Object result = traceMap.get("result");
+                        return result != null ? String.valueOf(result) : null;
+                    }
+                    Object handoffPayload = out.get("handoffPayload");
+                    if (handoffPayload instanceof Map<?, ?> handoffMap) {
+                        Object summary = handoffMap.get("summary");
+                        return summary != null ? String.valueOf(summary) : null;
+                    }
+                    return str(out, "result");
                 })
                 .filter(s -> s != null && !s.isBlank())
                 .toList();

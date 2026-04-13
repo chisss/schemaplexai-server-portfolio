@@ -85,6 +85,7 @@ knife4j:
 
 # 工作空间配置
 schemaplexai:
+  frontend-base-url: ${FRONTEND_BASE_URL:http://127.0.0.1:5174}
   workspace:
     root-path: ${WORKSPACE_ROOT:${user.home}/.schemaplexai/workspaces}
     max-disk-usage-gb: 50

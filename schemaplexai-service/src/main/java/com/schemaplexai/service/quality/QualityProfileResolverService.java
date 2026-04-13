@@ -9,7 +9,7 @@ import java.util.List;
  */
 public interface QualityProfileResolverService {
 
-    QualityProfile resolveProfile(String specId, String workflowTemplateId, String agentId, String issueType);
+    QualityProfile resolveProfile(String specId, String workflowTemplateId, String agentId, String issueType, String sourceType);
 
     List<String> listModelIds(String profileId);
 }

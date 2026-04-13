@@ -23,6 +23,9 @@ public class SpecQueryRequest {
     /** 分类筛选 */
     private String category;
 
+    /** 需求类型筛选 */
+    private String specType;
+
     /** 优先级筛选 */
     private String priority;
 

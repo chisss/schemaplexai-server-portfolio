@@ -16,8 +16,9 @@ import com.schemaplexai.model.vo.channel.NotificationChannelVO;
 import com.schemaplexai.service.channel.NotificationChannelService;
 import com.schemaplexai.service.channel.validator.NotificationChannelValidator;
 import com.schemaplexai.service.common.EntityValidator;
-import com.schemaplexai.service.integration.notification.NotificationSender;
-import com.schemaplexai.service.integration.notification.NotificationSenderFactory;
+import com.schemaplexai.service.integration.notification.NotificationDispatchService;
+import com.schemaplexai.service.integration.notification.model.NotificationDispatchRequest;
+import com.schemaplexai.service.integration.notification.model.NotificationMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -40,12 +41,13 @@ public class NotificationChannelServiceImpl implements NotificationChannelServic
     private final NotificationChannelConverter channelConverter;
     private final NotificationChannelValidator channelValidator;
     private final EntityValidator entityValidator;
-    private final NotificationSenderFactory notificationSenderFactory;
+    private final NotificationDispatchService notificationDispatchService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public NotificationChannelVO create(NotificationChannelCreateRequest request) {
         channelValidator.validateNameUnique(request.getName());
+        channelValidator.validateSupportedType(request.getChannelType());
 
         var channel = channelConverter.fromCreateRequest(request);
         channelMapper.insert(channel);
@@ -99,7 +101,7 @@ public class NotificationChannelServiceImpl implements NotificationChannelServic
             channel.setName(request.getName());
         }
         if (request.getConfig() != null) {
-            channel.setConfig(request.getConfig());
+            channel.setConfig(mergeMaskedConfig(channel.getConfig(), request.getConfig()));
         }
         if (StringUtils.hasText(request.getStatus())) {
             channel.setStatus(request.getStatus());
@@ -133,9 +135,18 @@ public class NotificationChannelServiceImpl implements NotificationChannelServic
 
         // 根据渠道类型获取对应的发送器，发送测试消息
         try {
-            NotificationSender sender = notificationSenderFactory.getSender(channel.getChannelType());
-            String result = sender.sendTestMessage(channel.getConfig());
-            log.info("通知渠道测试成功: channelId={}, type={}, result={}", id, channel.getChannelType(), result);
+            var result = notificationDispatchService.send(NotificationDispatchRequest.builder()
+                    .channel(channel)
+                    .message(NotificationMessage.builder()
+                            .title("[SchemaPlexAI] 渠道测试")
+                            .content("SchemaPlexAI 通知渠道配置验证成功，此消息来自渠道测试功能。")
+                            .build())
+                    .sourceType("channel_test")
+                    .sourceId(channel.getId())
+                    .businessType("channel_test")
+                    .build());
+            log.info("通知渠道测试成功: channelId={}, type={}, result={}",
+                    id, channel.getChannelType(), result.getResponseSummary());
 
             channel.setLastTestAt(LocalDateTime.now());
             channel.setStatus(CommonConstant.STATUS_ACTIVE);
@@ -163,16 +174,35 @@ public class NotificationChannelServiceImpl implements NotificationChannelServic
         }
         var masked = new HashMap<String, Object>(config.size());
         for (Map.Entry<String, Object> entry : config.entrySet()) {
-            String lowerKey = entry.getKey().toLowerCase();
-            if (lowerKey.contains("secret") || lowerKey.contains("token")
-                    || lowerKey.contains("password") || lowerKey.contains("api_key")
-                    || lowerKey.contains("apikey") || lowerKey.contains("app_secret")
-                    || lowerKey.contains("private_key")) {
+            if (isSensitiveKey(entry.getKey())) {
                 masked.put(entry.getKey(), "***");
             } else {
                 masked.put(entry.getKey(), entry.getValue());
             }
         }
         return masked;
+    }
+
+    private Map<String, Object> mergeMaskedConfig(Map<String, Object> original, Map<String, Object> incoming) {
+        if (incoming == null) {
+            return null;
+        }
+        Map<String, Object> merged = new HashMap<>(original == null ? Map.of() : original);
+        for (Map.Entry<String, Object> entry : incoming.entrySet()) {
+            Object value = entry.getValue();
+            if (isSensitiveKey(entry.getKey()) && "***".equals(value) && merged.containsKey(entry.getKey())) {
+                continue;
+            }
+            merged.put(entry.getKey(), value);
+        }
+        return merged;
+    }
+
+    private boolean isSensitiveKey(String key) {
+        String lowerKey = key.toLowerCase();
+        return lowerKey.contains("secret") || lowerKey.contains("token")
+                || lowerKey.contains("password") || lowerKey.contains("api_key")
+                || lowerKey.contains("apikey") || lowerKey.contains("app_secret")
+                || lowerKey.contains("private_key");
     }
 }
