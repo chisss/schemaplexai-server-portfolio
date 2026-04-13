@@ -2,6 +2,7 @@ package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.dto.workflow.ReviewCommentCreateRequest;
+import com.schemaplexai.model.dto.workflow.ReviewDecisionRequest;
 import com.schemaplexai.model.dto.workflow.ReviewSessionCreateRequest;
 import com.schemaplexai.model.vo.workflow.ReviewCommentVO;
 import com.schemaplexai.model.vo.workflow.ReviewSessionVO;
@@ -48,5 +49,26 @@ public class ReviewController {
     @Operation(summary = "获取我的待处理评审")
     public R<List<ReviewSessionVO>> getMyPending() {
         return R.ok(reviewSessionService.getMyPending());
+    }
+
+    @PostMapping("/sessions/{id}/approve")
+    @Operation(summary = "审批通过评审任务")
+    public R<ReviewSessionVO> approve(@PathVariable String id,
+                                      @RequestBody(required = false) ReviewDecisionRequest request) {
+        return R.ok(reviewSessionService.approve(id, request));
+    }
+
+    @PostMapping("/sessions/{id}/reject")
+    @Operation(summary = "驳回评审任务")
+    public R<ReviewSessionVO> reject(@PathVariable String id,
+                                     @RequestBody(required = false) ReviewDecisionRequest request) {
+        return R.ok(reviewSessionService.reject(id, request));
+    }
+
+    @PostMapping("/sessions/{id}/request-modify")
+    @Operation(summary = "退回修改评审任务")
+    public R<ReviewSessionVO> requestModify(@PathVariable String id,
+                                            @RequestBody(required = false) ReviewDecisionRequest request) {
+        return R.ok(reviewSessionService.requestModify(id, request));
     }
 }

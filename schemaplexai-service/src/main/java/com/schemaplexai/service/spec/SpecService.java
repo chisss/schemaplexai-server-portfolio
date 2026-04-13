@@ -4,10 +4,13 @@ import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.model.dto.spec.SpecCreateRequest;
 import com.schemaplexai.model.dto.spec.SpecDiffRequest;
 import com.schemaplexai.model.dto.spec.SpecDocumentRequest;
+import com.schemaplexai.model.dto.spec.SpecDocumentSubmitRequest;
 import com.schemaplexai.model.dto.spec.SpecQueryRequest;
 import com.schemaplexai.model.dto.spec.SpecUpdateRequest;
+import com.schemaplexai.model.dto.spec.SpecWorkflowStartRequest;
 import com.schemaplexai.model.vo.spec.SpecDiffVO;
 import com.schemaplexai.model.vo.spec.SpecDocumentVO;
+import com.schemaplexai.model.vo.spec.SpecWorkbenchVO;
 import com.schemaplexai.model.vo.spec.SpecVO;
 import com.schemaplexai.model.vo.spec.SpecVersionVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
@@ -31,6 +34,9 @@ public interface SpecService {
     /** 更新Spec基本信息 */
     SpecVO updateSpec(String id, SpecUpdateRequest request);
 
+    /** 填写原始需求并启动工作流 */
+    SpecVO startWorkflow(String id, SpecWorkflowStartRequest request);
+
     /** 删除Spec */
     void deleteSpec(String id);
 
@@ -46,8 +52,17 @@ public interface SpecService {
     /** 获取Spec指定类型文档 */
     SpecDocumentVO getDocument(String specId, String docType);
 
+    /** 获取工作流工作台聚合视图 */
+    SpecWorkbenchVO getWorkbench(String specId);
+
     /** 保存/更新Spec文档（自动创建版本快照） */
     SpecDocumentVO saveDocument(String specId, String docType, SpecDocumentRequest request);
+
+    /** 保存工作台文档节点草稿 */
+    SpecDocumentVO saveWorkbenchDocument(String specId, String nodeId, SpecDocumentRequest request);
+
+    /** 提交工作台文档节点并推进工作流 */
+    SpecDocumentVO submitWorkbenchDocument(String specId, String nodeId, SpecDocumentSubmitRequest request);
 
     /** 获取文档版本历史 */
     List<SpecVersionVO> getVersionHistory(String specId, String docType);

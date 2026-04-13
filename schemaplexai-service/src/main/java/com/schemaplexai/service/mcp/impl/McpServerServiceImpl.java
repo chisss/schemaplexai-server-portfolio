@@ -232,8 +232,9 @@ public class McpServerServiceImpl implements McpServerService {
         }
         if (transportType == McpTransportTypeEnum.STDIO
                 && McpServerTypeEnum.DATABASE.getCode().equalsIgnoreCase(mcpServer.getServerType())
-                && !StringUtils.hasText(mcpServer.getPresetCode())) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "数据库类型 MCP Server 必须选择 presetCode");
+                && !StringUtils.hasText(mcpServer.getPresetCode())
+                && !mcpServer.getTransportConfig().containsKey("command")) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "数据库类型 MCP Server 在 STDIO 模式下必须选择预设或提供 command");
         }
     }
 

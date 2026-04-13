@@ -18,6 +18,7 @@ public enum NodeTypeEnum {
 
     // 执行节点
     AGENT("agent", "Agent 节点", "execution"),
+    DOCUMENT("document", "文档节点", "execution"),
     SCRIPT("script", "脚本节点", "execution"),
     API_CALL("api_call", "API 调用", "execution"),
     NOTIFICATION("notification", "通信渠道", "execution"),

@@ -36,6 +36,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 工作流实例服务实现
@@ -76,6 +77,10 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     @Transactional(rollbackFor = Exception.class)
     public WorkflowInstanceVO start(String id) {
         var instance = requireExists(id);
+        if (isAwaitingOriginalRequirement(instance)) {
+            log.info("工作流实例缺少原始需求，保持待启动状态: instanceId={}", id);
+            return enrichWithNodeExecutions(instance);
+        }
         workflowValidator.validateCanStart(instance);
 
         SecurityCheckDecisionVO securityDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
@@ -212,15 +217,20 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     @Transactional(rollbackFor = Exception.class)
     public void approveNode(String instanceId, String nodeId, String comment) {
         var instance = requireExists(instanceId);
-        // 校验实例状态必须为运行中
-        if (!WorkflowInstanceStatusEnum.RUNNING.getCode().equals(instance.getStatus())) {
+        if (!WorkflowInstanceStatusEnum.RUNNING.getCode().equals(instance.getStatus())
+                && !WorkflowInstanceStatusEnum.PAUSED.getCode().equals(instance.getStatus())) {
             throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
         }
         var execution = findNodeExecution(instanceId, nodeId);
-        // 校验节点状态必须为待处理或运行中
         if (!WorkflowInstanceStatusEnum.PENDING.getCode().equals(execution.getStatus())
                 && !WorkflowInstanceStatusEnum.RUNNING.getCode().equals(execution.getStatus())) {
             throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
+        }
+
+        if (WorkflowInstanceStatusEnum.PAUSED.getCode().equals(instance.getStatus())) {
+            instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+            instance.setUpdatedAt(LocalDateTime.now());
+            instanceMapper.updateById(instance);
         }
 
         execution.setStatus(WorkflowInstanceStatusEnum.COMPLETED.getCode());
@@ -241,12 +251,11 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     @Transactional(rollbackFor = Exception.class)
     public void rejectNode(String instanceId, String nodeId, String comment, String rollbackToNodeId) {
         var instance = requireExists(instanceId);
-        // 校验实例状态必须为运行中
-        if (!WorkflowInstanceStatusEnum.RUNNING.getCode().equals(instance.getStatus())) {
+        if (!WorkflowInstanceStatusEnum.RUNNING.getCode().equals(instance.getStatus())
+                && !WorkflowInstanceStatusEnum.PAUSED.getCode().equals(instance.getStatus())) {
             throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
         }
         var execution = findNodeExecution(instanceId, nodeId);
-        // 校验节点状态必须为待处理或运行中
         if (!WorkflowInstanceStatusEnum.PENDING.getCode().equals(execution.getStatus())
                 && !WorkflowInstanceStatusEnum.RUNNING.getCode().equals(execution.getStatus())) {
             throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
@@ -257,34 +266,59 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         Map<String, Object> outputData = new HashMap<>();
         outputData.put("approvalResult", CommonConstant.APPROVAL_RESULT_REJECTED);
         outputData.put("comment", comment);
-        outputData.put("rollbackToNodeId", rollbackToNodeId);
+        String resolvedRollbackNodeId = resolveRollbackNodeId(instance, nodeId, rollbackToNodeId);
+        outputData.put("rollbackToNodeId", resolvedRollbackNodeId);
         execution.setOutputData(outputData);
         nodeExecutionMapper.updateById(execution);
 
-        // TODO: 对接 Flowable — 终止当前 Task，重新启动目标节点
+        instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+        instance.setCurrentNodeId(resolvedRollbackNodeId);
+        instance.setUpdatedAt(LocalDateTime.now());
+        instanceMapper.updateById(instance);
+
+        workflowNodeEngine.rollbackToNode(instanceId, resolvedRollbackNodeId, outputData);
 
         log.info("审批拒绝: instanceId={}, nodeId={}, rollbackTo={}",
-                instanceId, nodeId, rollbackToNodeId);
+                instanceId, nodeId, resolvedRollbackNodeId);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void requestModify(String instanceId, String nodeId, String modifyInstruction) {
-        requireExists(instanceId);
+        var instance = requireExists(instanceId);
         var execution = findNodeExecution(instanceId, nodeId);
+        if (!WorkflowInstanceStatusEnum.RUNNING.getCode().equals(instance.getStatus())
+                && !WorkflowInstanceStatusEnum.PAUSED.getCode().equals(instance.getStatus())) {
+            throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED);
+        }
+        String rollbackToNodeId = resolveRollbackNodeId(instance, nodeId, null);
 
         Map<String, Object> outputData = execution.getOutputData() != null
                 ? new HashMap<>(execution.getOutputData()) : new HashMap<>();
+        outputData.put("approvalResult", "request_modify");
         outputData.put("modifyInstruction", modifyInstruction);
+        outputData.put("rollbackToNodeId", rollbackToNodeId);
+        execution.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
+        execution.setCompletedAt(LocalDateTime.now());
         execution.setOutputData(outputData);
         nodeExecutionMapper.updateById(execution);
 
-        // TODO: 对接 Flowable — 发送修改请求通知
+        instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+        instance.setCurrentNodeId(rollbackToNodeId);
+        instance.setUpdatedAt(LocalDateTime.now());
+        instanceMapper.updateById(instance);
 
-        log.info("请求修改: instanceId={}, nodeId={}", instanceId, nodeId);
+        workflowNodeEngine.rollbackToNode(instanceId, rollbackToNodeId, outputData);
+
+        log.info("请求修改: instanceId={}, nodeId={}, rollbackTo={}", instanceId, nodeId, rollbackToNodeId);
     }
 
     // ===== 私有方法 =====
+
+    @Override
+    public WorkflowInstance requireEntity(String id) {
+        return requireExists(id);
+    }
 
     private WorkflowInstance requireExists(String id) {
         var instance = instanceMapper.selectById(id);
@@ -345,6 +379,19 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         return vo;
     }
 
+    private boolean isAwaitingOriginalRequirement(WorkflowInstance instance) {
+        if (instance == null || instance.getVariables() == null) {
+            return false;
+        }
+        Object triggerType = instance.getVariables().get("triggerType");
+        if (!"spec-workbench".equals(triggerType == null ? null : String.valueOf(triggerType))) {
+            return false;
+        }
+        String originalRequirement = readString(instance.getVariables(), "originalRequirement");
+        String specDescription = readString(instance.getVariables(), "specDescription");
+        return !StringUtils.hasText(originalRequirement) && !StringUtils.hasText(specDescription);
+    }
+
     private List<WorkflowNodeExecution> listNodeExecutions(String instanceId) {
         return nodeExecutionMapper.selectList(new LambdaQueryWrapper<WorkflowNodeExecution>()
                 .eq(WorkflowNodeExecution::getInstanceId, instanceId)
@@ -361,8 +408,41 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         vo.setInputData(execution.getInputData());
         vo.setOutputData(execution.getOutputData());
         vo.setErrorMessage(execution.getErrorMessage());
+        vo.setReviewSessionId(execution.getReviewSessionId());
+        vo.setActionUrl(execution.getActionUrl());
         vo.setStartedAt(execution.getStartedAt());
         vo.setCompletedAt(execution.getCompletedAt());
         return vo;
+    }
+
+    private String readString(Map<String, Object> source, String key) {
+        if (source == null) {
+            return null;
+        }
+        Object value = source.get(key);
+        return value == null ? null : String.valueOf(value);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String resolveRollbackNodeId(WorkflowInstance instance, String currentNodeId, String preferredNodeId) {
+        if (StringUtils.hasText(preferredNodeId)) {
+            return preferredNodeId.trim();
+        }
+        if (instance == null || instance.getDefinition() == null) {
+            throw new BusinessException(ResultCode.WORKFLOW_NODE_NOT_FOUND);
+        }
+        Object rawEdges = instance.getDefinition().get("edges");
+        if (!(rawEdges instanceof List<?> edges)) {
+            throw new BusinessException(ResultCode.WORKFLOW_NODE_NOT_FOUND);
+        }
+        return edges.stream()
+                .filter(Map.class::isInstance)
+                .map(item -> (Map<String, Object>) item)
+                .filter(edge -> currentNodeId.equals(String.valueOf(edge.get("target"))))
+                .map(edge -> edge.get("source"))
+                .filter(Objects::nonNull)
+                .map(String::valueOf)
+                .findFirst()
+                .orElseThrow(() -> new BusinessException(ResultCode.WORKFLOW_NODE_NOT_FOUND, "未找到回滚节点"));
     }
 }

@@ -34,6 +34,9 @@ public class SandboxGuard {
         if (!policy.isNetworkEgressEnabled() && !SourceTypeEnum.BUILTIN.getCode().equals(sourceType)) {
             return "当前沙箱策略禁止外部网络工具: " + toolCall.getToolCode();
         }
+        if (!policy.isNetworkEgressEnabled() && isNetworkBuiltinTool(toolCall.getToolCode())) {
+            return "当前沙箱策略禁止外部网络访问: " + toolCall.getToolCode();
+        }
         if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "sys.bash".equalsIgnoreCase(toolCall.getToolCode())) {
             return "STRICT 沙箱禁止 sys.bash";
         }
@@ -47,6 +50,9 @@ public class SandboxGuard {
         if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "sys.bash".equalsIgnoreCase(toolCode)) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "STRICT 沙箱禁止 sys.bash");
         }
+        if (!policy.isNetworkEgressEnabled() && isNetworkBuiltinTool(toolCode)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "当前沙箱策略禁止外部网络访问");
+        }
         if (workingDirectory != null && !CollectionUtils.isEmpty(policy.getAllowedPathPrefixes())) {
             boolean allowed = policy.getAllowedPathPrefixes().stream()
                     .anyMatch(prefix -> workingDirectory.normalize().startsWith(prefix.normalize()));
@@ -57,5 +63,9 @@ public class SandboxGuard {
         if (!policy.isNetworkEgressEnabled() && StringUtils.hasText(command) && command.toLowerCase().contains("curl ")) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "当前沙箱策略禁止外部网络访问");
         }
+    }
+
+    private boolean isNetworkBuiltinTool(String toolCode) {
+        return "web.fetch".equalsIgnoreCase(toolCode);
     }
 }

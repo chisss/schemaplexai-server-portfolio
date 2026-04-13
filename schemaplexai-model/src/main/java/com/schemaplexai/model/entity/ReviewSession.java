@@ -31,6 +31,12 @@ public class ReviewSession implements Serializable {
     /** Spec ID */
     private String specId;
 
+    /** 关联工作流实例ID */
+    private String workflowInstanceId;
+
+    /** 关联工作流节点ID */
+    private String workflowNodeId;
+
     /** 文档类型: requirements/design/tasks */
     private String documentType;
 
@@ -49,6 +55,15 @@ public class ReviewSession implements Serializable {
 
     /** 状态: pending/in_progress/completed/timeout */
     private String status;
+
+    /** 决策状态: pending/approved/rejected/request_modify */
+    private String decisionStatus;
+
+    /** 审核动作跳转地址 */
+    private String reviewActionUrl;
+
+    /** 待办消息模板ID */
+    private String messageTemplateId;
 
     /** 创建时间 */
     @TableField(fill = FieldFill.INSERT)

@@ -14,6 +14,8 @@ public class CrossReviewCreateRequest {
     private String taskId;
     private String profileId;
     private String issueType = "both";
+    private String artifactId;
+    private String targetContent;
     @Size(min = 1, max = 2, message = "模型数量必须为1到2个")
     private List<String> modelIds = new ArrayList<>();
 }

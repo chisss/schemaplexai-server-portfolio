@@ -18,6 +18,7 @@ public enum SpecStatusEnum {
     TASKS_REVIEW("tasks_review", "任务评审中"),
     READY("ready", "就绪"),
     IN_PROGRESS("in_progress", "进行中"),
+    FAILED("failed", "执行失败"),
     COMPLETED("completed", "已完成"),
     ACCEPTANCE("acceptance", "验收中"),
     ARCHIVED("archived", "已归档");

@@ -3,6 +3,7 @@ package com.schemaplexai.model.dto.spec;
 import lombok.Data;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 更新Spec请求DTO
@@ -16,11 +17,17 @@ public class SpecUpdateRequest {
     /** 分类 */
     private String category;
 
+    /** 需求类型 */
+    private String specType;
+
     /** 优先级 */
     private String priority;
 
     /** 描述 */
     private String description;
+
+    /** 扩展画像 */
+    private Map<String, Object> profileData;
 
     /** 标签 */
     private List<String> tags;

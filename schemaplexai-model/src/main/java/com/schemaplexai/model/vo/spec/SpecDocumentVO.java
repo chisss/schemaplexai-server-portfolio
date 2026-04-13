@@ -14,6 +14,8 @@ public record SpecDocumentVO(
         String content,
         /** 当前版本号 */
         Integer version,
+        /** 关联工作流节点ID */
+        String workflowNodeId,
         /** 创建人 */
         String createdBy,
         /** 更新时间 */

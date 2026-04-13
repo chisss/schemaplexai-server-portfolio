@@ -33,6 +33,9 @@ public class SpecDocument implements Serializable {
     /** 当前版本号 */
     private Integer version;
 
+    /** 关联工作流节点ID */
+    private String workflowNodeId;
+
     /** 创建人 */
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;

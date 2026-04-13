@@ -11,23 +11,34 @@ import com.schemaplexai.service.agent.tool.executor.os.CommandValidator;
 import com.schemaplexai.service.agent.tool.executor.os.ShellCommandAdapter;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.common.model.ToolResult;
+import com.schemaplexai.service.tool.security.ToolSecurityValidator;
 import com.schemaplexai.service.workspace.WorkspacePathResolver;
+import okhttp3.HttpUrl;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.springframework.web.util.HtmlUtils;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 系统内置工具执行器
@@ -39,10 +50,42 @@ public class BuiltinToolExecutor implements ToolExecutor {
 
     private static final Set<String> SUPPORTED_CODES = Set.of(
             "sys.read", "sys.write", "sys.edit", "sys.bash", "sys.glob", "sys.grep",
-            "sys.ls", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv", "sys.stat"
+            "sys.ls", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv", "sys.stat", "web.fetch"
     );
 
     private static final long PROCESS_TIMEOUT_SECONDS = 30;
+    private static final int MAX_COMMAND_OUTPUT_LENGTH = 24000;
+    private static final int DEFAULT_FETCH_MAX_CHARS = 12000;
+    private static final int MAX_FETCH_MAX_CHARS = 40000;
+    private static final long MAX_FETCH_PEEK_BYTES = 256 * 1024L;
+    private static final Pattern HTML_TITLE_PATTERN = Pattern.compile("(?is)<title[^>]*>(.*?)</title>");
+    private static final Pattern HTML_LINK_PATTERN = Pattern.compile(
+            "(?is)<a\\b[^>]*href\\s*=\\s*(['\"])(.*?)\\1[^>]*>(.*?)</a>"
+    );
+    private static final Pattern HTML_EMAIL_PATTERN = Pattern.compile(
+            "(?i)\\b([a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,})\\b"
+    );
+    private static final Pattern HTML_PHONE_PATTERN = Pattern.compile(
+            "(?<!\\w)(\\+?\\d[\\d\\s().\\-/]{6,}\\d)(?!\\w)"
+    );
+    private static final int MAX_FETCH_LINKS = 12;
+    private static final int MAX_FETCH_CONTACTS = 10;
+    private static final List<String> PRIORITY_LINK_KEYWORDS = List.of(
+            "contact", "contato", "contacto", "fale", "atendimento", "support",
+            "sales", "purchase", "procurement", "compras", "distribuidor", "distributor",
+            "amino", "aminoacid", "amino-acid", "aminoacido", "aminoacidos",
+            "bcaa", "eaa", "glutamine", "glutamina", "products", "product", "produto",
+            "produtos", "shop", "store", "tienda", "suplement", "suplemento", "supplement"
+    );
+    private static final List<String> LOW_PRIORITY_LINK_KEYWORDS = List.of(
+            "privacy", "terms", "policy", "login", "register", "cart", "checkout",
+            "instagram", "facebook", "linkedin", "youtube", "whatsapp", "mailto:", "tel:"
+    );
+    private static final String COMMAND_OUTPUT_TRUNCATION_NOTICE =
+            "\n...[命令输出过长，已截断。请缩小范围、增加过滤条件或分批读取]";
+    private static final String DEFAULT_FETCH_USER_AGENT =
+            "SchemaPlexAI-WebFetch/1.0 (+https://schemaplexai.local)";
+    private static final String DEFAULT_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8";
 
     private final ObjectMapper objectMapper;
     private final List<ShellCommandAdapter> adapters;
@@ -50,6 +93,8 @@ public class BuiltinToolExecutor implements ToolExecutor {
     private final ToolExecutionLogService logService;
     private final WorkspacePathResolver workspacePathResolver;
     private final SandboxGuard sandboxGuard;
+    private final OkHttpClient httpClient;
+    private final ToolSecurityValidator toolSecurityValidator;
 
     @Override
     public String sourceType() {
@@ -89,6 +134,9 @@ public class BuiltinToolExecutor implements ToolExecutor {
                 args = Map.of();
             }
             Map<String, Object> safeArgsForLog = sanitizeArgsForLog(args);
+            if ("web.fetch".equals(toolCode)) {
+                return executeWebFetch(tenantId, agentId, toolCall, sandboxPolicy, startAt, args, safeArgsForLog);
+            }
             if (!commandValidator.validateToolArguments(toolCode, args)) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
                         SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, "系统工具参数校验失败");
@@ -140,7 +188,8 @@ public class BuiltinToolExecutor implements ToolExecutor {
             LocalDateTime endAt = LocalDateTime.now();
 
             if (exitCode == 0) {
-                Map<String, Object> result = Map.of("output", output);
+                String sanitizedOutput = truncateCommandOutput(output);
+                Map<String, Object> result = Map.of("output", sanitizedOutput);
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
                         SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.SUCCESS.getCode(), startAt, endAt, safeArgsForLog, result, null);
                 return ToolResult.builder()
@@ -163,6 +212,101 @@ public class BuiltinToolExecutor implements ToolExecutor {
         }
     }
 
+    private ToolResult executeWebFetch(String tenantId,
+                                       String agentId,
+                                       ToolCall toolCall,
+                                       SandboxPolicy sandboxPolicy,
+                                       LocalDateTime startAt,
+                                       Map<String, Object> args,
+                                       Map<String, Object> safeArgsForLog) {
+        String url = asString(args.get("url"));
+        if (!StringUtils.hasText(url)) {
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(), ToolExecutionStatusEnum.FAILED.getCode(),
+                    startAt, LocalDateTime.now(), safeArgsForLog, null, "web.fetch 缺少 url");
+            return failure(toolCall, "web.fetch 缺少 url");
+        }
+        if (url.length() > 2000) {
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(), ToolExecutionStatusEnum.FAILED.getCode(),
+                    startAt, LocalDateTime.now(), safeArgsForLog, null, "web.fetch url 超长");
+            return failure(toolCall, "web.fetch url 超长");
+        }
+        try {
+            sandboxGuard.validateBuiltinExecution(sandboxPolicy, toolCall.getToolCode(), args, null, null);
+            toolSecurityValidator.validateUrl(url);
+
+            int maxChars = clampFetchMaxChars(args.get("maxChars"));
+            boolean includeHtml = readBoolean(args.get("includeHtml"));
+            String userAgent = StringUtils.hasText(asString(args.get("userAgent")))
+                    ? asString(args.get("userAgent")) : DEFAULT_FETCH_USER_AGENT;
+            String acceptLanguage = StringUtils.hasText(asString(args.get("acceptLanguage")))
+                    ? asString(args.get("acceptLanguage")) : DEFAULT_ACCEPT_LANGUAGE;
+
+            Request request = new Request.Builder()
+                    .url(url)
+                    .get()
+                    .header("User-Agent", userAgent)
+                    .header("Accept-Language", acceptLanguage)
+                    .build();
+
+            try (Response response = httpClient.newCall(request).execute()) {
+                String contentType = response.body() != null && response.body().contentType() != null
+                        ? response.body().contentType().toString() : null;
+                String rawBody = response.peekBody(Math.min(MAX_FETCH_PEEK_BYTES, Math.max(maxChars * 8L, 32 * 1024L))).string();
+                String content = isHtmlContent(contentType, rawBody)
+                        ? extractHtmlText(rawBody, maxChars)
+                        : truncateFetchContent(rawBody, maxChars);
+
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("finalUrl", response.request().url().toString());
+                result.put("statusCode", response.code());
+                result.put("contentType", contentType);
+                String title = extractHtmlTitle(rawBody);
+                if (StringUtils.hasText(title)) {
+                    result.put("title", title);
+                }
+                result.put("content", content);
+                if (isHtmlContent(contentType, rawBody)) {
+                    List<Map<String, String>> links = extractHtmlLinks(rawBody, response.request().url(), MAX_FETCH_LINKS);
+                    if (!links.isEmpty()) {
+                        result.put("links", links);
+                    }
+                    List<String> emails = extractEmails(rawBody, MAX_FETCH_CONTACTS);
+                    if (!emails.isEmpty()) {
+                        result.put("emails", emails);
+                    }
+                    List<String> phones = extractPhones(rawBody, MAX_FETCH_CONTACTS);
+                    if (!phones.isEmpty()) {
+                        result.put("phones", phones);
+                    }
+                }
+                if (includeHtml && StringUtils.hasText(rawBody)) {
+                    result.put("html", truncateFetchContent(rawBody, maxChars));
+                }
+
+                LocalDateTime endAt = LocalDateTime.now();
+                logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                        SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(),
+                        response.isSuccessful() ? ToolExecutionStatusEnum.SUCCESS.getCode() : ToolExecutionStatusEnum.FAILED.getCode(),
+                        startAt, endAt, safeArgsForLog, result, null);
+                return ToolResult.builder()
+                        .callId(toolCall.getCallId())
+                        .toolCode(toolCall.getToolCode())
+                        .success(response.isSuccessful())
+                        .result(objectMapper.valueToTree(result))
+                        .errorMessage(response.isSuccessful() ? null : "HTTP 请求失败: " + response.code())
+                        .build();
+            }
+        } catch (Exception exception) {
+            log.error("web.fetch 执行失败: url={}, error={}", url, exception.getMessage());
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(), ToolExecutionStatusEnum.ERROR.getCode(),
+                    startAt, LocalDateTime.now(), safeArgsForLog, null, exception.getMessage());
+            return failure(toolCall, "执行失败: " + exception.getMessage());
+        }
+    }
+
     private String readProcessOutput(Process process) throws Exception {
         StringBuilder output = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -172,6 +316,213 @@ public class BuiltinToolExecutor implements ToolExecutor {
             }
         }
         return output.toString();
+    }
+
+    private String extractHtmlTitle(String html) {
+        if (!StringUtils.hasText(html)) {
+            return null;
+        }
+        Matcher matcher = HTML_TITLE_PATTERN.matcher(html);
+        if (!matcher.find()) {
+            return null;
+        }
+        return truncateFetchContent(HtmlUtils.htmlUnescape(matcher.group(1)).trim(), 256);
+    }
+
+    private String extractHtmlText(String html, int maxChars) {
+        if (!StringUtils.hasText(html)) {
+            return "";
+        }
+        String sanitized = sanitizeHtmlToText(html);
+        return truncateFetchContent(sanitized, maxChars);
+    }
+
+    private String sanitizeHtmlToText(String html) {
+        String sanitized = html
+                .replaceAll("(?is)<script[^>]*>.*?</script>", " ")
+                .replaceAll("(?is)<style[^>]*>.*?</style>", " ")
+                .replaceAll("(?is)<noscript[^>]*>.*?</noscript>", " ")
+                .replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("(?i)</p\\s*>", "\n")
+                .replaceAll("(?i)</div\\s*>", "\n")
+                .replaceAll("(?i)</li\\s*>", "\n")
+                .replaceAll("(?is)<[^>]+>", " ");
+        return HtmlUtils.htmlUnescape(sanitized)
+                .replace('\u00A0', ' ')
+                .replaceAll("[ \\t\\x0B\\f\\r]+", " ")
+                .replaceAll("\\n{3,}", "\n\n")
+                .replaceAll(" *\\n *", "\n")
+                .trim();
+    }
+
+    private List<Map<String, String>> extractHtmlLinks(String html, HttpUrl baseUrl, int limit) {
+        if (!StringUtils.hasText(html) || baseUrl == null || limit <= 0) {
+            return List.of();
+        }
+        Matcher matcher = HTML_LINK_PATTERN.matcher(html);
+        Map<String, LinkCandidate> deduplicated = new LinkedHashMap<>();
+        while (matcher.find()) {
+            String href = matcher.group(2);
+            if (!StringUtils.hasText(href)) {
+                continue;
+            }
+            String normalizedHref = href.trim();
+            if (normalizedHref.startsWith("#")
+                    || normalizedHref.startsWith("mailto:")
+                    || normalizedHref.startsWith("tel:")
+                    || normalizedHref.startsWith("javascript:")) {
+                continue;
+            }
+            HttpUrl resolved = baseUrl.resolve(normalizedHref);
+            if (resolved == null || !"http".equalsIgnoreCase(resolved.scheme()) && !"https".equalsIgnoreCase(resolved.scheme())) {
+                continue;
+            }
+            if (!isSameSite(baseUrl, resolved)) {
+                continue;
+            }
+            String absoluteUrl = resolved.newBuilder().fragment(null).build().toString();
+            String anchorText = sanitizeHtmlToText(matcher.group(3));
+            LinkCandidate candidate = new LinkCandidate(absoluteUrl, truncateFetchContent(anchorText, 80),
+                    computeLinkPriority(baseUrl, absoluteUrl, anchorText));
+            LinkCandidate existing = deduplicated.get(absoluteUrl);
+            if (existing == null || candidate.priority() > existing.priority()) {
+                deduplicated.put(absoluteUrl, candidate);
+            }
+        }
+        return deduplicated.values().stream()
+                .sorted(Comparator
+                        .comparingInt(LinkCandidate::priority).reversed()
+                        .thenComparing(LinkCandidate::url))
+                .limit(limit)
+                .map(candidate -> {
+                    Map<String, String> value = new LinkedHashMap<>();
+                    value.put("url", candidate.url());
+                    if (StringUtils.hasText(candidate.text())) {
+                        value.put("text", candidate.text());
+                    }
+                    return value;
+                })
+                .toList();
+    }
+
+    private boolean isSameSite(HttpUrl baseUrl, HttpUrl resolved) {
+        String baseHost = baseUrl.host();
+        String resolvedHost = resolved.host();
+        if (!StringUtils.hasText(baseHost) || !StringUtils.hasText(resolvedHost)) {
+            return false;
+        }
+        return baseHost.equalsIgnoreCase(resolvedHost)
+                || resolvedHost.toLowerCase().endsWith("." + baseHost.toLowerCase())
+                || baseHost.toLowerCase().endsWith("." + resolvedHost.toLowerCase());
+    }
+
+    private int computeLinkPriority(HttpUrl baseUrl, String absoluteUrl, String anchorText) {
+        String normalized = (absoluteUrl + " " + anchorText).toLowerCase();
+        int score = 0;
+        for (String keyword : PRIORITY_LINK_KEYWORDS) {
+            if (normalized.contains(keyword)) {
+                score += 10;
+            }
+        }
+        for (String keyword : LOW_PRIORITY_LINK_KEYWORDS) {
+            if (normalized.contains(keyword)) {
+                score -= 8;
+            }
+        }
+        if (absoluteUrl.startsWith(baseUrl.scheme() + "://" + baseUrl.host() + "/")) {
+            score += 4;
+        }
+        if (absoluteUrl.equals(baseUrl.toString()) || absoluteUrl.equals(baseUrl.newBuilder().fragment(null).build().toString())) {
+            score -= 4;
+        }
+        return score;
+    }
+
+    private List<String> extractEmails(String html, int limit) {
+        if (!StringUtils.hasText(html) || limit <= 0) {
+            return List.of();
+        }
+        Matcher matcher = HTML_EMAIL_PATTERN.matcher(HtmlUtils.htmlUnescape(html));
+        Set<String> emails = new LinkedHashSet<>();
+        while (matcher.find() && emails.size() < limit) {
+            String email = matcher.group(1);
+            if (StringUtils.hasText(email)) {
+                emails.add(email.toLowerCase());
+            }
+        }
+        return List.copyOf(emails);
+    }
+
+    private List<String> extractPhones(String html, int limit) {
+        if (!StringUtils.hasText(html) || limit <= 0) {
+            return List.of();
+        }
+        Matcher matcher = HTML_PHONE_PATTERN.matcher(sanitizeHtmlToText(html));
+        List<String> phones = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        while (matcher.find() && phones.size() < limit) {
+            String rawPhone = matcher.group(1);
+            if (!StringUtils.hasText(rawPhone)) {
+                continue;
+            }
+            String normalized = rawPhone.replaceAll("\\s+", " ").trim();
+            String digits = normalized.replaceAll("\\D", "");
+            if (digits.length() < 7 || digits.length() > 16) {
+                continue;
+            }
+            if (seen.add(normalized)) {
+                phones.add(normalized);
+            }
+        }
+        return phones;
+    }
+
+    private boolean isHtmlContent(String contentType, String rawBody) {
+        if (StringUtils.hasText(contentType) && contentType.toLowerCase().contains("html")) {
+            return true;
+        }
+        return StringUtils.hasText(rawBody) && rawBody.contains("<html");
+    }
+
+    private int clampFetchMaxChars(Object value) {
+        if (value == null) {
+            return DEFAULT_FETCH_MAX_CHARS;
+        }
+        try {
+            int parsed = Integer.parseInt(String.valueOf(value));
+            if (parsed <= 0) {
+                return DEFAULT_FETCH_MAX_CHARS;
+            }
+            return Math.min(parsed, MAX_FETCH_MAX_CHARS);
+        } catch (NumberFormatException exception) {
+            return DEFAULT_FETCH_MAX_CHARS;
+        }
+    }
+
+    private boolean readBoolean(Object value) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        return value != null && Boolean.parseBoolean(String.valueOf(value));
+    }
+
+    private String truncateFetchContent(String content, int maxChars) {
+        if (!StringUtils.hasText(content) || content.length() <= maxChars) {
+            return content;
+        }
+        return content.substring(0, Math.max(maxChars, 1));
+    }
+
+    private String asString(Object value) {
+        return value == null ? null : String.valueOf(value).trim();
+    }
+
+    private String truncateCommandOutput(String output) {
+        if (!StringUtils.hasText(output) || output.length() <= MAX_COMMAND_OUTPUT_LENGTH) {
+            return output;
+        }
+        int maxLength = Math.max(MAX_COMMAND_OUTPUT_LENGTH - COMMAND_OUTPUT_TRUNCATION_NOTICE.length(), 1);
+        return output.substring(0, maxLength) + COMMAND_OUTPUT_TRUNCATION_NOTICE;
     }
 
     private Map<String, Object> sanitizeArgsForLog(Map<String, Object> args) {
@@ -196,7 +547,12 @@ public class BuiltinToolExecutor implements ToolExecutor {
         if (!StringUtils.hasText(workdir)) {
             return null;
         }
-        return workspacePathResolver.validateWithinWorkspaceRoot(workdir);
+        Path normalized = Path.of(workdir).toAbsolutePath().normalize();
+        Path currentProjectRoot = Path.of("").toAbsolutePath().normalize();
+        if (normalized.startsWith(currentProjectRoot)) {
+            return normalized;
+        }
+        return workspacePathResolver.validateWithinWorkspaceRoot(normalized);
     }
 
     private ToolResult failure(ToolCall toolCall, String message) {
@@ -207,5 +563,8 @@ public class BuiltinToolExecutor implements ToolExecutor {
                 .result(objectMapper.nullNode())
                 .errorMessage(message)
                 .build();
+    }
+
+    private record LinkCandidate(String url, String text, int priority) {
     }
 }

@@ -1,6 +1,7 @@
 package com.schemaplexai.model.converter;
 
 import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.enums.SpecLifecycleModeEnum;
 import com.schemaplexai.common.enums.SpecStatusEnum;
 import com.schemaplexai.model.dto.spec.SpecCreateRequest;
 import com.schemaplexai.model.entity.Spec;
@@ -15,7 +16,7 @@ import java.util.List;
  * Spec实体转换器
  */
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE,
-        imports = {SpecStatusEnum.class, CommonConstant.class})
+        imports = {SpecStatusEnum.class, SpecLifecycleModeEnum.class, CommonConstant.class})
 public interface SpecConverter {
 
     /**
@@ -39,7 +40,13 @@ public interface SpecConverter {
     @Mapping(target = "updatedBy", ignore = true)
     @Mapping(target = "updatedAt", ignore = true)
     @Mapping(target = "deleted", ignore = true)
+    @Mapping(target = "lifecycleMode", expression = "java(SpecLifecycleModeEnum.WORKFLOW.getCode())")
+    @Mapping(target = "currentNodeId", ignore = true)
+    @Mapping(target = "currentNodeType", ignore = true)
+    @Mapping(target = "currentNodeLabel", ignore = true)
+    @Mapping(target = "workflowStatusSnapshot", ignore = true)
     @Mapping(target = "workflowInstanceId", ignore = true)
     @Mapping(target = "artifactDocPath", ignore = true)
+    @Mapping(target = "primaryArtifactId", ignore = true)
     Spec fromCreateRequest(SpecCreateRequest request);
 }

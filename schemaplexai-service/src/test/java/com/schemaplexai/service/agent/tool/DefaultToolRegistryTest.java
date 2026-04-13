@@ -16,6 +16,7 @@ import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.List;
 
@@ -30,7 +31,10 @@ class DefaultToolRegistryTest {
         AgentToolBindingMapper agentToolBindingMapper = mock(AgentToolBindingMapper.class);
         BuiltinToolMapper builtinToolMapper = mock(BuiltinToolMapper.class);
         SecurityRuntimeGuardService securityRuntimeGuardService = mock(SecurityRuntimeGuardService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider = mock(ObjectProvider.class);
         SandboxGuard sandboxGuard = mock(SandboxGuard.class);
+        when(securityRuntimeGuardServiceProvider.getObject()).thenReturn(securityRuntimeGuardService);
         when(securityRuntimeGuardService.evaluate(
                 ArgumentMatchers.any(SecurityRuntimeCheckRequest.class),
                 ArgumentMatchers.isNull()))
@@ -47,7 +51,7 @@ class DefaultToolRegistryTest {
                 agentToolBindingMapper,
                 builtinToolMapper,
                 List.of(executor),
-                securityRuntimeGuardService,
+                securityRuntimeGuardServiceProvider,
                 sandboxGuard
         );
 
@@ -89,7 +93,10 @@ class DefaultToolRegistryTest {
         AgentToolBindingMapper agentToolBindingMapper = mock(AgentToolBindingMapper.class);
         BuiltinToolMapper builtinToolMapper = mock(BuiltinToolMapper.class);
         SecurityRuntimeGuardService securityRuntimeGuardService = mock(SecurityRuntimeGuardService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider = mock(ObjectProvider.class);
         SandboxGuard sandboxGuard = mock(SandboxGuard.class);
+        when(securityRuntimeGuardServiceProvider.getObject()).thenReturn(securityRuntimeGuardService);
         when(sandboxGuard.validateTool(
                 ArgumentMatchers.any(SandboxPolicy.class),
                 ArgumentMatchers.any(AgentToolBinding.class),
@@ -108,7 +115,7 @@ class DefaultToolRegistryTest {
                 agentToolBindingMapper,
                 builtinToolMapper,
                 List.of(new RecordingToolExecutor()),
-                securityRuntimeGuardService,
+                securityRuntimeGuardServiceProvider,
                 sandboxGuard
         );
 

@@ -10,11 +10,12 @@ import java.util.regex.Pattern;
 @Component
 public class CommandValidator {
 
-    private static final Pattern SAFE_PATH = Pattern.compile("^[a-zA-Z0-9_./\\\\\\-\\s:]+$");
-    private static final Pattern SAFE_PATTERN = Pattern.compile("^[a-zA-Z0-9_./\\\\\\-\\s:*?]+$");
+    private static final Pattern SAFE_PATH = Pattern.compile("^[\\p{L}\\p{N}_./\\\\\\-\\s:()\\[\\]#]+$");
+    private static final Pattern SAFE_PATTERN = Pattern.compile("^[\\p{L}\\p{N}_./\\\\\\-\\s:*?()\\[\\]#|+$^]+$");
     private static final Set<String> SAFE_BASH_COMMANDS = Set.of(
             "ls", "pwd", "date", "cat", "grep", "find", "mkdir", "rm", "cp", "mv", "stat",
-            "echo", "head", "tail", "wc", "whoami", "type", "dir", "findstr", "attrib"
+            "echo", "head", "tail", "wc", "whoami", "type", "dir", "findstr", "attrib",
+            "curl"
     );
 
     public boolean validateToolArguments(String toolCode, Map<String, Object> args) {
@@ -105,6 +106,9 @@ public class CommandValidator {
             return false;
         }
         if (path.contains("..")) {
+            return false;
+        }
+        if (path.contains("\n") || path.contains("\r") || path.contains("\u0000")) {
             return false;
         }
         // 限制绝对路径，避免越权访问宿主机

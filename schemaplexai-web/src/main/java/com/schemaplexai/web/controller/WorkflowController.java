@@ -6,6 +6,7 @@ import com.schemaplexai.model.dto.workflow.*;
 import com.schemaplexai.model.vo.workflow.WorkflowAiArrangeVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
 import com.schemaplexai.model.vo.workflow.WorkflowNodeExecutionVO;
+import com.schemaplexai.model.vo.workflow.WorkflowTemplateStatsVO;
 import com.schemaplexai.model.vo.workflow.WorkflowTemplateVO;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
 import com.schemaplexai.service.workflow.WorkflowTemplateService;
@@ -30,6 +31,12 @@ public class WorkflowController {
     private final WorkflowInstanceService instanceService;
 
     // ===== 模板管理 =====
+
+    @GetMapping("/templates/stats")
+    @Operation(summary = "获取工作流模板统计数据")
+    public R<WorkflowTemplateStatsVO> getTemplateStats() {
+        return R.ok(templateService.getStats());
+    }
 
     @PostMapping("/templates")
     @Operation(summary = "创建工作流模板")
@@ -68,6 +75,12 @@ public class WorkflowController {
     public R<WorkflowAiArrangeVO> aiArrange(@PathVariable String id,
                                              @Valid @RequestBody WorkflowAiArrangeRequest request) {
         return R.ok(templateService.aiArrange(id, request));
+    }
+
+    @PutMapping("/templates/{id}/toggle-status")
+    @Operation(summary = "切换模板启用/停用状态")
+    public R<WorkflowTemplateVO> toggleTemplateStatus(@PathVariable String id) {
+        return R.ok(templateService.toggleStatus(id));
     }
 
     // ===== 实例管理 =====

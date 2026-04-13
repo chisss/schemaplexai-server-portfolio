@@ -3,6 +3,7 @@ package com.schemaplexai.service.workflow;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.model.dto.workflow.WorkflowInstanceCreateRequest;
 import com.schemaplexai.model.dto.workflow.WorkflowInstanceQueryRequest;
+import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
 import com.schemaplexai.model.vo.workflow.WorkflowNodeExecutionVO;
 
@@ -34,4 +35,6 @@ public interface WorkflowInstanceService {
     void rejectNode(String instanceId, String nodeId, String comment, String rollbackToNodeId);
 
     void requestModify(String instanceId, String nodeId, String modifyInstruction);
+
+    WorkflowInstance requireEntity(String id);
 }

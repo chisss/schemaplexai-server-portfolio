@@ -135,7 +135,8 @@ public class QualityProfileFacadeServiceImpl implements QualityProfileFacadeServ
         if (request == null || !StringUtils.hasText(request.getCode()) || !StringUtils.hasText(request.getName())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "质量配置组参数不完整");
         }
-        if (request.getModelIds() == null || request.getModelIds().isEmpty() || request.getModelIds().size() > 2) {
+        List<String> normalizedModelIds = normalizeModelIds(request.getModelIds());
+        if (normalizedModelIds.isEmpty() || normalizedModelIds.size() > 2) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "质量配置组需要选择1到2个模型");
         }
         Long count = qualityProfileMapper.selectCount(new LambdaQueryWrapper<QualityProfile>()
@@ -153,11 +154,12 @@ public class QualityProfileFacadeServiceImpl implements QualityProfileFacadeServ
     }
 
     private void saveModels(String profileId, List<String> modelIds) {
-        if (modelIds == null) {
+        List<String> normalizedModelIds = normalizeModelIds(modelIds);
+        if (normalizedModelIds.isEmpty()) {
             return;
         }
-        for (int i = 0; i < modelIds.size(); i++) {
-            String modelId = modelIds.get(i);
+        for (int i = 0; i < normalizedModelIds.size(); i++) {
+            String modelId = normalizedModelIds.get(i);
             QualityProfileModel entity = new QualityProfileModel();
             entity.setTenantId(SecurityUtil.getCurrentTenantId());
             entity.setProfileId(profileId);
@@ -178,17 +180,35 @@ public class QualityProfileFacadeServiceImpl implements QualityProfileFacadeServ
         if (bindings == null) {
             return;
         }
+        Set<String> uniqueBindingKeys = new java.util.LinkedHashSet<>();
         for (QualityProfileBindingRequest binding : bindings) {
             if (binding == null || !StringUtils.hasText(binding.getBindingType()) || !StringUtils.hasText(binding.getBindingId())) {
+                continue;
+            }
+            String bindingType = binding.getBindingType().trim();
+            String bindingId = binding.getBindingId().trim();
+            if (!uniqueBindingKeys.add(bindingType + "::" + bindingId)) {
                 continue;
             }
             QualityProfileBinding entity = new QualityProfileBinding();
             entity.setTenantId(SecurityUtil.getCurrentTenantId());
             entity.setProfileId(profileId);
-            entity.setBindingType(binding.getBindingType());
-            entity.setBindingId(binding.getBindingId());
+            entity.setBindingType(bindingType);
+            entity.setBindingId(bindingId);
             qualityProfileBindingMapper.insert(entity);
         }
+    }
+
+    private List<String> normalizeModelIds(List<String> modelIds) {
+        if (modelIds == null || modelIds.isEmpty()) {
+            return List.of();
+        }
+        return modelIds.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .limit(2)
+                .toList();
     }
 
     private QualityProfileConfigVO buildVO(QualityProfile profile) {

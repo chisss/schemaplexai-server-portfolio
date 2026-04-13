@@ -12,6 +12,7 @@ public final class TeamGraphConstants {
     public static final String NODE_MEMBER_CYCLE = "member_cycle";
     public static final String NODE_EXECUTE_MEMBERS = "execute_members";
     public static final String NODE_AGGREGATE = "aggregate";
+    public static final String NODE_QUALITY_GATE = "quality_gate";
     public static final String NODE_RETRY = "retry";
     public static final String NODE_AWAIT_INPUT = "await_input";
 
@@ -21,9 +22,14 @@ public final class TeamGraphConstants {
     public static final String STATE_FINAL_STATUS = "finalStatus";
     public static final String STATE_FINAL_OUTPUT = "finalOutput";
     public static final String STATE_FINAL_ERROR = "finalError";
+    public static final String STATE_AGGREGATE_META = "aggregateMeta";
+    public static final String STATE_MEMBER_EVIDENCE = "memberEvidence";
+    public static final String STATE_AGGREGATE_WARNINGS = "aggregateWarnings";
     public static final String STATE_RETRY_COUNT = "retryCount";
     public static final String STATE_USER_INPUT = "userInput";
     public static final String STATE_USER_OPTIONS = "userOptions";
+    public static final String STATE_QUALITY_GATE_DECISION = "qualityGateDecision";
+    public static final String STATE_QUALITY_GATE_SUMMARY = "qualityGateSummary";
 
     public static final String RESULT_MEMBER_ID = "memberId";
     public static final String RESULT_ROLE_NAME = "roleName";
@@ -38,4 +44,9 @@ public final class TeamGraphConstants {
     public static final String EVENT_PAYLOAD_GRAPH_THREAD_ID = "graphThreadId";
     public static final String EVENT_PAYLOAD_CHECKPOINT_NAMESPACE = "checkpointNamespace";
     public static final String EVENT_PAYLOAD_FINAL_OUTPUT = "finalOutput";
+
+    public static final String QUALITY_GATE_PASS = "pass";
+    public static final String QUALITY_GATE_RETRY = "retry";
+    public static final String QUALITY_GATE_AWAIT_INPUT = "await_input";
+    public static final String QUALITY_GATE_FAIL = "fail";
 }

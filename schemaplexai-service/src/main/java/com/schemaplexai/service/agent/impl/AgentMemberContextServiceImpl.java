@@ -2,6 +2,7 @@ package com.schemaplexai.service.agent.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.enums.AgentContextBindingSourceEnum;
+import com.schemaplexai.common.enums.TeamMemberRoleTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -54,13 +55,13 @@ public class AgentMemberContextServiceImpl implements AgentMemberContextService 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public List<AgentTeamMemberContextBindingVO> saveMemberContextBindings(String memberId, List<AgentTeamMemberContextBindingDTO> request) {
-        requireMemberExists(memberId);
+        AgentTeamMember member = requireMemberExists(memberId);
         agentTeamMemberContextBindingMapper.delete(
                 new LambdaQueryWrapper<AgentTeamMemberContextBinding>()
                         .eq(AgentTeamMemberContextBinding::getMemberId, memberId));
 
+        int insertedCount = 0;
         if (!CollectionUtils.isEmpty(request)) {
-            int insertedCount = 0;
             for (int i = 0; i < request.size(); i++) {
                 AgentTeamMemberContextBindingDTO item = request.get(i);
                 if (item == null) {
@@ -85,6 +86,10 @@ public class AgentMemberContextServiceImpl implements AgentMemberContextService 
             }
             log.info("保存成员上下文绑定成功: memberId={}, count={}", memberId, insertedCount);
         }
+        if (!isLeadRole(member.getRoleType()) && insertedCount == 0) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "非 Leader 成员必须至少绑定一个专属上下文");
+        }
+        refreshAgentConfigCompleted(member.getAgentId());
         return getMemberContextBindings(memberId);
     }
 
@@ -105,14 +110,59 @@ public class AgentMemberContextServiceImpl implements AgentMemberContextService 
                 }
             }
         }
+        AgentTeamMember member = agentTeamMemberMapper.selectById(binding.getMemberId());
         agentTeamMemberContextBindingMapper.deleteById(bindingId);
+        if (member != null) {
+            refreshAgentConfigCompleted(member.getAgentId());
+        }
         log.info("删除成员上下文绑定成功: bindingId={}", bindingId);
     }
 
-    private void requireMemberExists(String memberId) {
-        if (!StringUtils.hasText(memberId) || agentTeamMemberMapper.selectById(memberId) == null) {
+    private AgentTeamMember requireMemberExists(String memberId) {
+        AgentTeamMember member = StringUtils.hasText(memberId) ? agentTeamMemberMapper.selectById(memberId) : null;
+        if (member == null) {
             throw new BusinessException(ResultCode.AGENT_TEAM_MEMBER_NOT_FOUND);
         }
+        return member;
+    }
+
+    private void refreshAgentConfigCompleted(String agentId) {
+        if (!StringUtils.hasText(agentId)) {
+            return;
+        }
+        Agent agent = agentMapper.selectById(agentId);
+        if (agent == null || !"team".equalsIgnoreCase(agent.getAgentType())) {
+            return;
+        }
+        List<AgentTeamMember> members = agentTeamMemberMapper.selectList(
+                new LambdaQueryWrapper<AgentTeamMember>()
+                        .eq(AgentTeamMember::getAgentId, agentId));
+        long leaderCount = members.stream().filter(member -> isLeadRole(member.getRoleType())).count();
+        List<String> nonLeaderMemberIds = members.stream()
+                .filter(member -> !isLeadRole(member.getRoleType()) && StringUtils.hasText(member.getId()))
+                .map(AgentTeamMember::getId)
+                .toList();
+        boolean nonLeaderContextsReady = true;
+        if (!CollectionUtils.isEmpty(nonLeaderMemberIds)) {
+            var bindingCountMap = agentTeamMemberContextBindingMapper.selectList(
+                            new LambdaQueryWrapper<AgentTeamMemberContextBinding>()
+                                    .in(AgentTeamMemberContextBinding::getMemberId, nonLeaderMemberIds))
+                    .stream()
+                    .collect(java.util.stream.Collectors.groupingBy(
+                            AgentTeamMemberContextBinding::getMemberId,
+                            java.util.stream.Collectors.counting()
+                    ));
+            nonLeaderContextsReady = nonLeaderMemberIds.stream()
+                    .allMatch(memberId -> bindingCountMap.getOrDefault(memberId, 0L) > 0);
+        }
+        Agent update = new Agent();
+        update.setId(agentId);
+        update.setConfigCompleted(!CollectionUtils.isEmpty(members) && leaderCount == 1 && nonLeaderContextsReady);
+        agentMapper.updateById(update);
+    }
+
+    private boolean isLeadRole(String roleType) {
+        return TeamMemberRoleTypeEnum.LEAD_AGENT.matches(roleType);
     }
 
     private AgentTeamMemberContextBindingVO toVO(AgentTeamMemberContextBinding binding) {

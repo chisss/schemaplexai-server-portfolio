@@ -30,6 +30,7 @@ import java.util.Map;
 public class ContextCacheService {
 
     private static final String PREFIX_AGENT_PROMPT = "sf:ctx:agent:%s:prompt";
+    private static final String PREFIX_AGENT_PROMPT_VARIANT = "sf:ctx:agent:%s:prompt:%s";
     private static final String PREFIX_TEAM_SHARED = "sf:ctx:team:%s:shared";
     private static final String PREFIX_SESSION_HISTORY = "sf:ctx:session:%s:history";
     private static final String PREFIX_CTX_ITEM = "sf:ctx:item:%s";
@@ -51,8 +52,15 @@ public class ContextCacheService {
      * @return 缓存的 prompt，不存在或 Redis 异常时返回 null
      */
     public String getAgentPrompt(String agentId) {
+        return getAgentPrompt(agentId, null);
+    }
+
+    /**
+     * 读取 Agent 系统提示词缓存（支持预算/模型变体）
+     */
+    public String getAgentPrompt(String agentId, String variant) {
         try {
-            Object val = redisTemplate.opsForValue().get(promptKey(agentId));
+            Object val = redisTemplate.opsForValue().get(promptKey(agentId, variant));
             return val != null ? val.toString() : null;
         } catch (Exception e) {
             log.debug("读取 Agent prompt 缓存失败（降级到 DB）: agentId={}", agentId);
@@ -64,9 +72,16 @@ public class ContextCacheService {
      * 写入 Agent 系统提示词缓存
      */
     public void cacheAgentPrompt(String agentId, String prompt) {
+        cacheAgentPrompt(agentId, null, prompt);
+    }
+
+    /**
+     * 写入 Agent 系统提示词缓存（支持预算/模型变体）
+     */
+    public void cacheAgentPrompt(String agentId, String variant, String prompt) {
         if (!StringUtils.hasText(prompt)) return;
         try {
-            redisTemplate.opsForValue().set(promptKey(agentId), prompt, TTL_PROMPT);
+            redisTemplate.opsForValue().set(promptKey(agentId, variant), prompt, TTL_PROMPT);
         } catch (Exception e) {
             log.debug("写入 Agent prompt 缓存失败: agentId={}", agentId);
         }
@@ -185,6 +200,13 @@ public class ContextCacheService {
 
     private String promptKey(String agentId) {
         return String.format(PREFIX_AGENT_PROMPT, agentId);
+    }
+
+    private String promptKey(String agentId, String variant) {
+        if (!StringUtils.hasText(variant)) {
+            return promptKey(agentId);
+        }
+        return String.format(PREFIX_AGENT_PROMPT_VARIANT, agentId, variant.replaceAll("[^a-zA-Z0-9._-]", "_"));
     }
 
     private String teamKey(String teamAgentId) {

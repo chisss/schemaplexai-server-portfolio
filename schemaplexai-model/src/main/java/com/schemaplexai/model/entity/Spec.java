@@ -6,8 +6,8 @@ import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Spec主表实体
@@ -23,7 +23,7 @@ public class Spec extends BaseEntity {
 
     /** 关联的工作空间（项目系统）列表，一个Spec可跨多个系统 */
     @TableField(typeHandler = JacksonTypeHandler.class)
-    private List<String> workspaceIds = new ArrayList<>();
+    private List<String> workspaceIds;
 
     /** Spec名称 */
     private String name;
@@ -43,6 +43,9 @@ public class Spec extends BaseEntity {
     /** 分类: feature-development/bug-fix/refactoring/data-analysis/config-change */
     private String category;
 
+    /** 需求类型: rd/marketing/qa/ops */
+    private String specType;
+
     /** 标签数组 */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private List<String> tags;
@@ -50,11 +53,30 @@ public class Spec extends BaseEntity {
     /** 描述 */
     private String description;
 
+    /** 类型画像/扩展字段 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> profileData;
+
     /** 关联工作流模板ID */
     private String workflowId;
 
     /** 关联工作流实例ID */
     private String workflowInstanceId;
+
+    /** 生命周期模式: legacy/workflow */
+    private String lifecycleMode;
+
+    /** 当前节点ID */
+    private String currentNodeId;
+
+    /** 当前节点类型 */
+    private String currentNodeType;
+
+    /** 当前节点标签 */
+    private String currentNodeLabel;
+
+    /** 工作流状态快照 */
+    private String workflowStatusSnapshot;
 
     /** Jira 或需求单号 */
     private String jiraTicket;
@@ -64,4 +86,7 @@ public class Spec extends BaseEntity {
 
     /** 工作流产出的文档路径 */
     private String artifactDocPath;
+
+    /** 主产物 ID */
+    private String primaryArtifactId;
 }

@@ -26,6 +26,8 @@ public class WorkflowTemplateVO {
 
     private Boolean isBuiltin;
 
+    private String status;
+
     private String createdBy;
 
     private LocalDateTime createdAt;

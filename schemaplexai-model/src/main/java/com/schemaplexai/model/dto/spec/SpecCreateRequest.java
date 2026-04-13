@@ -5,6 +5,7 @@ import lombok.Data;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 创建Spec请求DTO
@@ -19,8 +20,14 @@ public class SpecCreateRequest {
     /** 分类: feature-development/bug-fix/refactoring/data-analysis/config-change */
     private String category;
 
+    /** 需求类型: rd/marketing/qa/ops */
+    private String specType;
+
     /** 描述 */
     private String description;
+
+    /** 扩展画像 */
+    private Map<String, Object> profileData;
 
     /** 优先级 */
     private String priority;
@@ -36,6 +43,7 @@ public class SpecCreateRequest {
     private List<String> workspaceIds = new ArrayList<>();
 
     /** 关联工作流模板ID */
+    @NotBlank(message = "关联工作流不能为空")
     private String workflowId;
 
     /** Jira 或需求单号 */

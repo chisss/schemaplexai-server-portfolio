@@ -51,6 +51,12 @@ public class WorkflowNodeExecution implements Serializable {
     /** 关联的 Agent 执行 ID（Agent 节点执行时回填） */
     private String agentExecutionId;
 
+    /** 关联评审会话ID */
+    private String reviewSessionId;
+
+    /** 动作跳转地址 */
+    private String actionUrl;
+
     /** 开始时间 */
     private LocalDateTime startedAt;
 

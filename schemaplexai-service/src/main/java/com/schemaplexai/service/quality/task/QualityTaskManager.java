@@ -6,6 +6,7 @@ import com.schemaplexai.model.entity.QualityTask;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
@@ -23,7 +24,7 @@ public class QualityTaskManager {
 
     private final QualityTaskMapper qualityTaskMapper;
 
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public String createTask(String taskId,
                              String issueType,
                              String triggerMode,
@@ -63,7 +64,7 @@ public class QualityTaskManager {
         return task.getId();
     }
 
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public void markRunning(String taskId) {
         QualityTask patch = new QualityTask();
         patch.setId(taskId);
@@ -73,7 +74,7 @@ public class QualityTaskManager {
         qualityTaskMapper.updateById(patch);
     }
 
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public void markSucceeded(String taskId, int totalItems, int successItems, int failedItems, Map<String, Object> resultSummary) {
         QualityTask patch = new QualityTask();
         patch.setId(taskId);
@@ -88,7 +89,7 @@ public class QualityTaskManager {
         qualityTaskMapper.updateById(patch);
     }
 
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public void markFailed(String taskId, String errorMessage) {
         QualityTask patch = new QualityTask();
         patch.setId(taskId);

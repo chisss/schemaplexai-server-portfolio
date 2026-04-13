@@ -44,6 +44,14 @@ public class QualityOrchestrator {
             String specId,
             String dimensionCode,
             String targetContent) {
+        return executeDetection(specId, dimensionCode, targetContent, Map.of());
+    }
+
+    public QualityDetector.DetectionResult executeDetection(
+            String specId,
+            String dimensionCode,
+            String targetContent,
+            Map<String, Object> ruleConfig) {
 
         QualityDetector detector = detectorRegistry.getDetector(dimensionCode);
         if (detector == null) {
@@ -52,7 +60,7 @@ public class QualityOrchestrator {
         }
 
         QualityDetector.DetectionContext context = new QualityDetector.DetectionContext(
-                specId, null, dimensionCode, null, Map.of(), targetContent
+                specId, null, dimensionCode, null, ruleConfig == null ? Map.of() : ruleConfig, targetContent
         );
 
         return detector.detect(context);

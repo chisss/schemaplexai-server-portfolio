@@ -1,6 +1,7 @@
 package com.schemaplexai.service.config.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.ModelProviderEnum;
 import com.schemaplexai.common.exception.BusinessException;
@@ -18,6 +19,7 @@ import com.schemaplexai.model.entity.AiModelRoute;
 import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.vo.system.AiModelRouteVO;
 import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;
+import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.config.SystemConfigService;
 import lombok.RequiredArgsConstructor;
@@ -374,6 +376,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     public ConnectivityTestResultVO testConnectivity(String modelId) {
         AiModel model = entityValidator.requireExists(aiModelMapper, modelId, ResultCode.CONFIG_NOT_FOUND);
         String provider = model.getProvider() != null ? model.getProvider().toLowerCase(Locale.ROOT) : "";
+        String protocol = AiModelConfig.resolveProtocol(model);
         String apiKey = decodeApiKey(model.getApiKeyEncrypted());
         LocalDateTime testedAt = LocalDateTime.now();
         long start = System.currentTimeMillis();
@@ -385,7 +388,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                     .readTimeout(30, TimeUnit.SECONDS)
                     .build();
 
-            Request httpRequest = buildHttpRequest(model, provider, apiKey);
+            Request httpRequest = buildHttpRequest(model, provider, protocol, apiKey);
             try (Response response = client.newCall(httpRequest).execute()) {
                 long latencyMs = System.currentTimeMillis() - start;
                 String responseBody = response.body() != null ? response.body().string() : "";
@@ -398,7 +401,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                             .errorCode(errorCode).errorMessage(trimError(errorMsg))
                             .testedAt(testedAt).build();
                 } else {
-                    result = parseConnectivityResult(responseBody, provider, model, latencyMs, testedAt);
+                    result = parseConnectivityResult(responseBody, provider, protocol, model, latencyMs, testedAt);
                 }
             }
         } catch (IOException ex) {
@@ -423,46 +426,41 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         return result;
     }
 
-    private Request buildHttpRequest(AiModel model, String provider, String apiKey) throws Exception {
+    private Request buildHttpRequest(AiModel model, String provider, String protocol, String apiKey) throws Exception {
         if (!StringUtils.hasText(apiKey)) {
             throw new IllegalArgumentException("API Key不能为空");
         }
-        String url = buildConnectivityUrl(model, provider, apiKey);
-        String body = buildConnectivityPayload(model, provider);
+        String url = buildConnectivityUrl(model, provider, protocol, apiKey);
+        String body = buildConnectivityPayload(model, provider, protocol);
         Request.Builder builder = new Request.Builder()
                 .url(url)
                 .post(RequestBody.create(body, JSON_TYPE))
                 .header("Content-Type", "application/json");
-        if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
+        if (AiModelConfig.PROTOCOL_ANTHROPIC.equals(protocol)) {
             builder.header("x-api-key", apiKey).header("anthropic-version", "2026-01-01");
-        } else if (!ModelProviderEnum.GEMINI.getCode().equals(provider)) {
+        } else if (!AiModelConfig.PROTOCOL_GEMINI.equals(protocol)) {
             builder.header("Authorization", "Bearer " + apiKey);
         }
         return builder.build();
     }
 
-    private String buildConnectivityUrl(AiModel model, String provider, String apiKey) {
-        String baseUrl = normalizeBaseUrl(StringUtils.hasText(model.getBaseUrl())
-                ? model.getBaseUrl() : defaultBaseUrl(provider));
+    private String buildConnectivityUrl(AiModel model, String provider, String protocol, String apiKey) {
+        String baseUrl = AiModelConfig.normalizeBaseUrl(
+                StringUtils.hasText(model.getBaseUrl()) ? model.getBaseUrl() : defaultBaseUrl(provider),
+                provider,
+                protocol
+        );
         if (isEmbeddingModel(model)) {
             return buildEmbeddingConnectivityUrl(provider, baseUrl);
         }
-        if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
-            return baseUrl + "/v1/messages";
+        if (AiModelConfig.PROTOCOL_ANTHROPIC.equals(protocol)) {
+            return baseUrl + "/messages";
         }
-        if (ModelProviderEnum.GEMINI.getCode().equals(provider)) {
+        if (AiModelConfig.PROTOCOL_GEMINI.equals(protocol)) {
             return baseUrl + "/v1beta/models/" + model.getModelId()
                     + ":generateContent?key=" + URLEncoder.encode(apiKey, StandardCharsets.UTF_8);
         }
-        return baseUrl + "/v1/chat/completions";
-    }
-
-    private String normalizeBaseUrl(String baseUrl) {
-        String trimmed = baseUrl != null ? baseUrl.trim() : "";
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
-        }
-        return trimmed;
+        return baseUrl + "/chat/completions";
     }
 
     private String defaultBaseUrl(String provider) {
@@ -475,7 +473,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         };
     }
 
-    private String buildConnectivityPayload(AiModel model, String provider) throws Exception {
+    private String buildConnectivityPayload(AiModel model, String provider, String protocol) throws Exception {
         com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
         if (isEmbeddingModel(model)) {
             if (isDoubaoMultimodalEmbedding(model, provider)) {
@@ -489,14 +487,14 @@ public class SystemConfigServiceImpl implements SystemConfigService {
                     "input", EMBEDDING_CONNECTIVITY_INPUT
             ));
         }
-        if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
+        if (AiModelConfig.PROTOCOL_ANTHROPIC.equals(protocol)) {
             return om.writeValueAsString(Map.of(
                     "model", model.getModelId(),
                     "max_tokens", 16,
                     "messages", List.of(Map.of("role", "user", "content", CONNECTIVITY_PROMPT))
             ));
         }
-        if (ModelProviderEnum.GEMINI.getCode().equals(provider)) {
+        if (AiModelConfig.PROTOCOL_GEMINI.equals(protocol)) {
             return om.writeValueAsString(Map.of(
                     "contents", List.of(Map.of("parts", List.of(Map.of("text", CONNECTIVITY_PROMPT))))
             ));
@@ -509,7 +507,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         ));
     }
 
-    private ConnectivityTestResultVO parseConnectivityResult(String responseBody, String provider,
+    private ConnectivityTestResultVO parseConnectivityResult(String responseBody, String provider, String protocol,
                                                              AiModel model, long latencyMs,
                                                              LocalDateTime testedAt) throws Exception {
         com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
@@ -522,12 +520,12 @@ public class SystemConfigServiceImpl implements SystemConfigService {
             modelName = root.path("model").asText(fallbackModel);
             com.fasterxml.jackson.databind.JsonNode usage = root.path("usage");
             tokenInput = readFirstInt(usage, "prompt_tokens", "input_tokens", "total_tokens");
-        } else if (ModelProviderEnum.CLAUDE.getCode().equals(provider) || ModelProviderEnum.ANTHROPIC.getCode().equals(provider)) {
+        } else if (AiModelConfig.PROTOCOL_ANTHROPIC.equals(protocol)) {
             modelName = root.path("model").asText(fallbackModel);
             com.fasterxml.jackson.databind.JsonNode usage = root.path("usage");
             tokenInput = readInt(usage, "input_tokens");
             tokenOutput = readInt(usage, "output_tokens");
-        } else if (ModelProviderEnum.GEMINI.getCode().equals(provider)) {
+        } else if (AiModelConfig.PROTOCOL_GEMINI.equals(protocol)) {
             modelName = root.path("modelVersion").asText(fallbackModel);
             com.fasterxml.jackson.databind.JsonNode usage = root.path("usageMetadata");
             tokenInput = readInt(usage, "promptTokenCount");
@@ -655,14 +653,14 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     }
 
     private void saveConnectivityResult(String modelId, ConnectivityTestResultVO result) {
-        AiModel update = new AiModel();
-        update.setId(modelId);
-        update.setLastTestAt(result.getTestedAt());
-        update.setLastTestStatus(result.getStatus());
-        update.setLastTestLatency(result.getLatencyMs() != null ? result.getLatencyMs().intValue() : null);
-        update.setLastTestModel(result.getModelName());
-        update.setLastTestError("success".equals(result.getStatus()) ? null : trimError(result.getErrorMessage()));
-        aiModelMapper.updateById(update);
+        LambdaUpdateWrapper<AiModel> updateWrapper = new LambdaUpdateWrapper<AiModel>()
+                .eq(AiModel::getId, modelId)
+                .set(AiModel::getLastTestAt, result.getTestedAt())
+                .set(AiModel::getLastTestStatus, result.getStatus())
+                .set(AiModel::getLastTestLatency, result.getLatencyMs() != null ? result.getLatencyMs().intValue() : null)
+                .set(AiModel::getLastTestModel, StringUtils.hasText(result.getModelName()) ? result.getModelName() : null)
+                .set(AiModel::getLastTestError, "success".equals(result.getStatus()) ? null : trimError(result.getErrorMessage()));
+        aiModelMapper.update(null, updateWrapper);
     }
 
     private String decodeApiKey(String encoded) {

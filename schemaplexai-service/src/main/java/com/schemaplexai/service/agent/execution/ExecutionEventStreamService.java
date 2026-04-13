@@ -91,6 +91,35 @@ public class ExecutionEventStreamService {
         }
     }
 
+    /**
+     * 发布简单事件（无 payload）
+     */
+    public void publishSimple(String executionId, String eventType, int round, String message, long startMs) {
+        publish(AgentExecutionEvent.builder()
+                .eventType(eventType)
+                .executionId(executionId)
+                .roundNum(round)
+                .message(message)
+                .elapsedMs(System.currentTimeMillis() - startMs)
+                .timestamp(Instant.now())
+                .build());
+    }
+
+    /**
+     * 发布带 payload 的事件
+     */
+    public void publishWithPayload(String executionId, String eventType, int round, String message, Object payload, long startMs) {
+        publish(AgentExecutionEvent.builder()
+                .eventType(eventType)
+                .executionId(executionId)
+                .roundNum(round)
+                .message(message)
+                .payload(payload)
+                .elapsedMs(System.currentTimeMillis() - startMs)
+                .timestamp(Instant.now())
+                .build());
+    }
+
     private void removeEmitter(String executionId, SseEmitter emitter) {
         CopyOnWriteArrayList<SseEmitter> emitters = emitterMap.get(executionId);
         if (emitters == null) {

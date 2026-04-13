@@ -5,10 +5,13 @@ import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.dto.spec.SpecCreateRequest;
 import com.schemaplexai.model.dto.spec.SpecDiffRequest;
 import com.schemaplexai.model.dto.spec.SpecDocumentRequest;
+import com.schemaplexai.model.dto.spec.SpecDocumentSubmitRequest;
 import com.schemaplexai.model.dto.spec.SpecQueryRequest;
 import com.schemaplexai.model.dto.spec.SpecUpdateRequest;
+import com.schemaplexai.model.dto.spec.SpecWorkflowStartRequest;
 import com.schemaplexai.model.vo.spec.SpecDiffVO;
 import com.schemaplexai.model.vo.spec.SpecDocumentVO;
+import com.schemaplexai.model.vo.spec.SpecWorkbenchVO;
 import com.schemaplexai.model.vo.spec.SpecVO;
 import com.schemaplexai.model.vo.spec.SpecVersionVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
@@ -44,6 +47,12 @@ public class SpecController {
         return R.ok(specService.getSpecById(id));
     }
 
+    @GetMapping("/{id}/workbench")
+    @Operation(summary = "获取 Spec 工作流工作台")
+    public R<SpecWorkbenchVO> getWorkbench(@PathVariable String id) {
+        return R.ok(specService.getWorkbench(id));
+    }
+
     @PostMapping
     @Operation(summary = "创建Spec")
     public R<SpecVO> create(@Valid @RequestBody SpecCreateRequest request) {
@@ -54,6 +63,13 @@ public class SpecController {
     @Operation(summary = "更新Spec基本信息")
     public R<SpecVO> update(@PathVariable String id, @Valid @RequestBody SpecUpdateRequest request) {
         return R.ok(specService.updateSpec(id, request));
+    }
+
+    @PostMapping("/{id}/workflow/start")
+    @Operation(summary = "填写原始需求并启动 Spec 工作流")
+    public R<SpecVO> startWorkflow(@PathVariable String id,
+                                   @Valid @RequestBody SpecWorkflowStartRequest request) {
+        return R.ok(specService.startWorkflow(id, request));
     }
 
     @DeleteMapping("/{id}")
@@ -95,6 +111,22 @@ public class SpecController {
     public R<SpecDocumentVO> saveDocument(@PathVariable String id, @PathVariable String docType,
                                           @Valid @RequestBody SpecDocumentRequest request) {
         return R.ok(specService.saveDocument(id, docType, request));
+    }
+
+    @PutMapping("/{id}/workbench/nodes/{nodeId}/document")
+    @Operation(summary = "保存工作台文档节点草稿")
+    public R<SpecDocumentVO> saveWorkbenchDocument(@PathVariable String id,
+                                                   @PathVariable String nodeId,
+                                                   @Valid @RequestBody SpecDocumentRequest request) {
+        return R.ok(specService.saveWorkbenchDocument(id, nodeId, request));
+    }
+
+    @PostMapping("/{id}/workbench/nodes/{nodeId}/submit")
+    @Operation(summary = "提交工作台文档节点")
+    public R<SpecDocumentVO> submitWorkbenchDocument(@PathVariable String id,
+                                                     @PathVariable String nodeId,
+                                                     @Valid @RequestBody SpecDocumentSubmitRequest request) {
+        return R.ok(specService.submitWorkbenchDocument(id, nodeId, request));
     }
 
     @GetMapping("/{id}/versions")

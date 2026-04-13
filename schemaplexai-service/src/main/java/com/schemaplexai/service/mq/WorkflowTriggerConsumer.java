@@ -2,6 +2,7 @@ package com.schemaplexai.service.mq;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
@@ -52,6 +53,10 @@ public class WorkflowTriggerConsumer {
         log.info("收到工作流触发消息: specId={}, triggerType={}, requestId={}",
                 specId, triggerType, message.getRequestId());
 
+        String originalUserId = SecurityUtil.getCurrentUserId();
+        String originalTenantId = SecurityUtil.getCurrentTenantId();
+        String originalUsername = SecurityUtil.getCurrentUsername();
+        applySecurityContext(message);
         try {
             String templateId = resolveTemplateId(message);
             if (!StringUtils.hasText(templateId)) {
@@ -90,6 +95,33 @@ public class WorkflowTriggerConsumer {
 
         } catch (Exception e) {
             log.error("处理工作流触发消息失败: specId={}, triggerType={}", specId, triggerType, e);
+        } finally {
+            restoreSecurityContext(originalUserId, originalTenantId, originalUsername);
+        }
+    }
+
+    private void applySecurityContext(WorkflowTriggerMessage message) {
+        if (StringUtils.hasText(message.getTriggerBy())) {
+            SecurityUtil.setCurrentUserId(message.getTriggerBy());
+        }
+        if (StringUtils.hasText(message.getTenantId())) {
+            SecurityUtil.setCurrentTenantId(message.getTenantId());
+        }
+        if (!StringUtils.hasText(SecurityUtil.getCurrentUsername())) {
+            SecurityUtil.setCurrentUsername("workflow-trigger");
+        }
+    }
+
+    private void restoreSecurityContext(String userId, String tenantId, String username) {
+        SecurityUtil.clear();
+        if (StringUtils.hasText(userId)) {
+            SecurityUtil.setCurrentUserId(userId);
+        }
+        if (StringUtils.hasText(tenantId)) {
+            SecurityUtil.setCurrentTenantId(tenantId);
+        }
+        if (StringUtils.hasText(username)) {
+            SecurityUtil.setCurrentUsername(username);
         }
     }
 
