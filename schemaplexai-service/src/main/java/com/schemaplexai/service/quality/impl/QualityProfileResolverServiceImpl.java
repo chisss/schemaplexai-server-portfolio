@@ -57,10 +57,16 @@ public class QualityProfileResolverServiceImpl implements QualityProfileResolver
                         .orderByDesc(QualityProfile::getUpdatedAt))
                 .stream()
                 .filter(profile -> matchesIssueType(profile.getIssueType(), issueType))
-                .filter(profile -> matchesSourceType(profile.getTriggerModes(), sourceType))
-                .sorted(profileComparator(Map.of(), issueType, sourceType))
-                .findFirst()
+                .filter(profile -> matchesSourceType(profile.getTriggerModes(), sourceType)).min(profileComparator(Map.of(), issueType, sourceType))
                 .orElse(null);
+    }
+
+    @Override
+    public QualityProfile resolveProfileById(String profileId) {
+        if (!StringUtils.hasText(profileId)) {
+            return null;
+        }
+        return qualityProfileMapper.selectById(profileId);
     }
 
     @Override

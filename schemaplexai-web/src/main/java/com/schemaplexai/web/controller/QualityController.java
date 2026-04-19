@@ -2,12 +2,15 @@ package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.R;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.dto.quality.CrossReviewCreateRequest;
 import com.schemaplexai.model.dto.quality.DeviationDetectRequest;
 import com.schemaplexai.model.dto.quality.DeviationQueryRequest;
 import com.schemaplexai.model.dto.quality.DeviationStatusUpdateRequest;
 import com.schemaplexai.model.dto.quality.IntentDefectAnalyzeRequest;
 import com.schemaplexai.model.dto.quality.IntentDefectQueryRequest;
+import com.schemaplexai.model.entity.QualityIssue;
+import com.schemaplexai.model.entity.QualityTask;
 import com.schemaplexai.model.vo.quality.AnalyzeTaskVO;
 import com.schemaplexai.model.vo.quality.CrossReviewVO;
 import com.schemaplexai.model.vo.quality.DetectTaskVO;
@@ -17,6 +20,8 @@ import com.schemaplexai.model.vo.quality.IntentDefectVO;
 import com.schemaplexai.service.quality.CrossReviewService;
 import com.schemaplexai.service.quality.DeviationService;
 import com.schemaplexai.service.quality.IntentDefectService;
+import com.schemaplexai.service.quality.feedback.QualityIssueFeedbackService;
+import com.schemaplexai.service.quality.task.QualityTaskManager;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -30,6 +35,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Map;
+
 /**
  * 质量保障控制器
  */
@@ -42,6 +49,8 @@ public class QualityController {
     private final DeviationService deviationService;
     private final IntentDefectService intentDefectService;
     private final CrossReviewService crossReviewService;
+    private final QualityIssueFeedbackService qualityIssueFeedbackService;
+    private final QualityTaskManager qualityTaskManager;
 
     // ==================== 偏离检测 ====================
 
@@ -130,5 +139,74 @@ public class QualityController {
     @Operation(summary = "获取交叉审查详情")
     public R<CrossReviewVO> getCrossReview(@PathVariable String id) {
         return R.ok(crossReviewService.getById(id));
+    }
+
+    // ==================== 质量问题 ====================
+
+    @GetMapping("/issues")
+    @Operation(summary = "分页查询质量问题")
+    public R<Map<String, Object>> pageIssues(
+            @RequestParam(required = false) String tenantId,
+            @RequestParam(required = false) String specId,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String severity,
+            @RequestParam(required = false) String issueType,
+            @RequestParam(defaultValue = "1") Integer page,
+            @RequestParam(defaultValue = "20") Integer size) {
+        return R.ok(qualityIssueFeedbackService.pageIssues(tenantId, specId, status, severity, issueType, page, size));
+    }
+
+    @GetMapping("/issues/statistics")
+    @Operation(summary = "质量问题统计")
+    public R<Map<String, Object>> issueStatistics(
+            @RequestParam(required = false) String tenantId,
+            @RequestParam(required = false) String specId) {
+        return R.ok(qualityIssueFeedbackService.getStatistics(tenantId, specId));
+    }
+
+    @GetMapping("/tasks")
+    @Operation(summary = "分页查询质量任务")
+    public R<PageResult<QualityTask>> pageTasks(
+            @RequestParam(defaultValue = "1") Integer page,
+            @RequestParam(defaultValue = "20") Integer size) {
+        return R.ok(qualityTaskManager.pageTasks(SecurityUtil.getCurrentTenantId(), page, size));
+    }
+
+    @GetMapping("/issues/{id}")
+    @Operation(summary = "获取质量问题详情")
+    public R<QualityIssue> getIssue(@PathVariable String id) {
+        return R.ok(qualityIssueFeedbackService.getIssueDetail(id));
+    }
+
+    @PostMapping("/issues/{id}/acknowledge")
+    @Operation(summary = "确认质量问题")
+    public R<Void> acknowledgeIssue(@PathVariable String id,
+                                    @RequestParam(required = false) String userId) {
+        qualityIssueFeedbackService.acknowledgeIssue(id, userId);
+        return R.ok();
+    }
+
+    @PostMapping("/issues/{id}/resolve")
+    @Operation(summary = "解决质量问题")
+    public R<Void> resolveIssue(@PathVariable String id,
+                                @RequestBody Map<String, String> body) {
+        qualityIssueFeedbackService.resolveIssue(id, body.get("action"), body.get("remark"), body.get("userId"));
+        return R.ok();
+    }
+
+    @PostMapping("/issues/{id}/ignore")
+    @Operation(summary = "忽略质量问题")
+    public R<Void> ignoreIssue(@PathVariable String id,
+                               @RequestBody Map<String, String> body) {
+        qualityIssueFeedbackService.ignoreIssue(id, body.get("remark"), body.get("userId"));
+        return R.ok();
+    }
+
+    @PostMapping("/issues/{id}/resume-workflow")
+    @Operation(summary = "恢复被质量问题阻断的工作流")
+    public R<Void> resumeWorkflow(@PathVariable String id,
+                                  @RequestParam(required = false) String userId) {
+        qualityIssueFeedbackService.resumeBlockedWorkflow(id, userId);
+        return R.ok();
     }
 }

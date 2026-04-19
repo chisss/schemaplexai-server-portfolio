@@ -148,13 +148,15 @@ public class DeviationServiceImpl implements DeviationService {
             wrapper.eq(QualityDeviation::getSpecId, request.getSpecId());
         }
         if (StringUtils.hasText(request.getWorkspaceId())) {
+            // 通过 workspaceIds（JSON 数组字段）模糊匹配，兼容旧数据 projectId
             List<String> specIds = specMapper.selectList(new LambdaQueryWrapper<Spec>()
-                            .eq(Spec::getProjectId, request.getWorkspaceId())
+                            .apply("workspace_ids::text like {0}", "%" + request.getWorkspaceId() + "%")
                             .or()
-                            .apply("workspace_ids::text like {0}", "%" + request.getWorkspaceId() + "%"))
+                            .eq(Spec::getProjectId, request.getWorkspaceId()))
                     .stream()
                     .map(Spec::getId)
                     .filter(StringUtils::hasText)
+                    .distinct()
                     .toList();
             if (specIds.isEmpty()) {
                 wrapper.eq(QualityDeviation::getId, "__none__");
@@ -182,19 +184,28 @@ public class DeviationServiceImpl implements DeviationService {
     private List<DeviationVO> enrich(List<QualityDeviation> entities) {
         List<DeviationVO> result = deviationConverter.toVOList(entities);
         Map<String, Spec> specMap = loadSpecMap(entities.stream().map(QualityDeviation::getSpecId).toList());
-        Map<String, Workspace> workspaceMap = loadWorkspaceMap(specMap.values().stream()
-                .map(Spec::getProjectId)
+
+        // 收集所有关联的 workspaceId（优先 workspaceIds，降级 projectId）
+        List<String> allWorkspaceIds = specMap.values().stream()
+                .flatMap(spec -> resolveWorkspaceIds(spec).stream())
                 .filter(StringUtils::hasText)
-                .toList());
+                .distinct()
+                .toList();
+        Map<String, Workspace> workspaceMap = loadWorkspaceMap(allWorkspaceIds);
         Map<String, User> userMap = loadUserMap(entities.stream().map(QualityDeviation::getResolvedBy).toList());
+
         for (DeviationVO vo : result) {
             Spec spec = specMap.get(vo.getSpecId());
             if (spec != null) {
                 vo.setSpecName(spec.getName());
-                vo.setWorkspaceId(spec.getProjectId());
-                Workspace workspace = workspaceMap.get(spec.getProjectId());
-                if (workspace != null) {
-                    vo.setProjectName(workspace.getName());
+                // 取首个 workspaceId 用于 VO 兼容（前端使用单值）
+                List<String> wsIds = resolveWorkspaceIds(spec);
+                if (!wsIds.isEmpty()) {
+                    vo.setWorkspaceId(wsIds.get(0));
+                    Workspace workspace = workspaceMap.get(wsIds.get(0));
+                    if (workspace != null) {
+                        vo.setProjectName(workspace.getName());
+                    }
                 }
             }
             if (StringUtils.hasText(vo.getResolvedByName())) {
@@ -211,6 +222,20 @@ public class DeviationServiceImpl implements DeviationService {
             }
         }
         return result;
+    }
+
+    /**
+     * 从 Spec 中解析关联的 workspaceId 列表（优先 workspaceIds，降级废弃的 projectId）
+     */
+    private List<String> resolveWorkspaceIds(Spec spec) {
+        if (spec.getWorkspaceIds() != null && !spec.getWorkspaceIds().isEmpty()) {
+            return spec.getWorkspaceIds().stream().filter(StringUtils::hasText).toList();
+        }
+        // 降级：兼容旧数据中仅有 projectId 的情况
+        if (StringUtils.hasText(spec.getProjectId())) {
+            return List.of(spec.getProjectId());
+        }
+        return List.of();
     }
 
     private List<Map<String, Object>> buildDistribution(List<QualityDeviation> records,
@@ -230,21 +255,26 @@ public class DeviationServiceImpl implements DeviationService {
 
     private List<Map<String, Object>> buildProjectDistribution(List<QualityDeviation> records) {
         Map<String, Spec> specMap = loadSpecMap(records.stream().map(QualityDeviation::getSpecId).toList());
-        Map<String, Workspace> workspaceMap = loadWorkspaceMap(specMap.values().stream()
-                .map(Spec::getProjectId)
+        // 收集所有关联的 workspaceId
+        List<String> allWorkspaceIds = specMap.values().stream()
+                .flatMap(spec -> resolveWorkspaceIds(spec).stream())
                 .filter(StringUtils::hasText)
-                .toList());
+                .distinct()
+                .toList();
+        Map<String, Workspace> workspaceMap = loadWorkspaceMap(allWorkspaceIds);
+
         Map<String, Long> grouped = new LinkedHashMap<>();
         for (QualityDeviation record : records) {
             Spec spec = specMap.get(record.getSpecId());
-            String projectName = "未关联项目";
-            if (spec != null && StringUtils.hasText(spec.getProjectId())) {
-                Workspace workspace = workspaceMap.get(spec.getProjectId());
-                if (workspace != null) {
-                    projectName = workspace.getName();
-                }
+            List<String> wsIds = spec != null ? resolveWorkspaceIds(spec) : List.of();
+            if (wsIds.isEmpty()) {
+                grouped.merge("未关联项目", 1L, Long::sum);
+            } else {
+                // 取首个 workspace 名称作为分组键
+                Workspace workspace = workspaceMap.get(wsIds.get(0));
+                String projectName = workspace != null ? workspace.getName() : "未关联项目";
+                grouped.merge(projectName, 1L, Long::sum);
             }
-            grouped.merge(projectName, 1L, Long::sum);
         }
         List<Map<String, Object>> distribution = new ArrayList<>();
         grouped.forEach((key, value) -> {

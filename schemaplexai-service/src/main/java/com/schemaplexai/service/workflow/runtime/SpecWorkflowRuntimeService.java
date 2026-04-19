@@ -74,17 +74,8 @@ public class SpecWorkflowRuntimeService {
             String artifactOutputPath = buildArtifactOutputPath(spec, jiraTicket);
             putIfText(variables, "artifactOutputPath", artifactOutputPath);
 
-            if ("git".equalsIgnoreCase(workspace.getSourceType())
-                    && StringUtils.hasText(message.getTenantId())
-                    && StringUtils.hasText(message.getRequestId())) {
-                WorkspaceSessionService.WorkspaceSession session = gitWorkspaceOrchestrator.prepareIsolatedWorkspace(
-                        message.getTenantId(),
-                        workspace.getId(),
-                        defaultIfBlank(message.getTriggerBy(), "system"),
-                        message.getRequestId(),
-                        workspace.getDefaultBranch(),
-                        targetBranch
-                );
+            WorkspaceSessionService.WorkspaceSession session = prepareWorkspaceSession(workspace, message, targetBranch);
+            if (session != null) {
                 putIfText(variables, "workspacePath", session.getWorktreePath());
                 putIfText(variables, "workspaceBranch", session.getBranchName());
                 putIfText(variables, "workspaceSessionId", session.getSessionId());
@@ -103,6 +94,61 @@ public class SpecWorkflowRuntimeService {
         ));
         variables.entrySet().removeIf(entry -> entry.getValue() == null);
         return variables;
+    }
+
+    private WorkspaceSessionService.WorkspaceSession prepareWorkspaceSession(Workspace workspace,
+                                                                             WorkflowTriggerMessage message,
+                                                                             String targetBranch) {
+        if (workspace == null
+                || !StringUtils.hasText(message.getTenantId())
+                || !StringUtils.hasText(message.getRequestId())) {
+            return null;
+        }
+        String triggerBy = defaultIfBlank(message.getTriggerBy(), "system");
+        if ("git".equalsIgnoreCase(workspace.getSourceType())) {
+            return gitWorkspaceOrchestrator.prepareIsolatedWorkspace(
+                    message.getTenantId(),
+                    workspace.getId(),
+                    triggerBy,
+                    message.getRequestId(),
+                    workspace.getDefaultBranch(),
+                    targetBranch
+            );
+        }
+        if (!"local".equalsIgnoreCase(workspace.getSourceType()) || !StringUtils.hasText(workspace.getLocalPath())) {
+            return null;
+        }
+        try {
+            return gitWorkspaceOrchestrator.prepareIsolatedWorkspaceFromSource(
+                    message.getTenantId(),
+                    workspace.getId(),
+                    triggerBy,
+                    message.getRequestId(),
+                    workspace.getLocalPath(),
+                    workspace.getDefaultBranch(),
+                    targetBranch
+            );
+        } catch (Exception exception) {
+            log.warn("本地工作空间隔离会话准备失败，尝试快照回退: workspaceId={}, localPath={}, error={}",
+                    workspace.getId(), workspace.getLocalPath(), exception.getMessage());
+            try {
+                WorkspaceSessionService.WorkspaceSession snapshotSession = gitWorkspaceOrchestrator.prepareSnapshotWorkspaceFromSource(
+                        message.getTenantId(),
+                        workspace.getId(),
+                        triggerBy,
+                        message.getRequestId(),
+                        workspace.getLocalPath(),
+                        targetBranch
+                );
+                log.info("本地工作空间已切换为受控快照: workspaceId={}, snapshotPath={}",
+                        workspace.getId(), snapshotSession.getWorktreePath());
+                return snapshotSession;
+            } catch (Exception snapshotException) {
+                log.warn("本地工作空间快照准备失败，回退到原始路径: workspaceId={}, localPath={}, error={}",
+                        workspace.getId(), workspace.getLocalPath(), snapshotException.getMessage());
+                return null;
+            }
+        }
     }
 
     public String resolveTargetBranch(Spec spec) {

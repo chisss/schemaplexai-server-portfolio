@@ -75,7 +75,12 @@ INSERT INTO sf_agent (id, tenant_id, name, agent_type, description, ai_model, ai
      '根据功能描述和代码变更自动生成测试用例、测试计划和测试报告模板',
      'DEFAULT_MODEL', 'model', 'active', 3, 'manual',
      '["test_planning","test_case","test_report"]'::jsonb,
-     'test_planning', 'dev', NOW(), NOW(), 0)
+     'test_planning', 'dev', NOW(), NOW(), 0),
+    (gen_random_uuid(), :tenant_id, '工作流编排助手', 'solo',
+     '根据业务目标、输入输出约束和执行顺序，生成可直接编辑的工作流节点与连线草图',
+     'DEFAULT_MODEL', 'model', 'active', 2, 'manual',
+     '["workflow_arrange","flow_planning","node_design"]'::jsonb,
+     'workflow_arrange', 'workflow_arrange', NOW(), NOW(), 0)
 ON CONFLICT DO NOTHING;
 
 -- =====================

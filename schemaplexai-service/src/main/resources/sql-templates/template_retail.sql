@@ -65,7 +65,12 @@ INSERT INTO sf_agent (id, tenant_id, name, agent_type, description, ai_model, ai
      '基于知识库自动回复常见客户问题，处理投诉、退换货、物流查询等标准化场景',
      'DEFAULT_MODEL', 'model', 'active', 10, 'event',
      '["customer_service","faq_answer","complaint_handling"]'::jsonb,
-     'retail', NOW(), NOW(), 0)
+     'retail', NOW(), NOW(), 0),
+    (gen_random_uuid(), :tenant_id, '工作流编排助手', 'solo',
+     '面向零售新品上新、营销活动和客服闭环场景，自动生成可编辑的业务流程草图',
+     'DEFAULT_MODEL', 'model', 'active', 2, 'manual',
+     '["workflow_arrange","flow_planning","retail_process_design"]'::jsonb,
+     'workflow_arrange', NOW(), NOW(), 0)
 ON CONFLICT DO NOTHING;
 
 -- =====================

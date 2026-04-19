@@ -21,9 +21,11 @@ import com.schemaplexai.model.entity.WorkflowNodeExecution;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
 import com.schemaplexai.model.vo.workflow.WorkflowNodeExecutionVO;
+import com.schemaplexai.model.vo.workflow.WorkflowTemplateNodeExecutionVO;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
 import com.schemaplexai.service.workflow.engine.WorkflowNodeEngine;
+import com.schemaplexai.service.workflow.flowable.FlowableWorkflowBridge;
 import com.schemaplexai.service.workflow.validator.WorkflowValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -33,6 +35,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +55,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
     private final WorkflowInstanceConverter instanceConverter;
     private final WorkflowValidator workflowValidator;
     private final WorkflowNodeEngine workflowNodeEngine;
+    private final FlowableWorkflowBridge flowableBridge;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
 
     @Override
@@ -108,10 +112,33 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
-        workflowNodeEngine.initAndDriveWorkflow(instance);
+        // 初始化节点执行记录
+        workflowNodeEngine.initNodeExecutionRecords(instance);
+
+        // 通过 Flowable 启动流程实例
+        var template = templateMapper.selectById(instance.getTemplateId());
+        if (template != null && StringUtils.hasText(template.getProcessDefinitionId())) {
+            Map<String, Object> processVariables = toFlowableVariables(variables);
+            processVariables.put("sfInstanceId", instance.getId());
+            String processInstanceId = flowableBridge.startProcess(
+                    template.getProcessDefinitionId(), instance.getId(), processVariables);
+            // Flowable 可能在 startProcess 返回前已同步执行到结束节点，这里只回填流程实例 ID，
+            // 避免用启动前的旧快照覆盖 completed/currentNodeId 等最新状态。
+            WorkflowInstance processUpdate = new WorkflowInstance();
+            processUpdate.setId(instance.getId());
+            processUpdate.setProcessInstanceId(processInstanceId);
+            processUpdate.setUpdatedAt(LocalDateTime.now());
+            instanceMapper.updateById(processUpdate);
+            log.info("通过 Flowable 启动工作流: instanceId={}, processInstanceId={}", id, processInstanceId);
+        } else {
+            // 降级：模板未部署到 Flowable，使用原有引擎驱动
+            log.warn("模板未部署到 Flowable，使用原有引擎: instanceId={}, templateId={}",
+                    id, instance.getTemplateId());
+            workflowNodeEngine.initAndDriveWorkflow(instance);
+        }
 
         log.info("启动工作流实例: instanceId={}", id);
-        return enrichWithNodeExecutions(instance);
+        return enrichWithNodeExecutions(requireExists(id));
     }
 
     @Override
@@ -125,7 +152,8 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
-        // TODO: 对接 Flowable — runtimeService.suspendProcessInstanceById
+        // Flowable 流程实例同步暂停
+        flowableBridge.suspendProcess(instance.getProcessInstanceId());
 
         log.info("暂停工作流实例: instanceId={}", id);
         return enrichWithNodeExecutions(instance);
@@ -142,6 +170,9 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
+        // Flowable 流程实例同步恢复
+        flowableBridge.activateProcess(instance.getProcessInstanceId());
+
         boolean pendingStart = instance.getVariables() != null
                 && Boolean.TRUE.equals(instance.getVariables().get("securityPendingStart"));
         long nodeCount = nodeExecutionMapper.selectCount(
@@ -153,11 +184,27 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
             variables.remove("securityPendingStart");
             instance.setVariables(variables);
             instanceMapper.updateById(instance);
-            workflowNodeEngine.initAndDriveWorkflow(instance);
+
+            // 需要重新通过 Flowable 启动
+            var template = templateMapper.selectById(instance.getTemplateId());
+            if (template != null && StringUtils.hasText(template.getProcessDefinitionId())) {
+                workflowNodeEngine.initNodeExecutionRecords(instance);
+                Map<String, Object> processVariables = toFlowableVariables(variables);
+                processVariables.put("sfInstanceId", instance.getId());
+                String processInstanceId = flowableBridge.startProcess(
+                        template.getProcessDefinitionId(), instance.getId(), processVariables);
+                WorkflowInstance processUpdate = new WorkflowInstance();
+                processUpdate.setId(instance.getId());
+                processUpdate.setProcessInstanceId(processInstanceId);
+                processUpdate.setUpdatedAt(LocalDateTime.now());
+                instanceMapper.updateById(processUpdate);
+            } else {
+                workflowNodeEngine.initAndDriveWorkflow(instance);
+            }
         }
 
         log.info("恢复工作流实例: instanceId={}", id);
-        return enrichWithNodeExecutions(instance);
+        return enrichWithNodeExecutions(requireExists(id));
     }
 
     @Override
@@ -175,7 +222,8 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
-        // TODO: 对接 Flowable — runtimeService.deleteProcessInstance
+        // Flowable 流程实例同步删除
+        flowableBridge.deleteProcess(instance.getProcessInstanceId(), "用户终止");
 
         log.info("终止工作流实例: instanceId={}", id);
     }
@@ -197,11 +245,17 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         if (StringUtils.hasText(query.getSpecId())) {
             wrapper.eq(WorkflowInstance::getSpecId, query.getSpecId());
         }
+        if (StringUtils.hasText(query.getTriggerType())) {
+            wrapper.apply("variables->>'triggerType' = {0}", query.getTriggerType());
+        }
+        if (StringUtils.hasText(query.getKeyword())) {
+            wrapper.like(WorkflowInstance::getName, query.getKeyword());
+        }
         wrapper.orderByDesc(WorkflowInstance::getCreatedAt);
 
         var result = instanceMapper.selectPage(page, wrapper);
         var voList = result.getRecords().stream()
-                .map(this::enrichWithNodeExecutions)
+                .map(this::toListVO)
                 .toList();
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
@@ -211,6 +265,39 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         requireExists(instanceId);
         var executions = listNodeExecutions(instanceId);
         return executions.stream().map(this::toNodeExecutionVO).toList();
+    }
+
+    @Override
+    public List<WorkflowTemplateNodeExecutionVO> listTemplateNodeExecutions(String templateId, String nodeId, Integer size) {
+        if (!StringUtils.hasText(templateId) || !StringUtils.hasText(nodeId)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "模板ID和节点ID不能为空");
+        }
+        int limit = size == null || size <= 0 ? 10 : Math.min(size, 50);
+
+        var instancePage = new Page<WorkflowInstance>(1, limit);
+        var instanceResult = instanceMapper.selectPage(instancePage, new LambdaQueryWrapper<WorkflowInstance>()
+                .eq(WorkflowInstance::getTemplateId, templateId)
+                .orderByDesc(WorkflowInstance::getCreatedAt));
+        if (instanceResult.getRecords().isEmpty()) {
+            return List.of();
+        }
+
+        Map<String, WorkflowInstance> instanceMap = new HashMap<>();
+        List<String> instanceIds = new ArrayList<>();
+        for (WorkflowInstance instance : instanceResult.getRecords()) {
+            instanceMap.put(instance.getId(), instance);
+            instanceIds.add(instance.getId());
+        }
+
+        return nodeExecutionMapper.selectList(new LambdaQueryWrapper<WorkflowNodeExecution>()
+                        .in(WorkflowNodeExecution::getInstanceId, instanceIds)
+                        .eq(WorkflowNodeExecution::getNodeId, nodeId)
+                        .orderByDesc(WorkflowNodeExecution::getCreatedAt))
+                .stream()
+                .map(execution -> toTemplateNodeExecutionVO(execution, instanceMap.get(execution.getInstanceId())))
+                .filter(Objects::nonNull)
+                .limit(limit)
+                .toList();
     }
 
     @Override
@@ -241,8 +328,13 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         execution.setOutputData(outputData);
         nodeExecutionMapper.updateById(execution);
 
-        // 审批通过后，推进工作流到下一节点
-        workflowNodeEngine.advanceWorkflow(instanceId, nodeId, outputData);
+        // 审批通过后，通过 Flowable 完成 UserTask 自动流转到下一节点
+        if (StringUtils.hasText(instance.getProcessInstanceId())) {
+            flowableBridge.completeUserTask(instance.getProcessInstanceId(), nodeId, outputData);
+        } else {
+            // 降级：无 Flowable 流程实例，使用原有引擎推进
+            workflowNodeEngine.advanceWorkflow(instanceId, nodeId, outputData);
+        }
 
         log.info("审批通过: instanceId={}, nodeId={}", instanceId, nodeId);
     }
@@ -276,6 +368,10 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
+        // Flowable 层面回滚活动状态
+        if (StringUtils.hasText(instance.getProcessInstanceId())) {
+            flowableBridge.moveActivityState(instance.getProcessInstanceId(), nodeId, resolvedRollbackNodeId);
+        }
         workflowNodeEngine.rollbackToNode(instanceId, resolvedRollbackNodeId, outputData);
 
         log.info("审批拒绝: instanceId={}, nodeId={}, rollbackTo={}",
@@ -308,6 +404,10 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
 
+        // Flowable 层面回滚活动状态
+        if (StringUtils.hasText(instance.getProcessInstanceId())) {
+            flowableBridge.moveActivityState(instance.getProcessInstanceId(), nodeId, rollbackToNodeId);
+        }
         workflowNodeEngine.rollbackToNode(instanceId, rollbackToNodeId, outputData);
 
         log.info("请求修改: instanceId={}, nodeId={}, rollbackTo={}", instanceId, nodeId, rollbackToNodeId);
@@ -349,6 +449,7 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
 
     private SecurityRuntimeCheckRequest buildStartSecurityCheckRequest(WorkflowInstance instance) {
         var request = new SecurityRuntimeCheckRequest();
+        request.setTenantId(instance.getTenantId());
         request.setScene(SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_START);
         request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
         request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_INSTANCE);
@@ -372,11 +473,44 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         return variables;
     }
 
+    /**
+     * 列表查询用 VO 转换（不加载节点执行记录，提升性能）
+     */
+    private WorkflowInstanceVO toListVO(WorkflowInstance instance) {
+        var vo = instanceConverter.toVO(instance);
+        populateExtraFields(vo, instance);
+        return vo;
+    }
+
     private WorkflowInstanceVO enrichWithNodeExecutions(WorkflowInstance instance) {
         var vo = instanceConverter.toVO(instance);
+        populateExtraFields(vo, instance);
         var executions = listNodeExecutions(instance.getId());
         vo.setNodeExecutions(executions.stream().map(this::toNodeExecutionVO).toList());
         return vo;
+    }
+
+    /**
+     * 补充 VO 中需要从 variables/关联表提取的额外字段
+     */
+    private void populateExtraFields(WorkflowInstanceVO vo, WorkflowInstance instance) {
+        // 触发类型
+        if (instance.getVariables() != null) {
+            var triggerType = instance.getVariables().get("triggerType");
+            vo.setTriggerType(triggerType != null ? String.valueOf(triggerType) : null);
+        }
+        // 错误信息
+        if (instance.getVariables() != null) {
+            var errorMsg = instance.getVariables().get("errorMessage");
+            vo.setErrorMessage(errorMsg != null ? String.valueOf(errorMsg) : null);
+        }
+        // 模板名称
+        if (StringUtils.hasText(instance.getTemplateId())) {
+            var template = templateMapper.selectById(instance.getTemplateId());
+            if (template != null) {
+                vo.setTemplateName(template.getName());
+            }
+        }
     }
 
     private boolean isAwaitingOriginalRequirement(WorkflowInstance instance) {
@@ -415,12 +549,53 @@ public class WorkflowInstanceServiceImpl implements WorkflowInstanceService {
         return vo;
     }
 
+    private WorkflowTemplateNodeExecutionVO toTemplateNodeExecutionVO(WorkflowNodeExecution execution, WorkflowInstance instance) {
+        if (execution == null || instance == null) {
+            return null;
+        }
+        var vo = new WorkflowTemplateNodeExecutionVO();
+        vo.setId(execution.getId());
+        vo.setInstanceId(instance.getId());
+        vo.setInstanceName(instance.getName());
+        vo.setSpecId(instance.getSpecId());
+        vo.setNodeId(execution.getNodeId());
+        vo.setNodeType(execution.getNodeType());
+        vo.setNodeLabel(execution.getNodeLabel());
+        vo.setStatus(execution.getStatus());
+        vo.setInputData(execution.getInputData());
+        vo.setOutputData(execution.getOutputData());
+        vo.setErrorMessage(execution.getErrorMessage());
+        vo.setStartedAt(execution.getStartedAt());
+        vo.setCompletedAt(execution.getCompletedAt());
+        vo.setCreatedAt(execution.getCreatedAt());
+        return vo;
+    }
+
     private String readString(Map<String, Object> source, String key) {
         if (source == null) {
             return null;
         }
         Object value = source.get(key);
         return value == null ? null : String.valueOf(value);
+    }
+
+    /**
+     * 将工作流变量过滤为 Flowable 可序列化的类型（只保留基本类型和 String）
+     */
+    private Map<String, Object> toFlowableVariables(Map<String, Object> variables) {
+        Map<String, Object> safe = new HashMap<>();
+        if (variables == null) {
+            return safe;
+        }
+        for (Map.Entry<String, Object> entry : variables.entrySet()) {
+            Object value = entry.getValue();
+            if (value == null || value instanceof String || value instanceof Number
+                    || value instanceof Boolean) {
+                safe.put(entry.getKey(), value);
+            }
+            // 复杂对象（VO、Map、List）不传给 Flowable，仅保留在 sf_workflow_instance.variables
+        }
+        return safe;
     }
 
     @SuppressWarnings("unchecked")

@@ -8,6 +8,7 @@ import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.rag.RagConfigService;
 import com.schemaplexai.service.rag.RagRuntimeSettings;
 import com.schemaplexai.service.vector.EmbeddingService;
+import com.schemaplexai.service.vector.impl.InProcessEmbeddingServiceImpl.BuiltinEmbeddingModel;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
@@ -18,6 +19,7 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.ResponseBody;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -33,7 +35,7 @@ import java.util.concurrent.TimeUnit;
  * OpenAI 兼容 Embedding 嵌入实现（支持 OpenAI / Doubao）
  *
  * <p>激活条件: {@code ai.embedding.provider=openai}（默认激活）
- * <p>若 API Key 为空，自动降级到 {@link MockEmbeddingServiceImpl}
+ * <p>若 API Key 为空，自动降级到 {@link InProcessEmbeddingServiceImpl}（本地 ONNX 模型）
  */
 @Slf4j
 @Service
@@ -45,18 +47,30 @@ public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
 
     private final AiModelMapper aiModelMapper;
     private final RagConfigService ragConfigService;
-    private final MockEmbeddingServiceImpl mockFallback = new MockEmbeddingServiceImpl();
+    private final InProcessEmbeddingServiceImpl inProcessFallback;
     private final ConcurrentHashMap<String, EmbeddingModel> modelCache = new ConcurrentHashMap<>();
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
+    @Autowired
     public OpenAiEmbeddingServiceImpl(AiModelMapper aiModelMapper, RagConfigService ragConfigService) {
+        this(aiModelMapper, ragConfigService, new InProcessEmbeddingServiceImpl());
+    }
+
+    OpenAiEmbeddingServiceImpl(AiModelMapper aiModelMapper,
+                               RagConfigService ragConfigService,
+                               InProcessEmbeddingServiceImpl inProcessFallback) {
         this.aiModelMapper = aiModelMapper;
         this.ragConfigService = ragConfigService;
+        this.inProcessFallback = inProcessFallback;
     }
 
     @Override
     public float[] embed(String tenantId, String text) {
         RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
+        if (settings != null && settings.isBuiltinEmbedding()) {
+            BuiltinEmbeddingModel builtinModel = BuiltinEmbeddingModel.fromModelId(settings.getBuiltinEmbeddingModelId());
+            return inProcessFallback.embed(text, builtinModel);
+        }
         AiModelConfig config = resolveEmbeddingModelConfig(tenantId);
         boolean strictMode = settings != null
                 && (settings.isEnabled() || StringUtils.hasText(settings.getVectorModelConfigId()));
@@ -68,8 +82,8 @@ public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
             if (strictMode) {
                 throw new IllegalStateException(message);
             }
-            log.warn("未找到可用的 Embedding 模型配置(apiKey/baseUrl/modelId)，降级到 Mock 实现: tenantId={}", tenantId);
-            return mockFallback.embed(tenantId, text);
+            log.warn("未找到可用的 Embedding 模型配置(apiKey/baseUrl/modelId)，降级到本地内嵌模型: tenantId={}", tenantId);
+            return inProcessFallback.embed(tenantId, text);
         }
         try {
             if (isDoubaoMultimodalEmbedding(config)) {
@@ -83,16 +97,21 @@ public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
                 throw new IllegalStateException(String.format("Embedding API 调用失败: tenantId=%s, modelId=%s, error=%s",
                         tenantId, config.getModelId(), e.getMessage()), e);
             }
-            log.warn("Embedding API 调用失败，降级到 Mock 实现: tenantId={}, error={}", tenantId, e.getMessage());
-            return mockFallback.embed(tenantId, text);
+            log.warn("Embedding API 调用失败，降级到本地内嵌模型: tenantId={}, error={}", tenantId, e.getMessage());
+            return inProcessFallback.embed(tenantId, text);
         }
     }
 
     @Override
     public int dimension(String tenantId) {
         RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
-        if (settings != null && settings.getEmbeddingDimension() > 0) {
-            return settings.getEmbeddingDimension();
+        if (settings != null) {
+            if (settings.isBuiltinEmbedding()) {
+                return BuiltinEmbeddingModel.fromModelId(settings.getBuiltinEmbeddingModelId()).getDimension();
+            }
+            if (settings.getEmbeddingDimension() > 0) {
+                return settings.getEmbeddingDimension();
+            }
         }
         return DIMENSION;
     }

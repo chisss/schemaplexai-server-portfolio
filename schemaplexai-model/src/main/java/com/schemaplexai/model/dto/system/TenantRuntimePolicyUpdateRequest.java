@@ -5,6 +5,8 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Pattern;
 import lombok.Data;
 
+import java.util.List;
+
 /**
  * 租户运行时策略更新请求
  */
@@ -25,4 +27,10 @@ public class TenantRuntimePolicyUpdateRequest {
     private String sandboxProfile;
 
     private Boolean allowLocalImport;
+
+    private List<
+            @Pattern(
+                    regexp = "^[A-Za-z0-9._-]+$",
+                    message = "sandboxAllowedCommands 仅支持字母、数字、点、下划线和中划线"
+            ) String> sandboxAllowedCommands;
 }

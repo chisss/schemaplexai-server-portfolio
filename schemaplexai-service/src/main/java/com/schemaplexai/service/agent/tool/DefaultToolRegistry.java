@@ -124,7 +124,7 @@ public class DefaultToolRegistry implements ToolRegistry {
 
             try {
                 SecurityCheckDecisionVO preDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
-                        buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE, agentId, toolCall, null),
+                        buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE, tenantId, agentId, toolCall, null),
                         null
                 );
                 if (requiresInterrupt(preDecision)) {
@@ -134,7 +134,7 @@ public class DefaultToolRegistry implements ToolRegistry {
 
                 ToolResult result = executor.execute(tenantId, agentId, binding, toolCall, sandboxPolicy);
                 SecurityCheckDecisionVO postDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
-                        buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, agentId, toolCall, result),
+                        buildToolCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, tenantId, agentId, toolCall, result),
                         null
                 );
                 if (requiresInterrupt(postDecision)) {
@@ -211,8 +211,10 @@ public class DefaultToolRegistry implements ToolRegistry {
                 .last("LIMIT 1"));
     }
 
-    private SecurityRuntimeCheckRequest buildToolCheckRequest(String scene, String agentId, ToolCall toolCall, ToolResult toolResult) {
+    private SecurityRuntimeCheckRequest buildToolCheckRequest(String scene, String tenantId, String agentId,
+                                                              ToolCall toolCall, ToolResult toolResult) {
         var request = new SecurityRuntimeCheckRequest();
+        request.setTenantId(tenantId);
         request.setScene(scene);
         request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
         request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT);

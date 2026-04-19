@@ -11,6 +11,7 @@ import lombok.Data;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,10 +42,10 @@ public class KnowledgeDocument implements Serializable {
     /** 文件大小（字节） */
     private Long fileSize;
 
-    /** MinIO 存储路径 */
+    /** 对象逻辑展示路径（一般等于 {bucket}/{objectKey}） */
     private String filePath;
 
-    /** 状态: pending/processing/completed/failed */
+    /** 状态: pending/processing/scanning/completed/failed/blocked */
     private String status;
 
     /** 分块数量 */
@@ -62,6 +63,31 @@ public class KnowledgeDocument implements Serializable {
     /** 扩展元数据 */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> metadata;
+
+    /** 文件内容 SHA256（hex），用于租户级去重 */
+    private String contentSha256;
+
+    /** MIME 类型（Tika 嗅探） */
+    private String mimeType;
+
+    /** MinIO bucket */
+    private String bucket;
+
+    /** MinIO object key */
+    private String objectKey;
+
+    /** 上传来源: web/api/mcp/import */
+    private String uploadChannel;
+
+    /** 内容安全扫描命中的 warning 规则列表 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private List<Map<String, Object>> contentWarnings;
+
+    /** 摄入重试次数 */
+    private Integer retryCount;
+
+    /** 下次重试时间 */
+    private LocalDateTime nextRetryAt;
 
     /** 创建人 */
     private String createdBy;

@@ -11,7 +11,8 @@ import java.util.regex.Pattern;
 public class CommandValidator {
 
     private static final Pattern SAFE_PATH = Pattern.compile("^[\\p{L}\\p{N}_./\\\\\\-\\s:()\\[\\]#]+$");
-    private static final Pattern SAFE_PATTERN = Pattern.compile("^[\\p{L}\\p{N}_./\\\\\\-\\s:*?()\\[\\]#|+$^]+$");
+    /** grep 模式需要支持 Spring 注解等常见采证场景，因此放开 @ 字符。 */
+    private static final Pattern SAFE_PATTERN = Pattern.compile("^[\\p{L}\\p{N}_./\\\\\\-\\s:*?()\\[\\]#|+$^@]+$");
     private static final Set<String> SAFE_BASH_COMMANDS = Set.of(
             "ls", "pwd", "date", "cat", "grep", "find", "mkdir", "rm", "cp", "mv", "stat",
             "echo", "head", "tail", "wc", "whoami", "type", "dir", "findstr", "attrib",
@@ -42,7 +43,7 @@ public class CommandValidator {
         if (command.contains("`") || command.contains("$(")) {
             return false;
         }
-        if ("sys.bash".equals(toolCode) && containsUnsafeShellSyntax(command)) {
+        if ("sys.bash".equals(toolCode) && (containsUnsafeShellSyntax(command) || containsUnsafePathReference(command))) {
             return false;
         }
 
@@ -94,7 +95,7 @@ public class CommandValidator {
         if (command.contains("\n") || command.contains("\r")) {
             return false;
         }
-        if (containsUnsafeShellSyntax(command)) {
+        if (containsUnsafeShellSyntax(command) || containsUnsafePathReference(command)) {
             return false;
         }
         String firstWord = command.split("\\s+")[0].toLowerCase();
@@ -132,5 +133,31 @@ public class CommandValidator {
                 || command.contains("$(")
                 || command.contains(">")
                 || command.contains("<");
+    }
+
+    private boolean containsUnsafePathReference(String command) {
+        String[] tokens = command.trim().split("\\s+");
+        for (String token : tokens) {
+            String normalized = stripQuotes(token);
+            if (!StringUtils.hasText(normalized) || normalized.startsWith("-")) {
+                continue;
+            }
+            if (normalized.startsWith("/") || normalized.startsWith("\\") || normalized.matches("^[a-zA-Z]:[\\\\/].*")) {
+                return true;
+            }
+            if (normalized.startsWith("..") || normalized.contains("../") || normalized.contains("..\\")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String stripQuotes(String token) {
+        if (token.length() >= 2) {
+            if ((token.startsWith("\"") && token.endsWith("\"")) || (token.startsWith("'") && token.endsWith("'"))) {
+                return token.substring(1, token.length() - 1);
+            }
+        }
+        return token;
     }
 }

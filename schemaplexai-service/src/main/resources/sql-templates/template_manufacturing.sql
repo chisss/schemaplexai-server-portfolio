@@ -54,7 +54,12 @@ INSERT INTO sf_agent (id, tenant_id, name, agent_type, description, ai_model, ai
      '分析生产数据，识别工艺参数与产品质量的关联，提出参数优化建议',
      'DEFAULT_MODEL', 'model', 'active', 2, 'manual',
      '["process_optimization","parameter_analysis","sop_writing"]'::jsonb,
-     'manufacturing', NOW(), NOW(), 0)
+     'manufacturing', NOW(), NOW(), 0),
+    (gen_random_uuid(), :tenant_id, '工作流编排助手', 'solo',
+     '结合生产质检、故障诊断和工艺优化场景，自动生成可直接落地的制造流程编排草图',
+     'DEFAULT_MODEL', 'model', 'active', 2, 'manual',
+     '["workflow_arrange","flow_planning","manufacturing_process_design"]'::jsonb,
+     'workflow_arrange', NOW(), NOW(), 0)
 ON CONFLICT DO NOTHING;
 
 -- =====================

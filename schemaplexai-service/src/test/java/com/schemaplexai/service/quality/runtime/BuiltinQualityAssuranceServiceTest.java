@@ -1,24 +1,15 @@
 package com.schemaplexai.service.quality.runtime;
 
-import com.schemaplexai.dao.mapper.AgentConfigMapper;
-import com.schemaplexai.dao.mapper.AgentExecutionMapper;
-import com.schemaplexai.dao.mapper.IntentDefectMapper;
-import com.schemaplexai.dao.mapper.QualityDeviationMapper;
-import com.schemaplexai.dao.mapper.SpecDocumentMapper;
-import com.schemaplexai.dao.mapper.SpecMapper;
-import com.schemaplexai.model.entity.CrossReview;
-import com.schemaplexai.model.entity.IntentDefect;
-import com.schemaplexai.model.entity.QualityDeviation;
-import com.schemaplexai.model.entity.QualityProfile;
-import com.schemaplexai.model.entity.Spec;
-import com.schemaplexai.model.entity.SpecDocument;
-import com.schemaplexai.service.quality.QualityCrossReviewExecutionService;
-import com.schemaplexai.service.quality.QualityProfileResolverService;
+import com.schemaplexai.service.quality.gate.QualityGateContext;
+import com.schemaplexai.service.quality.gate.QualityGateDecision;
+import com.schemaplexai.service.quality.gate.QualityGateEvaluator;
+import com.schemaplexai.service.integration.git.GitOperationService;
+import com.schemaplexai.model.entity.WorkflowInstance;
+import com.schemaplexai.model.entity.WorkflowNodeExecution;
+import com.schemaplexai.service.quality.pipeline.QualityCheckResult;
+import com.schemaplexai.service.quality.pipeline.QualityCheckRequest;
+import com.schemaplexai.service.quality.pipeline.QualityExecutionPipeline;
 import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategy;
-import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategyRegistry;
-import com.schemaplexai.service.quality.strategy.QualityReviewPolicy;
-import com.schemaplexai.service.quality.strategy.QualityReviewPolicyService;
-import com.schemaplexai.service.quality.task.QualityTaskManager;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -27,38 +18,22 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class BuiltinQualityAssuranceServiceTest {
 
-    private final SpecMapper specMapper = mock(SpecMapper.class);
-    private final SpecDocumentMapper specDocumentMapper = mock(SpecDocumentMapper.class);
-    private final AgentExecutionMapper agentExecutionMapper = mock(AgentExecutionMapper.class);
-    private final QualityDeviationMapper qualityDeviationMapper = mock(QualityDeviationMapper.class);
-    private final IntentDefectMapper intentDefectMapper = mock(IntentDefectMapper.class);
-    private final AgentConfigMapper agentConfigMapper = mock(AgentConfigMapper.class);
-    private final QualityTaskManager qualityTaskManager = mock(QualityTaskManager.class);
-    private final QualityProfileResolverService qualityProfileResolverService = mock(QualityProfileResolverService.class);
-    private final QualityCrossReviewExecutionService crossReviewExecutionService = mock(QualityCrossReviewExecutionService.class);
-    private final QualityEvaluationStrategyRegistry strategyRegistry = mock(QualityEvaluationStrategyRegistry.class);
-    private final QualityReviewPolicyService reviewPolicyService = mock(QualityReviewPolicyService.class);
+    private final QualityExecutionPipeline pipeline = mock(QualityExecutionPipeline.class);
+    private final QualityGateEvaluator gateEvaluator = new QualityGateEvaluator();
+    private final GitOperationService gitOperationService = mock(GitOperationService.class);
 
-    private final BuiltinQualityAssuranceService service = new BuiltinQualityAssuranceService(
-            specMapper, specDocumentMapper, agentExecutionMapper, qualityDeviationMapper, intentDefectMapper,
-            agentConfigMapper, qualityTaskManager, qualityProfileResolverService, crossReviewExecutionService,
-            strategyRegistry, reviewPolicyService
-    );
+    private final BuiltinQualityAssuranceService service =
+            new BuiltinQualityAssuranceService(pipeline, gateEvaluator, gitOperationService);
 
     @Test
     void shouldPauseWorkflowWhenQualityGateConfiguredToPauseAndThresholdExceeded() {
-        BuiltinQualityAssuranceService.WorkflowNodeQualityGateDecision decision = service.evaluateWorkflowNodeGate(
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
                 Map.of(
                         "qualityTaskStatus", "succeeded",
                         "qualityScore", 62,
@@ -81,7 +56,7 @@ class BuiltinQualityAssuranceServiceTest {
 
     @Test
     void shouldWarnByDefaultWhenQualityGateThresholdExceeded() {
-        BuiltinQualityAssuranceService.WorkflowNodeQualityGateDecision decision = service.evaluateWorkflowNodeGate(
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
                 Map.of(
                         "qualityTaskStatus", "succeeded",
                         "qualityScore", 70,
@@ -100,375 +75,226 @@ class BuiltinQualityAssuranceServiceTest {
     }
 
     @Test
-    void shouldKeepDeviationOpenForManualDetection() {
-        Spec spec = new Spec();
-        spec.setId("spec-1");
-        spec.setTenantId("tenant-1");
-        spec.setWorkflowId("wf-1");
-        when(specMapper.selectById("spec-1")).thenReturn(spec);
-        when(specDocumentMapper.selectList(any())).thenReturn(List.of());
+    void shouldPauseWhenDefaultFallbackThresholdExceededWithoutNodeConfig() {
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
+                Map.of(
+                        "qualityTaskStatus", "succeeded",
+                        "qualityScore", 35,
+                        "qualityWarningCount", 6
+                ),
+                Map.of()
+        );
 
-        QualityProfile profile = new QualityProfile();
-        profile.setId("profile-1");
-        profile.setCode("QP-1");
-        when(qualityProfileResolverService.resolveProfile("spec-1", "wf-1", null, "deviation", "manual")).thenReturn(profile);
-        when(qualityProfileResolverService.listModelIds("profile-1")).thenReturn(List.of("model-1"));
-        when(agentConfigMapper.selectList(any())).thenReturn(List.of());
-        when(reviewPolicyService.resolvePolicy(eq(profile), eq("deviation"), eq("manual")))
-                .thenReturn(QualityReviewPolicy.empty("deviation", "manual"));
-        when(strategyRegistry.getStrategy("deviation")).thenReturn(new QualityEvaluationStrategy() {
-            @Override
-            public String supportedIssueType() {
-                return "deviation";
-            }
-
-            @Override
-            public EvaluationResult evaluate(EvaluationContext context) {
-                return new EvaluationResult(true, 70, "发现偏离", List.of(
-                        new Finding("omission", "warning", 90, "RULE-DEV-1",
-                                "缺少验收标准", "输出未覆盖验收标准", "output#1", "补充验收标准")
-                ));
-            }
-        });
-        doNothing().when(qualityTaskManager).markRunning("task-1");
-        doNothing().when(qualityTaskManager).markSucceeded(eq("task-1"), anyInt(), anyInt(), anyInt(), any(Map.class));
-
-        service.handleDeviationMessage("task-1", "spec-1", "exec-1", "当前输出");
-
-        ArgumentCaptor<QualityDeviation> captor = ArgumentCaptor.forClass(QualityDeviation.class);
-        verify(qualityDeviationMapper).insert(captor.capture());
-        assertThat(captor.getValue().getStatus()).isEqualTo("open");
-        assertThat(captor.getValue().getSourceType()).isEqualTo("manual");
-        assertThat(captor.getValue().getRuleCode()).isEqualTo("RULE-DEV-1");
+        assertThat(decision.pauseWorkflow()).isTrue();
+        assertThat(decision.failWorkflow()).isFalse();
+        assertThat(decision.decision()).isEqualTo("pause");
+        assertThat(decision.message()).contains("命中默认质量闸门");
+        assertThat(decision.message()).contains("35<60");
     }
 
     @Test
-    void shouldPreserveIntentSourceTypeAndRuleCode() {
-        Spec spec = new Spec();
-        spec.setId("spec-1");
-        spec.setTenantId("tenant-1");
-        spec.setWorkflowId("wf-1");
-        when(specMapper.selectById("spec-1")).thenReturn(spec);
+    void shouldPauseWhenQualityTaskFailedWithoutExplicitGateConfig() {
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
+                Map.of(
+                        "qualityTaskStatus", "failed",
+                        "qualitySummary", "模型评估超时"
+                ),
+                Map.of()
+        );
 
-        SpecDocument document = new SpecDocument();
-        document.setContent("需求文档内容");
-        when(specDocumentMapper.selectOne(any())).thenReturn(document);
-
-        QualityProfile profile = new QualityProfile();
-        profile.setId("profile-2");
-        profile.setCode("QP-2");
-        when(qualityProfileResolverService.resolveProfile("spec-1", "wf-1", null, "intent_defect", "manual")).thenReturn(profile);
-        when(qualityProfileResolverService.listModelIds("profile-2")).thenReturn(List.of("model-1"));
-        when(agentConfigMapper.selectList(any())).thenReturn(List.of());
-        when(reviewPolicyService.resolvePolicy(eq(profile), eq("intent_defect"), eq("manual")))
-                .thenReturn(QualityReviewPolicy.empty("intent_defect", "manual"));
-        when(strategyRegistry.getStrategy("intent_defect")).thenReturn(new QualityEvaluationStrategy() {
-            @Override
-            public String supportedIssueType() {
-                return "intent_defect";
-            }
-
-            @Override
-            public EvaluationResult evaluate(EvaluationContext context) {
-                return new EvaluationResult(true, 66, "发现意图缺陷", List.of(
-                        new Finding("ambiguity", "warning", 87, "RULE-INT-1",
-                                "性能目标模糊", "未给出量化指标", "requirements#performance", "补充目标值")
-                ));
-            }
-        });
-        doNothing().when(qualityTaskManager).markRunning("task-2");
-        doNothing().when(qualityTaskManager).markSucceeded(eq("task-2"), anyInt(), anyInt(), anyInt(), any(Map.class));
-
-        service.handleIntentMessage("task-2", "spec-1", "requirements");
-
-        ArgumentCaptor<IntentDefect> captor = ArgumentCaptor.forClass(IntentDefect.class);
-        verify(intentDefectMapper).insert(captor.capture());
-        assertThat(captor.getValue().getSourceType()).isEqualTo("manual");
-        assertThat(captor.getValue().getRuleCode()).isEqualTo("RULE-INT-1");
+        assertThat(decision.pauseWorkflow()).isTrue();
+        assertThat(decision.failWorkflow()).isFalse();
+        assertThat(decision.decision()).isEqualTo("pause");
+        assertThat(decision.message()).contains("质量任务执行失败");
     }
 
     @Test
-    void shouldKeepDeviationSucceededWhenCrossReviewFails() {
-        Spec spec = new Spec();
-        spec.setId("spec-1");
-        spec.setTenantId("tenant-1");
-        spec.setWorkflowId("wf-1");
-        when(specMapper.selectById("spec-1")).thenReturn(spec);
-        when(specDocumentMapper.selectList(any())).thenReturn(List.of());
+    void shouldWarnWhenExplicitWarnModeUsesDefaultFallbackThreshold() {
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
+                Map.of(
+                        "qualityTaskStatus", "succeeded",
+                        "qualityScore", 35,
+                        "qualityWarningCount", 6
+                ),
+                Map.of("qualityGateMode", "warn")
+        );
 
-        QualityProfile profile = new QualityProfile();
-        profile.setId("profile-1");
-        profile.setCode("QP-1");
-        when(qualityProfileResolverService.resolveProfile("spec-1", "wf-1", null, "deviation", "manual")).thenReturn(profile);
-        when(qualityProfileResolverService.listModelIds("profile-1")).thenReturn(List.of("model-1", "model-2"));
-        when(agentConfigMapper.selectList(any())).thenReturn(List.of());
-        when(reviewPolicyService.resolvePolicy(eq(profile), eq("deviation"), eq("manual")))
-                .thenReturn(QualityReviewPolicy.empty("deviation", "manual"));
-        when(strategyRegistry.getStrategy("deviation")).thenReturn(new QualityEvaluationStrategy() {
-            @Override
-            public String supportedIssueType() {
-                return "deviation";
-            }
+        assertThat(decision.pauseWorkflow()).isFalse();
+        assertThat(decision.failWorkflow()).isFalse();
+        assertThat(decision.decision()).isEqualTo("warn");
+        assertThat(decision.message()).contains("35<60");
+    }
 
-            @Override
-            public EvaluationResult evaluate(EvaluationContext context) {
-                return new EvaluationResult(true, 82, "发现偏离", List.of(
-                        new Finding("omission", "warning", 90, "RULE-DEV-2",
-                                "缺少回滚策略", "输出未覆盖回滚预案", "output#rollback", "补充回滚方案")
-                ));
-            }
-        });
-        doNothing().when(qualityTaskManager).markRunning("task-3");
-        doNothing().when(qualityTaskManager).markSucceeded(eq("task-3"), anyInt(), anyInt(), anyInt(), any(Map.class));
-        when(crossReviewExecutionService.createAndExecute(
-                eq("spec-1"), eq("task-3"), eq("profile-1"), eq("deviation"),
-                eq(List.of("model-1", "model-2")), eq("manual"), any(), eq("当前输出"), eq("tenant-1")
-        )).thenThrow(new RuntimeException("cross review unavailable"));
+    @Test
+    void shouldPauseWhenExplicitPauseModeUsesDefaultFallbackThreshold() {
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
+                Map.of(
+                        "qualityTaskStatus", "succeeded",
+                        "qualityScore", 35,
+                        "qualityWarningCount", 6
+                ),
+                Map.of("qualityGateMode", "pause")
+        );
 
-        Map<String, Object> result = service.handleDeviationMessage("task-3", "spec-1", "exec-1", "当前输出");
+        assertThat(decision.pauseWorkflow()).isTrue();
+        assertThat(decision.failWorkflow()).isFalse();
+        assertThat(decision.decision()).isEqualTo("pause");
+        assertThat(decision.message()).contains("35<60");
+    }
 
+    @Test
+    void shouldDelegateToPipelineForDeviationAnalysis() {
+        QualityCheckResult mockResult = new QualityCheckResult(
+                "task-1", "pending_gate",
+                List.of(new QualityEvaluationStrategy.Finding(
+                        "omission", "warning", 90, "RULE-DEV-1",
+                        "缺少验收标准", "输出未覆盖验收标准", "output#1", "补充验收标准"
+                )),
+                70, "发现偏离", null, 200, "async", "succeeded", 1, 1
+        );
+        when(pipeline.execute(any())).thenReturn(mockResult);
+
+        Map<String, Object> result = service.handleDeviationMessage("task-1", "spec-1", "exec-1", "当前输出");
+
+        assertThat(result).containsEntry("qualityTaskId", "task-1");
         assertThat(result).containsEntry("qualityTaskStatus", "succeeded");
-        assertThat(result).containsEntry("crossReviewStatus", "failed");
-        verify(qualityTaskManager, never()).markFailed(eq("task-3"), anyString());
+        assertThat(result).containsEntry("qualityScore", 70);
     }
 
     @Test
-    void shouldMergeCrossReviewFindingsIntoDeviationSummaryAndPersistence() {
-        Spec spec = new Spec();
-        spec.setId("spec-1");
-        spec.setTenantId("tenant-1");
-        spec.setWorkflowId("wf-1");
-        when(specMapper.selectById("spec-1")).thenReturn(spec);
-        when(specDocumentMapper.selectList(any())).thenReturn(List.of());
+    void shouldDelegateToPipelineForIntentAnalysis() {
+        QualityCheckResult mockResult = new QualityCheckResult(
+                "task-2", "pending_gate",
+                List.of(new QualityEvaluationStrategy.Finding(
+                        "ambiguity", "warning", 87, "RULE-INT-1",
+                        "性能目标模糊", "未给出量化指标", "requirements#performance", "补充目标值"
+                )),
+                66, "发现意图缺陷", null, 300, "async", "succeeded", 1, 1
+        );
+        when(pipeline.execute(any())).thenReturn(mockResult);
 
-        QualityProfile profile = new QualityProfile();
-        profile.setId("profile-1");
-        profile.setCode("QP-1");
-        when(qualityProfileResolverService.resolveProfile("spec-1", "wf-1", null, "deviation", "manual")).thenReturn(profile);
-        when(qualityProfileResolverService.listModelIds("profile-1")).thenReturn(List.of("model-1", "model-2"));
-        when(agentConfigMapper.selectList(any())).thenReturn(List.of());
-        when(reviewPolicyService.resolvePolicy(eq(profile), eq("deviation"), eq("manual")))
-                .thenReturn(QualityReviewPolicy.empty("deviation", "manual"));
-        when(strategyRegistry.getStrategy("deviation")).thenReturn(new QualityEvaluationStrategy() {
-            @Override
-            public String supportedIssueType() {
-                return "deviation";
-            }
+        Map<String, Object> result = service.handleIntentMessage("task-2", "spec-1", "requirements");
 
-            @Override
-            public EvaluationResult evaluate(EvaluationContext context) {
-                return EvaluationResult.empty();
-            }
-        });
-        CrossReview crossReview = new CrossReview();
-        crossReview.setId("cross-1");
-        crossReview.setStatus("succeeded");
-        crossReview.setSummary(Map.of("overview", "交叉审核发现 1 个关键问题"));
-        crossReview.setMergedResult(Map.of(
-                "score", 81,
-                "findings", List.of(Map.of(
-                        "type", "omission",
-                        "severity", "warning",
-                        "confidence", 88,
-                        "ruleCode", "RULE-CR-1",
-                        "title", "缺少回滚策略",
-                        "description", "交叉审核识别出回滚预案缺失",
-                        "location", "design#rollback",
-                        "suggestion", "补充回滚方案"
-                ))
+        assertThat(result).containsEntry("qualityTaskId", "task-2");
+        assertThat(result).containsEntry("qualityTaskStatus", "succeeded");
+        assertThat(result).containsEntry("qualityScore", 66);
+    }
+
+    @Test
+    void shouldRespectNodeConfigAndApplyImplementationEvidenceGuard() throws Exception {
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-1");
+        instance.setSpecId("spec-1");
+        instance.setTemplateId("tpl-1");
+        instance.setTenantId("tenant-1");
+        instance.setVariables(Map.of("workspacePath", "/tmp/worktree"));
+
+        WorkflowNodeExecution nodeExec = new WorkflowNodeExecution();
+        nodeExec.setNodeId("code_development");
+        nodeExec.setNodeLabel("代码开发");
+        nodeExec.setAgentExecutionId("agent-exec-1");
+
+        when(pipeline.execute(any())).thenReturn(new QualityCheckResult(
+                "task-3", "pending_gate", List.of(),
+                95, "模型评估认为输出完整", null, 120L,
+                "async", "succeeded", 0, 0
         ));
-        when(crossReviewExecutionService.createAndExecute(
-                eq("spec-1"), eq("task-4"), eq("profile-1"), eq("deviation"),
-                eq(List.of("model-1", "model-2")), eq("manual"), any(), eq("当前输出"), eq("tenant-1")
-        )).thenReturn(crossReview);
-        when(qualityTaskManager.createTask(
-                eq("task-4"), eq("deviation"), eq("agent_execution"), eq("manual"),
-                any(), eq("tenant-1"), eq("spec-1"), eq("wf-1"), eq("exec-1"),
-                eq("profile-1"), eq("QP-1"), any(Map.class)
-        )).thenReturn("task-4");
-        doNothing().when(qualityTaskManager).markRunning("task-4");
-        doNothing().when(qualityTaskManager).markSucceeded(eq("task-4"), anyInt(), anyInt(), anyInt(), any(Map.class));
+        when(gitOperationService.inspectWorkspaceChanges("/tmp/worktree"))
+                .thenReturn(new GitOperationService.WorkspaceChangeSummary(true, List.of(), List.of()));
 
-        Map<String, Object> result = service.handleDeviationMessage("task-4", "spec-1", "exec-1", "当前输出");
+        Map<String, Object> result = service.analyzeAgentNode(
+                instance,
+                nodeExec,
+                Map.of(
+                        "executionStrategy", "async",
+                        "qualityProfileId", "profile-1",
+                        "artifactDocType", "implementation",
+                        "outputVariableKey", "codeDevelopmentSummary"
+                ),
+                "实现报告"
+        );
 
-        ArgumentCaptor<QualityDeviation> deviationCaptor = ArgumentCaptor.forClass(QualityDeviation.class);
-        verify(qualityDeviationMapper).insert(deviationCaptor.capture());
-        assertThat(deviationCaptor.getValue().getRuleCode()).isEqualTo("RULE-CR-1");
-        ArgumentCaptor<Map<String, Object>> summaryCaptor = ArgumentCaptor.forClass(Map.class);
-        verify(qualityTaskManager).markSucceeded(eq("task-4"), eq(1), eq(1), eq(0), summaryCaptor.capture());
-        assertThat(summaryCaptor.getValue()).containsEntry("score", 81);
-        assertThat(summaryCaptor.getValue()).containsEntry("deviationCount", 1);
-        assertThat(summaryCaptor.getValue()).containsEntry("crossReviewFindingCount", 1);
-        assertThat(result).containsEntry("qualityScore", 81);
-        assertThat(result).containsEntry("qualityDeviationCount", 1);
-        assertThat(result).containsEntry("crossReviewId", "cross-1");
+        ArgumentCaptor<QualityCheckRequest> captor = ArgumentCaptor.forClass(QualityCheckRequest.class);
+        verify(pipeline).execute(captor.capture());
+        QualityCheckRequest request = captor.getValue();
+
+        assertThat(request.executionStrategy()).isEqualTo("async");
+        assertThat(request.profileId()).isEqualTo("profile-1");
+        assertThat(request.docType()).isEqualTo("implementation");
+        assertThat(request.nodeConfig()).containsEntry("artifactDocType", "implementation");
+        assertThat(result).containsEntry("implementationEvidenceChecked", true);
+        assertThat(result).containsEntry("implementationEvidencePassed", false);
+        assertThat(result).containsEntry("qualityScore", 35);
+        assertThat(String.valueOf(result.get("qualitySummary"))).contains("未检测到任何真实工作区改动");
     }
 
     @Test
-    void shouldMergeCrossReviewFindingsIntoIntentSummaryAndPersistence() {
-        Spec spec = new Spec();
-        spec.setId("spec-1");
-        spec.setTenantId("tenant-1");
-        spec.setWorkflowId("wf-1");
-        when(specMapper.selectById("spec-1")).thenReturn(spec);
+    void shouldKeepHighScoreWhenImplementationNodeHasRealWorkspaceChanges() throws Exception {
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-2");
+        instance.setSpecId("spec-2");
+        instance.setTemplateId("tpl-2");
+        instance.setTenantId("tenant-2");
+        instance.setVariables(Map.of("workspacePath", "/tmp/worktree-2"));
 
-        SpecDocument document = new SpecDocument();
-        document.setContent("需求文档内容");
-        when(specDocumentMapper.selectOne(any())).thenReturn(document);
+        WorkflowNodeExecution nodeExec = new WorkflowNodeExecution();
+        nodeExec.setNodeId("code_development");
+        nodeExec.setNodeLabel("代码开发");
+        nodeExec.setAgentExecutionId("agent-exec-2");
 
-        QualityProfile profile = new QualityProfile();
-        profile.setId("profile-2");
-        profile.setCode("QP-2");
-        when(qualityProfileResolverService.resolveProfile("spec-1", "wf-1", null, "intent_defect", "manual")).thenReturn(profile);
-        when(qualityProfileResolverService.listModelIds("profile-2")).thenReturn(List.of("model-1", "model-2"));
-        when(agentConfigMapper.selectList(any())).thenReturn(List.of());
-        when(reviewPolicyService.resolvePolicy(eq(profile), eq("intent_defect"), eq("manual")))
-                .thenReturn(QualityReviewPolicy.empty("intent_defect", "manual"));
-        when(strategyRegistry.getStrategy("intent_defect")).thenReturn(new QualityEvaluationStrategy() {
-            @Override
-            public String supportedIssueType() {
-                return "intent_defect";
-            }
-
-            @Override
-            public EvaluationResult evaluate(EvaluationContext context) {
-                return EvaluationResult.empty();
-            }
-        });
-        CrossReview crossReview = new CrossReview();
-        crossReview.setId("cross-2");
-        crossReview.setStatus("succeeded");
-        crossReview.setSummary(Map.of("overview", "交叉审核发现 1 个意图缺陷"));
-        crossReview.setMergedResult(Map.of(
-                "score", 76,
-                "findings", List.of(Map.of(
-                        "type", "ambiguity",
-                        "severity", "warning",
-                        "confidence", 91,
-                        "ruleCode", "RULE-CR-INT-1",
-                        "title", "性能指标模糊",
-                        "description", "交叉审核识别出性能目标缺少量化指标",
-                        "location", "requirements#performance",
-                        "suggestion", "补充明确阈值"
-                ))
+        when(pipeline.execute(any())).thenReturn(new QualityCheckResult(
+                "task-4", "pending_gate", List.of(),
+                88, "输出基本完整", null, 100L,
+                "short_wait", "succeeded", 0, 0
         ));
-        when(crossReviewExecutionService.createAndExecute(
-                eq("spec-1"), eq("task-5"), eq("profile-2"), eq("intent_defect"),
-                eq(List.of("model-1", "model-2")), eq("manual"), any(), eq("需求文档内容"), eq("tenant-1")
-        )).thenReturn(crossReview);
-        when(qualityTaskManager.createTask(
-                eq("task-5"), eq("intent_defect"), eq("event"), eq("manual"),
-                any(), eq("tenant-1"), eq("spec-1"), eq("wf-1"), eq(null),
-                eq("profile-2"), eq("QP-2"), any(Map.class)
-        )).thenReturn("task-5");
-        doNothing().when(qualityTaskManager).markRunning("task-5");
-        doNothing().when(qualityTaskManager).markSucceeded(eq("task-5"), anyInt(), anyInt(), anyInt(), any(Map.class));
-
-        Map<String, Object> result = service.handleIntentMessage("task-5", "spec-1", "requirements");
-
-        ArgumentCaptor<IntentDefect> defectCaptor = ArgumentCaptor.forClass(IntentDefect.class);
-        verify(intentDefectMapper).insert(defectCaptor.capture());
-        assertThat(defectCaptor.getValue().getRuleCode()).isEqualTo("RULE-CR-INT-1");
-        ArgumentCaptor<Map<String, Object>> summaryCaptor = ArgumentCaptor.forClass(Map.class);
-        verify(qualityTaskManager).markSucceeded(eq("task-5"), eq(1), eq(1), eq(0), summaryCaptor.capture());
-        assertThat(summaryCaptor.getValue()).containsEntry("score", 76);
-        assertThat(summaryCaptor.getValue()).containsEntry("defectCount", 1);
-        assertThat(summaryCaptor.getValue()).containsEntry("crossReviewFindingCount", 1);
-        assertThat(result).containsEntry("qualityScore", 76);
-        assertThat(result).containsEntry("qualityDefectCount", 1);
-        assertThat(result).containsEntry("crossReviewId", "cross-2");
-    }
-
-    @Test
-    void shouldUseMatchingCrossReviewReviewerResultWhenPrimaryEvaluationIsInfrastructureFailure() {
-        Spec spec = new Spec();
-        spec.setId("spec-1");
-        spec.setTenantId("tenant-1");
-        spec.setWorkflowId("wf-1");
-        when(specMapper.selectById("spec-1")).thenReturn(spec);
-
-        SpecDocument document = new SpecDocument();
-        document.setContent("需求文档内容");
-        when(specDocumentMapper.selectOne(any())).thenReturn(document);
-
-        QualityProfile profile = new QualityProfile();
-        profile.setId("profile-3");
-        profile.setCode("QP-3");
-        when(qualityProfileResolverService.resolveProfile("spec-1", "wf-1", null, "intent_defect", "manual")).thenReturn(profile);
-        when(qualityProfileResolverService.listModelIds("profile-3")).thenReturn(List.of("model-1", "model-2"));
-        when(agentConfigMapper.selectList(any())).thenReturn(List.of());
-        when(reviewPolicyService.resolvePolicy(eq(profile), eq("intent_defect"), eq("manual")))
-                .thenReturn(QualityReviewPolicy.empty("intent_defect", "manual"));
-        when(strategyRegistry.getStrategy("intent_defect")).thenReturn(new QualityEvaluationStrategy() {
-            @Override
-            public String supportedIssueType() {
-                return "intent_defect";
-            }
-
-            @Override
-            public EvaluationResult evaluate(EvaluationContext context) {
-                return new EvaluationResult(true, 20, "质量评估结果解析失败", List.of(
-                        new Finding("omission", "critical", 100, "qa.infrastructure.model_response_invalid",
-                                "质量评估结果解析失败", "模型返回内容不是可解析的 JSON", "", "检查模型配置")
+        when(gitOperationService.inspectWorkspaceChanges("/tmp/worktree-2"))
+                .thenReturn(new GitOperationService.WorkspaceChangeSummary(
+                        false,
+                        List.of("src/main/java/com/example/App.java", "docs/output.md"),
+                        List.of("src/main/java/com/example/App.java")
                 ));
-            }
-        });
-        CrossReview crossReview = new CrossReview();
-        crossReview.setId("cross-3");
-        crossReview.setStatus("succeeded");
-        crossReview.setModelAId("model-1");
-        crossReview.setModelAResult(Map.of(
-                "modelId", "model-1",
-                "hasIssue", true,
-                "score", 86,
-                "summary", "主模型在交叉审核中输出正常",
-                "findings", List.of(Map.of(
-                        "type", "omission",
-                        "severity", "warning",
-                        "confidence", 89,
-                        "ruleCode", "RULE-INT-RECOVERED",
-                        "title", "缺少重试机制",
-                        "description", "交叉审核中的同模型输出识别出补偿机制缺失",
-                        "location", "design#retry",
-                        "suggestion", "补充重试补偿设计"
-                ))
-        ));
-        crossReview.setMergedResult(Map.of(
-                "score", 76,
-                "findings", List.of(Map.of(
-                        "type", "omission",
-                        "severity", "warning",
-                        "confidence", 89,
-                        "ruleCode", "RULE-INT-RECOVERED",
-                        "title", "缺少重试机制",
-                        "description", "交叉审核中的同模型输出识别出补偿机制缺失",
-                        "location", "design#retry",
-                        "suggestion", "补充重试补偿设计"
-                ))
-        ));
-        crossReview.setSummary(Map.of("overview", "交叉审核恢复主模型结果"));
-        when(crossReviewExecutionService.createAndExecute(
-                eq("spec-1"), eq("task-6"), eq("profile-3"), eq("intent_defect"),
-                eq(List.of("model-1", "model-2")), eq("manual"), any(), eq("需求文档内容"), eq("tenant-1")
-        )).thenReturn(crossReview);
-        when(qualityTaskManager.createTask(
-                eq("task-6"), eq("intent_defect"), eq("event"), eq("manual"),
-                any(), eq("tenant-1"), eq("spec-1"), eq("wf-1"), eq(null),
-                eq("profile-3"), eq("QP-3"), any(Map.class)
-        )).thenReturn("task-6");
-        doNothing().when(qualityTaskManager).markRunning("task-6");
-        doNothing().when(qualityTaskManager).markSucceeded(eq("task-6"), anyInt(), anyInt(), anyInt(), any(Map.class));
 
-        Map<String, Object> result = service.handleIntentMessage("task-6", "spec-1", "requirements");
+        Map<String, Object> result = service.analyzeAgentNode(
+                instance,
+                nodeExec,
+                Map.of("artifactDocType", "implementation"),
+                "实现报告"
+        );
 
-        ArgumentCaptor<Map<String, Object>> summaryCaptor = ArgumentCaptor.forClass(Map.class);
-        verify(qualityTaskManager).markSucceeded(eq("task-6"), eq(1), eq(1), eq(0), summaryCaptor.capture());
-        assertThat(summaryCaptor.getValue()).containsEntry("score", 76);
-        assertThat(summaryCaptor.getValue()).containsEntry("crossReviewScore", 76);
-        assertThat(result).containsEntry("qualityScore", 76);
+        assertThat(result).containsEntry("implementationEvidenceChecked", true);
+        assertThat(result).containsEntry("implementationEvidencePassed", true);
+        assertThat(result).containsEntry("qualityScore", 88);
+        assertThat(String.valueOf(result.get("implementationEvidenceMessage"))).contains("已检测到真实实现类改动");
+    }
 
-        ArgumentCaptor<IntentDefect> defectCaptor = ArgumentCaptor.forClass(IntentDefect.class);
-        verify(intentDefectMapper).insert(defectCaptor.capture());
-        assertThat(defectCaptor.getValue().getRuleCode()).isEqualTo("RULE-INT-RECOVERED");
+    @Test
+    void shouldRetryWhenScoreCloseToThreshold() {
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
+                Map.of(
+                        "qualityTaskStatus", "succeeded",
+                        "qualityScore", 75,
+                        "qualityDeviationCount", 1,
+                        "qualityWarningCount", 1,
+                        "qualitySummary", "发现 1 个偏离"
+                ),
+                Map.of(
+                        "qualityGateMode", "pause",
+                        "minQualityScore", 80
+                )
+        );
+
+        // 默认 maxRetryCount=0，不触发 retry，回退到 pause
+        assertThat(decision.decision()).isEqualTo("pause");
+    }
+
+    @Test
+    void shouldPassWhenDisabled() {
+        QualityGateDecision decision = service.evaluateWorkflowNodeGate(
+                Map.of("qualityScore", 30),
+                Map.of("qualityGateMode", "disabled")
+        );
+
+        assertThat(decision.decision()).isEqualTo("pass");
+        assertThat(decision.isPassed()).isTrue();
     }
 }

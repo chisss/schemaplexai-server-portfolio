@@ -17,6 +17,9 @@ public class AvailableToolVO {
     /** 来源类型: builtin / skill / mcp */
     private String sourceType;
 
+    /** 分类: system / web / code / skill / mcp */
+    private String category;
+
     /** 来源ID: MCP Server ID / Skill ID（builtin 时为空） */
     private String sourceRefId;
 

@@ -1,15 +1,18 @@
 package com.schemaplexai.service.ai;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.schemaplexai.service.event.AiModelConfigChangedEvent;
 import com.schemaplexai.service.ai.http.LangChainOkHttpClientBuilder;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * LangChain4j 模型工厂 — 动态实例化并缓存 {@link ChatModel}
@@ -21,13 +24,25 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class LangChain4jModelFactory {
 
-    private final ConcurrentHashMap<String, ChatModel> cache = new ConcurrentHashMap<>();
+    private final Cache<String, ChatModel> modelCache = Caffeine.newBuilder()
+            .expireAfterWrite(Duration.ofMinutes(30))
+            .maximumSize(100)
+            .build();
 
     /**
      * 获取或创建 ChatModel 实例
      */
     public ChatModel getOrCreate(AiModelConfig config) {
-        return cache.computeIfAbsent(config.cacheKey(), k -> buildModel(config));
+        return modelCache.get(config.cacheKey(), key -> buildModel(config));
+    }
+
+    @EventListener
+    public void onModelConfigChanged(AiModelConfigChangedEvent event) {
+        invalidateAll();
+    }
+
+    public void invalidateAll() {
+        modelCache.invalidateAll();
     }
 
     private ChatModel buildModel(AiModelConfig config) {

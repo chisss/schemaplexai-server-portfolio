@@ -52,6 +52,16 @@ class CommandValidatorTest {
     }
 
     @Test
+    void shouldAllowGrepPatternWithSpringAnnotations() {
+        Map<String, Object> args = Map.of(
+                "path", "titanium-policy-web/src/main/java",
+                "pattern", "@RestController|@RequestMapping|@PostMapping|@GetMapping|@PutMapping|@DeleteMapping"
+        );
+
+        assertThat(commandValidator.validateToolArguments("sys.grep", args)).isTrue();
+    }
+
+    @Test
     void shouldUseExtendedRegexForMacAndLinuxGrep() {
         Map<String, Object> args = Map.of(
                 "path", "src",
@@ -78,6 +88,14 @@ class CommandValidatorTest {
 
         assertThat(commandValidator.validateToolArguments("sys.bash", args)).isFalse();
         assertThat(commandValidator.isCommandAllowed("sys.bash", "curl -s https://example.com | head")).isFalse();
+    }
+
+    @Test
+    void shouldRejectBashCommandWithPathEscape() {
+        Map<String, Object> args = Map.of("command", "cat ../secrets/application.yml");
+
+        assertThat(commandValidator.validateToolArguments("sys.bash", args)).isFalse();
+        assertThat(commandValidator.isCommandAllowed("sys.bash", "cat ../secrets/application.yml")).isFalse();
     }
 
     private void assertWriteCommandAllowed(String command, Map<String, Object> args) {

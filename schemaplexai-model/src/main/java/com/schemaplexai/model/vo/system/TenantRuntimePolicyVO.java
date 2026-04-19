@@ -3,6 +3,7 @@ package com.schemaplexai.model.vo.system;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 租户运行时策略 VO
@@ -16,5 +17,6 @@ public class TenantRuntimePolicyVO {
     private Integer maxExecutionMinutes;
     private String sandboxProfile;
     private Boolean allowLocalImport;
+    private List<String> sandboxAllowedCommands;
     private LocalDateTime updatedAt;
 }

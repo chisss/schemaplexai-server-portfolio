@@ -6,6 +6,7 @@ import com.schemaplexai.model.dto.workflow.WorkflowInstanceQueryRequest;
 import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
 import com.schemaplexai.model.vo.workflow.WorkflowNodeExecutionVO;
+import com.schemaplexai.model.vo.workflow.WorkflowTemplateNodeExecutionVO;
 
 import java.util.List;
 
@@ -29,6 +30,8 @@ public interface WorkflowInstanceService {
     PageResult<WorkflowInstanceVO> page(WorkflowInstanceQueryRequest query);
 
     List<WorkflowNodeExecutionVO> getNodeExecutions(String instanceId);
+
+    List<WorkflowTemplateNodeExecutionVO> listTemplateNodeExecutions(String templateId, String nodeId, Integer size);
 
     void approveNode(String instanceId, String nodeId, String comment);
 

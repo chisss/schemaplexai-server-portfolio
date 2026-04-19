@@ -2,6 +2,7 @@ package com.schemaplexai.model.vo.workflow;
 
 import lombok.Data;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -12,6 +13,12 @@ public class WorkflowAiArrangeVO {
 
     /** AI建议的工作流定义（ReactFlow 格式） */
     private Map<String, Object> suggestedDefinition;
+
+    /** 建议的节点列表 */
+    private List<Map<String, Object>> nodes;
+
+    /** 建议的连线列表 */
+    private List<Map<String, Object>> edges;
 
     /** AI编排说明 */
     private String explanation;

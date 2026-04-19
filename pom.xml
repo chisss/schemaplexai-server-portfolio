@@ -50,6 +50,7 @@
         <langchain4j.version>1.12.2</langchain4j.version>
         <langchain4j.beta.version>1.12.2-beta22</langchain4j.beta.version>
         <langgraph4j.version>1.6.5</langgraph4j.version>
+        <quickjs4j.version>0.0.6</quickjs4j.version>
     </properties>
 
     <dependencyManagement>
@@ -216,6 +217,13 @@
                 <version>${langgraph4j.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+
+            <!-- QuickJs4j (Wasm 代码沙箱) -->
+            <dependency>
+                <groupId>io.roastedroot</groupId>
+                <artifactId>quickjs4j</artifactId>
+                <version>${quickjs4j.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

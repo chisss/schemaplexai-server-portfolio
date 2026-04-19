@@ -1,7 +1,10 @@
 package com.schemaplexai.service.quality.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.enums.DeviationSeverityEnum;
+import com.schemaplexai.common.enums.QualityIssueTypeEnum;
 import com.schemaplexai.common.enums.TaskStatusEnum;
+import com.schemaplexai.common.enums.TriggerModeEnum;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.CrossReviewMapper;
 import com.schemaplexai.dao.mapper.QualityProfileMapper;
@@ -98,6 +101,7 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
                                         String sourceType,
                                         String sourceAgentId,
                                         String targetContent,
+                                        String referenceContent,
                                         String tenantId) {
         List<String> normalizedModelIds = normalizeModelIds(modelIds);
         if (normalizedModelIds.isEmpty()) {
@@ -127,12 +131,13 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
             crossReviewMapper.insert(entity);
             Spec spec = StringUtils.hasText(specId) ? specMapper.selectById(specId) : null;
             String content = StringUtils.hasText(targetContent) ? targetContent : loadSpecContent(specId);
-            String referenceContent = resolveReferenceContent(issueType, specId);
+            String resolvedReference = StringUtils.hasText(referenceContent)
+                    ? referenceContent : resolveReferenceContent(issueType, specId);
             QualityReviewPolicy reviewPolicy = reviewPolicyService.resolvePolicy(
                     profile, issueType, resolvePolicyTriggerMode(issueType, sourceType)
             );
             String systemPrompt = buildSystemPrompt(reviewPolicy);
-            String userPrompt = buildUserPrompt(spec, issueType, content, referenceContent);
+            String userPrompt = buildUserPrompt(spec, issueType, content, resolvedReference);
             List<ModelReview> reviews = executeReviews(normalizedModelIds, systemPrompt, userPrompt, reviewPolicy);
             Map<String, Object> mergedResult = buildMergedResult(reviews);
 
@@ -195,8 +200,8 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
     private String resolveReviewTargetLabel(boolean marketingSpec, String issueType) {
         if (marketingSpec) {
             return switch (issueType == null ? "" : issueType.toLowerCase(Locale.ROOT)) {
-                case "intent_defect" -> "营销 Spec / 文案需求";
-                case "deviation" -> "营销交付物 / 最终文案";
+                case "intent_defect" -> "营销 Spec / 文案需求";  // QualityIssueTypeEnum.INTENT_DEFECT
+                case "deviation" -> "营销交付物 / 最终文案";      // QualityIssueTypeEnum.DEVIATION
                 default -> "营销交付内容";
             };
         }
@@ -211,7 +216,7 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
         if (marketingSpec) {
             return "交付内容是否完整覆盖目标渠道与必备章节、卖点与目标受众是否匹配、是否存在夸大承诺或不可验证表述、变量与数值是否前后一致、语言本地化是否自然、CTA 与合规风险提示是否清晰，以及是否混入过程稿或非最终交付内容";
         }
-        return "intent_defect".equalsIgnoreCase(issueType)
+        return QualityIssueTypeEnum.INTENT_DEFECT.getCode().equalsIgnoreCase(issueType)
                 ? "结构矛盾、需求歧义、验收标准缺失、约束遗漏与语义冲突"
                 : "结构矛盾、接口契约、验收标准、幂等性、数据一致性、异常处理与可观测性";
     }
@@ -272,7 +277,7 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
                 "模型 " + modelId + " 交叉审查失败",
                 List.of(new QualityEvaluationStrategy.Finding(
                         "omission",
-                        "critical",
+                        DeviationSeverityEnum.CRITICAL.getCode(),
                         100,
                         "qa.infrastructure.model_evaluation_failed",
                         "质量评估模型调用失败",
@@ -422,20 +427,26 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
         if (!StringUtils.hasText(specId)) {
             return null;
         }
-        if ("intent_defect".equalsIgnoreCase(issueType)) {
+        if (QualityIssueTypeEnum.INTENT_DEFECT.getCode().equalsIgnoreCase(issueType)) {
+            // 意图缺陷场景：参照基线 = Spec 描述（用户原始需求）
+            Spec spec = specMapper.selectById(specId);
+            if (spec != null && StringUtils.hasText(spec.getDescription())) {
+                return "【用户需求描述】\n" + spec.getDescription();
+            }
             return null;
         }
+        // 偏离检测场景：参照基线 = Spec 文档内容
         return loadSpecContent(specId);
     }
 
     private String resolvePolicyTriggerMode(String issueType, String sourceType) {
-        if ("manual".equalsIgnoreCase(sourceType)) {
-            return "manual";
+        if (TriggerModeEnum.MANUAL.getCode().equalsIgnoreCase(sourceType)) {
+            return TriggerModeEnum.MANUAL.getCode();
         }
-        if ("intent_defect".equalsIgnoreCase(issueType)) {
-            return "event";
+        if (QualityIssueTypeEnum.INTENT_DEFECT.getCode().equalsIgnoreCase(issueType)) {
+            return TriggerModeEnum.EVENT.getCode();
         }
-        return "agent_execution";
+        return TriggerModeEnum.AGENT_EXECUTION.getCode();
     }
 
     private String resolveTenantId(String tenantId, QualityProfile profile, String specId) {
@@ -603,9 +614,9 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
 
         private int severityRank(String severity) {
             return switch (severity == null ? "" : severity.toLowerCase(Locale.ROOT)) {
-                case "critical" -> 3;
-                case "warning" -> 2;
-                case "info" -> 1;
+                case "critical" -> 3;  // DeviationSeverityEnum.CRITICAL
+                case "warning" -> 2;   // DeviationSeverityEnum.WARNING
+                case "info" -> 1;      // DeviationSeverityEnum.INFO
                 default -> 0;
             };
         }

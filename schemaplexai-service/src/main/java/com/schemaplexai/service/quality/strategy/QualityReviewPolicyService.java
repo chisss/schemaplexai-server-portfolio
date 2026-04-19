@@ -1,6 +1,8 @@
 package com.schemaplexai.service.quality.strategy;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.enums.DeviationSeverityEnum;
+import com.schemaplexai.common.enums.QualityIssueTypeEnum;
 import com.schemaplexai.dao.mapper.QualityRuleMapper;
 import com.schemaplexai.model.entity.QualityProfile;
 import com.schemaplexai.model.entity.QualityRule;
@@ -285,10 +287,10 @@ public class QualityReviewPolicyService {
     }
 
     private List<String> defaultDimensions(String issueType) {
-        if ("intent_defect".equalsIgnoreCase(issueType)) {
+        if (QualityIssueTypeEnum.INTENT_DEFECT.getCode().equalsIgnoreCase(issueType)) {
             return List.of("ambiguity", "contradiction", "omission", "vagueness");
         }
-        if ("deviation".equalsIgnoreCase(issueType)) {
+        if (QualityIssueTypeEnum.DEVIATION.getCode().equalsIgnoreCase(issueType)) {
             return List.of("structural", "semantic", "ambiguity", "contradiction", "omission", "vagueness");
         }
         return List.of("structural", "semantic", "ambiguity", "contradiction", "omission", "vagueness");
@@ -374,18 +376,18 @@ public class QualityReviewPolicyService {
 
     private int severityRank(String severity) {
         return switch (severity == null ? "" : severity.toLowerCase(Locale.ROOT)) {
-            case "critical" -> 3;
-            case "warning" -> 2;
-            case "info" -> 1;
+            case "critical" -> 3;  // DeviationSeverityEnum.CRITICAL
+            case "warning" -> 2;   // DeviationSeverityEnum.WARNING
+            case "info" -> 1;      // DeviationSeverityEnum.INFO
             default -> 0;
         };
     }
 
     private int scoreCeilingForSeverity(String severity) {
         return switch (severity == null ? "" : severity.toLowerCase(Locale.ROOT)) {
-            case "critical" -> 60;
-            case "warning" -> 75;
-            case "info" -> 85;
+            case "critical" -> 60;  // DeviationSeverityEnum.CRITICAL
+            case "warning" -> 75;   // DeviationSeverityEnum.WARNING
+            case "info" -> 85;      // DeviationSeverityEnum.INFO
             default -> 80;
         };
     }

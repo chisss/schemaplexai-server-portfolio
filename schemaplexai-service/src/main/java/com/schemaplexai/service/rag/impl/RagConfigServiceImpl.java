@@ -16,8 +16,14 @@ import com.schemaplexai.model.vo.system.RagOperationLogVO;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.rag.RagConfigService;
 import com.schemaplexai.service.rag.RagRuntimeSettings;
+import com.schemaplexai.service.vector.impl.InProcessEmbeddingServiceImpl.BuiltinEmbeddingModel;
+import com.schemaplexai.service.vector.impl.OnnxScoringServiceImpl;
+import io.milvus.v2.client.MilvusClientV2;
+import io.milvus.v2.service.collection.request.DescribeCollectionReq;
+import io.milvus.v2.service.collection.request.HasCollectionReq;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -26,6 +32,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import static com.schemaplexai.common.util.SecurityUtil.getCurrentTenantId;
 
@@ -43,16 +51,25 @@ public class RagConfigServiceImpl implements RagConfigService {
     private static final int DEFAULT_RETRIEVAL_TOP_K = 5;
     private static final double DEFAULT_RETRIEVAL_MIN_SCORE = 0.6D;
     private static final int DEFAULT_DIMENSION = 1536;
+    private static final int DEFAULT_RERANKER_TOP_N = 5;
+    private static final double DEFAULT_RERANKER_MIN_SCORE = 0.0D;
+    private static final String SOURCE_BUILTIN = "builtin";
+    private static final String SOURCE_API = "api";
+    private static final String VECTOR_FIELD_NAME = "vector";
+    private static final int COLLECTION_NAME_MAX_LENGTH = 64;
 
     private final RagConfigMapper ragConfigMapper;
     private final RagOperationLogMapper ragOperationLogMapper;
     private final AiModelMapper aiModelMapper;
+    private final ObjectProvider<MilvusClientV2> milvusClientProvider;
+    private final ConcurrentMap<String, String> collectionNameCache = new ConcurrentHashMap<>();
 
     @Override
     public RagConfigVO getCurrentTenantConfig() {
         String tenantId = getCurrentTenantId();
         RagConfig config = resolveRagConfig(tenantId);
-        return toVO(config, resolveEmbeddingModel(tenantId, config));
+        AiModel model = isApiEmbedding(config) ? resolveEmbeddingModel(tenantId, config) : null;
+        return toVO(config, model);
     }
 
     @Override
@@ -62,6 +79,12 @@ public class RagConfigServiceImpl implements RagConfigService {
         RagConfig config = resolveRagConfig(tenantId);
         if (request.getEnabled() != null) {
             config.setEnabled(request.getEnabled());
+        }
+        if (request.getEmbeddingSource() != null) {
+            config.setEmbeddingSource(request.getEmbeddingSource());
+        }
+        if (request.getBuiltinEmbeddingModelId() != null) {
+            config.setBuiltinEmbeddingModelId(request.getBuiltinEmbeddingModelId());
         }
         if (request.getVectorModelId() != null) {
             if (StringUtils.hasText(request.getVectorModelId())) {
@@ -94,6 +117,18 @@ public class RagConfigServiceImpl implements RagConfigService {
         if (request.getTextCleaningEnabled() != null) {
             config.setTextCleaningEnabled(request.getTextCleaningEnabled());
         }
+        if (request.getRerankerEnabled() != null) {
+            config.setRerankerEnabled(request.getRerankerEnabled());
+        }
+        if (request.getRerankerSource() != null) {
+            config.setRerankerSource(request.getRerankerSource());
+        }
+        if (request.getRerankerTopN() != null) {
+            config.setRerankerTopN(request.getRerankerTopN());
+        }
+        if (request.getRerankerMinScore() != null) {
+            config.setRerankerMinScore(request.getRerankerMinScore());
+        }
 
         RagConfig existing = ragConfigMapper.selectById(tenantId);
         if (existing == null) {
@@ -102,9 +137,11 @@ public class RagConfigServiceImpl implements RagConfigService {
             config.setUpdatedAt(LocalDateTime.now());
             ragConfigMapper.updateById(config);
         }
+        invalidateCollectionCache(tenantId);
         log.info("更新 RAG 配置成功: tenantId={}", tenantId);
         RagConfig persisted = resolveRagConfig(tenantId);
-        return toVO(persisted, resolveEmbeddingModel(tenantId, persisted));
+        AiModel model = isApiEmbedding(persisted) ? resolveEmbeddingModel(tenantId, persisted) : null;
+        return toVO(persisted, model);
     }
 
     @Override
@@ -119,34 +156,89 @@ public class RagConfigServiceImpl implements RagConfigService {
     @Override
     public RagRuntimeSettings resolveSettings(String tenantId) {
         RagConfig config = resolveRagConfig(tenantId);
-        AiModel model = resolveEmbeddingModel(tenantId, config);
-        if (model == null) {
+        String embeddingSource = normalizeSource(config.getEmbeddingSource());
+        String rerankerSource = normalizeSource(config.getRerankerSource(), SOURCE_BUILTIN);
+
+        // 内置模式
+        if (SOURCE_BUILTIN.equals(embeddingSource)) {
+            BuiltinEmbeddingModel builtinModel = BuiltinEmbeddingModel.fromModelId(config.getBuiltinEmbeddingModelId());
+            String collectionName = resolveRuntimeCollectionName(
+                    tenantId,
+                    config,
+                    SOURCE_BUILTIN,
+                    builtinModel.getModelId(),
+                    builtinModel.getDimension()
+            );
             return RagRuntimeSettings.builder()
                     .tenantId(tenantId)
                     .enabled(Boolean.TRUE.equals(config.getEnabled()))
-                    .collectionName(normalizeCollectionName(config.getCollectionName()))
+                    .embeddingSource(SOURCE_BUILTIN)
+                    .builtinEmbeddingModelId(builtinModel.getModelId())
+                    .collectionName(collectionName)
                     .chunkSize(defaultIfNull(config.getChunkSize(), DEFAULT_CHUNK_SIZE))
                     .chunkOverlap(defaultIfNull(config.getChunkOverlap(), DEFAULT_CHUNK_OVERLAP))
                     .retrievalTopK(defaultIfNull(config.getRetrievalTopK(), DEFAULT_RETRIEVAL_TOP_K))
                     .retrievalMinScore(config.getRetrievalMinScore() != null ? config.getRetrievalMinScore() : DEFAULT_RETRIEVAL_MIN_SCORE)
-                    .embeddingDimension(defaultIfNull(config.getEmbeddingDimension(), DEFAULT_DIMENSION))
+                    .embeddingDimension(builtinModel.getDimension())
                     .maxQuotaTokens(0)
                     .textCleaningEnabled(config.getTextCleaningEnabled() == null || config.getTextCleaningEnabled())
+                    .rerankerEnabled(Boolean.TRUE.equals(config.getRerankerEnabled()))
+                    .rerankerSource(rerankerSource)
+                    .rerankerTopN(defaultIfNull(config.getRerankerTopN(), DEFAULT_RERANKER_TOP_N))
+                    .rerankerMinScore(config.getRerankerMinScore() != null ? config.getRerankerMinScore() : DEFAULT_RERANKER_MIN_SCORE)
+                    .build();
+        }
+
+        // 外部 API 模式
+        AiModel model = resolveEmbeddingModel(tenantId, config);
+        if (model == null) {
+            int embeddingDimension = defaultIfNull(config.getEmbeddingDimension(), DEFAULT_DIMENSION);
+            String collectionName = resolveRuntimeCollectionName(
+                    tenantId,
+                    config,
+                    SOURCE_API,
+                    "default",
+                    embeddingDimension
+            );
+            return RagRuntimeSettings.builder()
+                    .tenantId(tenantId)
+                    .enabled(Boolean.TRUE.equals(config.getEnabled()))
+                    .embeddingSource(SOURCE_API)
+                    .collectionName(collectionName)
+                    .chunkSize(defaultIfNull(config.getChunkSize(), DEFAULT_CHUNK_SIZE))
+                    .chunkOverlap(defaultIfNull(config.getChunkOverlap(), DEFAULT_CHUNK_OVERLAP))
+                    .retrievalTopK(defaultIfNull(config.getRetrievalTopK(), DEFAULT_RETRIEVAL_TOP_K))
+                    .retrievalMinScore(config.getRetrievalMinScore() != null ? config.getRetrievalMinScore() : DEFAULT_RETRIEVAL_MIN_SCORE)
+                    .embeddingDimension(embeddingDimension)
+                    .maxQuotaTokens(0)
+                    .textCleaningEnabled(config.getTextCleaningEnabled() == null || config.getTextCleaningEnabled())
+                    .rerankerEnabled(Boolean.TRUE.equals(config.getRerankerEnabled()))
+                    .rerankerSource(rerankerSource)
+                    .rerankerTopN(defaultIfNull(config.getRerankerTopN(), DEFAULT_RERANKER_TOP_N))
+                    .rerankerMinScore(config.getRerankerMinScore() != null ? config.getRerankerMinScore() : DEFAULT_RERANKER_MIN_SCORE)
                     .build();
         }
 
         AiModelConfig modelConfig = AiModelConfig.from(model);
         int embeddingDimension = resolveDimension(model, config);
+        String collectionName = resolveRuntimeCollectionName(
+                tenantId,
+                config,
+                SOURCE_API,
+                model.getModelId(),
+                embeddingDimension
+        );
         return RagRuntimeSettings.builder()
                 .tenantId(tenantId)
                 .enabled(Boolean.TRUE.equals(config.getEnabled()))
+                .embeddingSource(SOURCE_API)
                 .vectorModelConfigId(model.getId())
                 .vectorModelName(model.getName())
                 .provider(normalizeProvider(model.getProvider()))
                 .modelId(model.getModelId())
                 .apiKey(modelConfig.getApiKey())
                 .baseUrl(modelConfig.getBaseUrl())
-                .collectionName(normalizeCollectionName(config.getCollectionName()))
+                .collectionName(collectionName)
                 .chunkSize(defaultIfNull(config.getChunkSize(), DEFAULT_CHUNK_SIZE))
                 .chunkOverlap(defaultIfNull(config.getChunkOverlap(), DEFAULT_CHUNK_OVERLAP))
                 .retrievalTopK(defaultIfNull(config.getRetrievalTopK(), DEFAULT_RETRIEVAL_TOP_K))
@@ -154,6 +246,10 @@ public class RagConfigServiceImpl implements RagConfigService {
                 .embeddingDimension(embeddingDimension)
                 .maxQuotaTokens(model.getMaxQuotaTokens() != null ? model.getMaxQuotaTokens() : 0)
                 .textCleaningEnabled(config.getTextCleaningEnabled() == null || config.getTextCleaningEnabled())
+                .rerankerEnabled(Boolean.TRUE.equals(config.getRerankerEnabled()))
+                .rerankerSource(rerankerSource)
+                .rerankerTopN(defaultIfNull(config.getRerankerTopN(), DEFAULT_RERANKER_TOP_N))
+                .rerankerMinScore(config.getRerankerMinScore() != null ? config.getRerankerMinScore() : DEFAULT_RERANKER_MIN_SCORE)
                 .build();
     }
 
@@ -169,6 +265,10 @@ public class RagConfigServiceImpl implements RagConfigService {
         }
     }
 
+    private boolean isApiEmbedding(RagConfig config) {
+        return config == null || !SOURCE_BUILTIN.equalsIgnoreCase(config.getEmbeddingSource());
+    }
+
     private RagConfig resolveRagConfig(String tenantId) {
         RagConfig config = null;
         if (StringUtils.hasText(tenantId)) {
@@ -180,12 +280,14 @@ public class RagConfigServiceImpl implements RagConfigService {
         RagConfig defaultConfig = new RagConfig();
         defaultConfig.setTenantId(tenantId);
         defaultConfig.setEnabled(Boolean.TRUE);
+        defaultConfig.setEmbeddingSource(SOURCE_API);
         defaultConfig.setCollectionName(DEFAULT_COLLECTION_NAME);
         defaultConfig.setChunkSize(DEFAULT_CHUNK_SIZE);
         defaultConfig.setChunkOverlap(DEFAULT_CHUNK_OVERLAP);
         defaultConfig.setRetrievalTopK(DEFAULT_RETRIEVAL_TOP_K);
         defaultConfig.setRetrievalMinScore(DEFAULT_RETRIEVAL_MIN_SCORE);
         defaultConfig.setTextCleaningEnabled(Boolean.TRUE);
+        defaultConfig.setRerankerSource(SOURCE_BUILTIN);
         return defaultConfig;
     }
 
@@ -209,22 +311,61 @@ public class RagConfigServiceImpl implements RagConfigService {
         RagConfigVO vo = new RagConfigVO();
         vo.setTenantId(config.getTenantId());
         vo.setEnabled(config.getEnabled() == null || config.getEnabled());
-        vo.setVectorModelId(config.getVectorModelId());
-        vo.setCollectionName(normalizeCollectionName(config.getCollectionName()));
+
+        // 向量模型来源
+        String source = normalizeSource(config.getEmbeddingSource());
+        vo.setEmbeddingSource(source);
+        if (SOURCE_BUILTIN.equals(source)) {
+            BuiltinEmbeddingModel builtinModel = BuiltinEmbeddingModel.fromModelId(config.getBuiltinEmbeddingModelId());
+            vo.setBuiltinEmbeddingModelId(builtinModel.getModelId());
+            vo.setBuiltinEmbeddingModelName(builtinModel.getDescription());
+            vo.setBuiltinEmbeddingDimension(builtinModel.getDimension());
+            vo.setEmbeddingDimension(builtinModel.getDimension());
+            vo.setCollectionName(resolveRuntimeCollectionName(
+                    config.getTenantId(),
+                    config,
+                    SOURCE_BUILTIN,
+                    builtinModel.getModelId(),
+                    builtinModel.getDimension()
+            ));
+        } else {
+            vo.setVectorModelId(config.getVectorModelId());
+            int embeddingDimension = resolveDimension(model, config);
+            vo.setEmbeddingDimension(embeddingDimension);
+            vo.setMaxQuotaTokens(model != null ? model.getMaxQuotaTokens() : null);
+            if (model != null) {
+                vo.setVectorModelId(model.getId());
+                vo.setVectorModelName(model.getName());
+                vo.setProvider(normalizeProvider(model.getProvider()));
+                vo.setModelId(model.getModelId());
+            }
+            vo.setCollectionName(resolveRuntimeCollectionName(
+                    config.getTenantId(),
+                    config,
+                    SOURCE_API,
+                    model != null ? model.getModelId() : "default",
+                    embeddingDimension
+            ));
+        }
+
         vo.setChunkSize(defaultIfNull(config.getChunkSize(), DEFAULT_CHUNK_SIZE));
         vo.setChunkOverlap(defaultIfNull(config.getChunkOverlap(), DEFAULT_CHUNK_OVERLAP));
         vo.setRetrievalTopK(defaultIfNull(config.getRetrievalTopK(), DEFAULT_RETRIEVAL_TOP_K));
         vo.setRetrievalMinScore(config.getRetrievalMinScore() != null ? config.getRetrievalMinScore() : DEFAULT_RETRIEVAL_MIN_SCORE);
-        vo.setEmbeddingDimension(resolveDimension(model, config));
-        vo.setMaxQuotaTokens(model != null ? model.getMaxQuotaTokens() : null);
         vo.setTextCleaningEnabled(config.getTextCleaningEnabled() == null || config.getTextCleaningEnabled());
-        vo.setUpdatedAt(config.getUpdatedAt());
-        if (model != null) {
-            vo.setVectorModelId(model.getId());
-            vo.setVectorModelName(model.getName());
-            vo.setProvider(normalizeProvider(model.getProvider()));
-            vo.setModelId(model.getModelId());
+
+        // Reranker
+        vo.setRerankerEnabled(Boolean.TRUE.equals(config.getRerankerEnabled()));
+        String rSource = normalizeSource(config.getRerankerSource(), SOURCE_BUILTIN);
+        vo.setRerankerSource(rSource);
+        if (SOURCE_BUILTIN.equals(rSource)) {
+            vo.setBuiltinScoringModelId(OnnxScoringServiceImpl.BUILTIN_MODEL_ID);
+            vo.setBuiltinScoringModelName(OnnxScoringServiceImpl.BUILTIN_MODEL_NAME);
         }
+        vo.setRerankerTopN(defaultIfNull(config.getRerankerTopN(), DEFAULT_RERANKER_TOP_N));
+        vo.setRerankerMinScore(config.getRerankerMinScore() != null ? config.getRerankerMinScore() : DEFAULT_RERANKER_MIN_SCORE);
+
+        vo.setUpdatedAt(config.getUpdatedAt());
         return vo;
     }
 
@@ -313,8 +454,98 @@ public class RagConfigServiceImpl implements RagConfigService {
         return StringUtils.hasText(collectionName) ? collectionName.trim() : DEFAULT_COLLECTION_NAME;
     }
 
+    private String resolveRuntimeCollectionName(String tenantId,
+                                                RagConfig config,
+                                                String embeddingSource,
+                                                String modelIdentity,
+                                                int embeddingDimension) {
+        String requestedCollection = normalizeCollectionName(config != null ? config.getCollectionName() : null);
+        String cacheKey = String.join("|",
+                StringUtils.hasText(tenantId) ? tenantId : "default",
+                requestedCollection,
+                StringUtils.hasText(embeddingSource) ? embeddingSource : SOURCE_API,
+                StringUtils.hasText(modelIdentity) ? modelIdentity : "default",
+                String.valueOf(embeddingDimension));
+        return collectionNameCache.computeIfAbsent(cacheKey, ignored -> {
+            Integer actualDimension = resolveExistingCollectionDimension(requestedCollection);
+            if (actualDimension == null || actualDimension == embeddingDimension) {
+                return requestedCollection;
+            }
+            String managedCollection = buildManagedCollectionName(embeddingSource, modelIdentity, embeddingDimension);
+            log.warn("检测到 RAG 集合维度不兼容，自动切换集合: tenantId={}, requestedCollection={}, actualDimension={}, expectedDimension={}, effectiveCollection={}",
+                    tenantId, requestedCollection, actualDimension, embeddingDimension, managedCollection);
+            return managedCollection;
+        });
+    }
+
+    private Integer resolveExistingCollectionDimension(String collectionName) {
+        MilvusClientV2 milvusClient = milvusClientProvider.getIfAvailable();
+        if (milvusClient == null || !StringUtils.hasText(collectionName)) {
+            return null;
+        }
+        try {
+            boolean exists = milvusClient.hasCollection(HasCollectionReq.builder()
+                    .collectionName(collectionName)
+                    .build());
+            if (!exists) {
+                return null;
+            }
+            var response = milvusClient.describeCollection(DescribeCollectionReq.builder()
+                    .collectionName(collectionName)
+                    .build());
+            if (response == null || response.getCollectionSchema() == null) {
+                return null;
+            }
+            var vectorField = response.getCollectionSchema().getField(VECTOR_FIELD_NAME);
+            return vectorField != null ? vectorField.getDimension() : null;
+        } catch (Exception e) {
+            log.warn("读取 RAG 集合维度失败，沿用原集合: collectionName={}, error={}", collectionName, e.getMessage());
+            return null;
+        }
+    }
+
+    private String buildManagedCollectionName(String embeddingSource, String modelIdentity, int embeddingDimension) {
+        String sourceToken = sanitizeCollectionToken(embeddingSource);
+        String modelToken = sanitizeCollectionToken(modelIdentity);
+        String candidate = DEFAULT_COLLECTION_NAME + "_" + sourceToken + "_" + modelToken + "_" + embeddingDimension;
+        if (candidate.length() <= COLLECTION_NAME_MAX_LENGTH) {
+            return candidate;
+        }
+        String compactToken = Integer.toHexString(candidate.hashCode());
+        return DEFAULT_COLLECTION_NAME + "_" + sourceToken + "_" + compactToken + "_" + embeddingDimension;
+    }
+
+    private String sanitizeCollectionToken(String raw) {
+        if (!StringUtils.hasText(raw)) {
+            return "default";
+        }
+        String normalized = raw.trim()
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("_+", "_")
+                .replaceAll("^_|_$", "");
+        return StringUtils.hasText(normalized) ? normalized : "default";
+    }
+
+    private void invalidateCollectionCache(String tenantId) {
+        if (!StringUtils.hasText(tenantId)) {
+            collectionNameCache.clear();
+            return;
+        }
+        String cachePrefix = tenantId + "|";
+        collectionNameCache.keySet().removeIf(key -> key.startsWith(cachePrefix));
+    }
+
     private String normalizeProvider(String provider) {
         return StringUtils.hasText(provider) ? provider.trim().toLowerCase(Locale.ROOT) : "openai";
+    }
+
+    private String normalizeSource(String source) {
+        return normalizeSource(source, SOURCE_API);
+    }
+
+    private String normalizeSource(String source, String defaultSource) {
+        return StringUtils.hasText(source) ? source.trim().toLowerCase(Locale.ROOT) : defaultSource;
     }
 
     private int defaultIfNull(Integer value, int defaultValue) {

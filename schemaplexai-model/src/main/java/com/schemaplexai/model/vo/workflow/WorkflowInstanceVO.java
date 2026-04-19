@@ -16,6 +16,9 @@ public class WorkflowInstanceVO {
 
     private String templateId;
 
+    /** 关联模板名称 */
+    private String templateName;
+
     private String specId;
 
     private String name;
@@ -28,6 +31,12 @@ public class WorkflowInstanceVO {
 
     private Map<String, Object> definition;
 
+    /** 触发类型（从 variables 中提取） */
+    private String triggerType;
+
+    /** 错误信息 */
+    private String errorMessage;
+
     /** 节点执行记录列表 */
     private List<WorkflowNodeExecutionVO> nodeExecutions;
 
@@ -38,4 +47,6 @@ public class WorkflowInstanceVO {
     private String createdBy;
 
     private LocalDateTime createdAt;
+
+    private LocalDateTime updatedAt;
 }

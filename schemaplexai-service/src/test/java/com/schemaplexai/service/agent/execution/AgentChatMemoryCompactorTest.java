@@ -77,6 +77,99 @@ class AgentChatMemoryCompactorTest {
         assertThat(((UserMessage) chatMemory.messages().getFirst()).singleText()).contains("旧事实");
     }
 
+    @Test
+    void shouldKeepCompleteToolExchangeDuringRequestNormalization() {
+        AgentChatMemoryCompactor compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport());
+        InMemoryChatMemory chatMemory = new InMemoryChatMemory(List.of(
+                UserMessage.from("需求上下文"),
+                AiMessage.from(List.of(
+                        ToolExecutionRequest.builder().id("call-1").name("sys.read").arguments("{\"path\":\"a\"}").build(),
+                        ToolExecutionRequest.builder().id("call-2").name("sys.ls").arguments("{\"path\":\"b\"}").build()
+                )),
+                ToolExecutionResultMessage.from("call-1", "sys.read", largeToolResult("recent-a")),
+                ToolExecutionResultMessage.from("call-2", "sys.ls", largeToolResult("recent-b"))
+        ));
+
+        AgentChatMemoryCompactor.NormalizationResult result = compactor.normalizeForRequest(chatMemory);
+
+        assertThat(result.normalized()).isFalse();
+        assertThat(chatMemory.messages()).hasSize(4);
+        assertThat(chatMemory.messages().get(1)).isInstanceOf(AiMessage.class);
+        assertThat(((AiMessage) chatMemory.messages().get(1)).hasToolExecutionRequests()).isTrue();
+        assertThat(chatMemory.messages().subList(2, 4))
+                .allMatch(message -> message instanceof ToolExecutionResultMessage);
+    }
+
+    @Test
+    void shouldConvertIncompleteToolExchangeIntoSummaryBeforeRequest() {
+        AgentChatMemoryCompactor compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport());
+        InMemoryChatMemory chatMemory = new InMemoryChatMemory(List.of(
+                UserMessage.from("需求上下文"),
+                AiMessage.from(List.of(
+                        ToolExecutionRequest.builder().id("call-1").name("sys.read").arguments("{\"path\":\"a\"}").build(),
+                        ToolExecutionRequest.builder().id("call-2").name("sys.read").arguments("{\"path\":\"b\"}").build()
+                )),
+                ToolExecutionResultMessage.from("call-1", "sys.read", largeToolResult("recent-a"))
+        ));
+
+        AgentChatMemoryCompactor.NormalizationResult result = compactor.normalizeForRequest(chatMemory);
+
+        assertThat(result.normalized()).isTrue();
+        assertThat(result.convertedSegments()).isEqualTo(1);
+        assertThat(chatMemory.messages()).hasSize(2);
+        assertThat(chatMemory.messages().get(1)).isInstanceOf(UserMessage.class);
+        assertThat(((UserMessage) chatMemory.messages().get(1)).singleText())
+                .contains("[历史工具摘要]")
+                .contains("sys.read");
+        assertThat(chatMemory.messages())
+                .noneMatch(message -> message instanceof ToolExecutionResultMessage);
+        assertThat(chatMemory.messages())
+                .noneMatch(message -> message instanceof AiMessage aiMessage && aiMessage.hasToolExecutionRequests());
+    }
+
+    @Test
+    void shouldConvertLeadingOrphanToolResultsIntoSummaryBeforeRequest() {
+        AgentChatMemoryCompactor compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport());
+        InMemoryChatMemory chatMemory = new InMemoryChatMemory(List.of(
+                ToolExecutionResultMessage.from("call-1", "sys.read", largeToolResult("orphan-a")),
+                ToolExecutionResultMessage.from("call-2", "sys.ls", largeToolResult("orphan-b")),
+                AiMessage.from("后续正常结论")
+        ));
+
+        AgentChatMemoryCompactor.NormalizationResult result = compactor.normalizeForRequest(chatMemory);
+
+        assertThat(result.normalized()).isTrue();
+        assertThat(result.convertedSegments()).isEqualTo(1);
+        assertThat(chatMemory.messages()).hasSize(2);
+        assertThat(chatMemory.messages().getFirst()).isInstanceOf(UserMessage.class);
+        assertThat(((UserMessage) chatMemory.messages().getFirst()).singleText())
+                .contains("[历史工具摘要]")
+                .contains("sys.read")
+                .contains("sys.ls");
+        assertThat(chatMemory.messages().get(1)).isInstanceOf(AiMessage.class);
+        assertThat(((AiMessage) chatMemory.messages().get(1)).text()).isEqualTo("后续正常结论");
+    }
+
+    @Test
+    void shouldDropEmptyAiMessagesWithoutToolRequestsBeforeRequest() {
+        AgentChatMemoryCompactor compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport());
+        InMemoryChatMemory chatMemory = new InMemoryChatMemory(List.of(
+                UserMessage.from("需求上下文"),
+                AiMessage.from(""),
+                AiMessage.from("   "),
+                AiMessage.from("保留的正常结论")
+        ));
+
+        AgentChatMemoryCompactor.NormalizationResult result = compactor.normalizeForRequest(chatMemory);
+
+        assertThat(result.normalized()).isTrue();
+        assertThat(result.droppedMessages()).isEqualTo(2);
+        assertThat(chatMemory.messages()).hasSize(2);
+        assertThat(chatMemory.messages().getFirst()).isInstanceOf(UserMessage.class);
+        assertThat(chatMemory.messages().get(1)).isInstanceOf(AiMessage.class);
+        assertThat(((AiMessage) chatMemory.messages().get(1)).text()).isEqualTo("保留的正常结论");
+    }
+
     private AiModelConfig buildModelConfig() {
         return AiModelConfig.builder()
                 .modelId("glm-4.7")

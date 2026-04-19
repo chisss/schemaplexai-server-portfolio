@@ -66,7 +66,12 @@ INSERT INTO sf_agent (id, tenant_id, name, agent_type, description, ai_model, ai
      '根据原始数据和审计底稿，自动生成符合监管要求格式的报告，包括季报、年报和专项报告',
      'DEFAULT_MODEL', 'model', 'active', 2, 'manual',
      '["report_writing","regulatory_report","data_summary"]'::jsonb,
-     'finance', NOW(), NOW(), 0)
+     'finance', NOW(), NOW(), 0),
+    (gen_random_uuid(), :tenant_id, '工作流编排助手', 'solo',
+     '结合金融合规、风控和报告场景，自动规划多节点工作流草图，输出可直接编辑的流程结构',
+     'DEFAULT_MODEL', 'model', 'active', 2, 'manual',
+     '["workflow_arrange","flow_planning","risk_process_design"]'::jsonb,
+     'workflow_arrange', NOW(), NOW(), 0)
 ON CONFLICT DO NOTHING;
 
 -- =====================

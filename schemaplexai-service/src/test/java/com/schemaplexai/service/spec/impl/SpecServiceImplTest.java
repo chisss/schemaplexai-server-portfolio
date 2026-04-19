@@ -1,5 +1,6 @@
 package com.schemaplexai.service.spec.impl;
 
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.SpecDocumentMapper;
@@ -12,6 +13,7 @@ import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
 import com.schemaplexai.model.converter.SpecConverter;
 import com.schemaplexai.model.converter.SpecDocumentConverter;
 import com.schemaplexai.model.dto.spec.SpecCreateRequest;
+import com.schemaplexai.model.dto.spec.SpecDocumentSubmitRequest;
 import com.schemaplexai.model.dto.spec.SpecWorkflowStartRequest;
 import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.entity.SpecDocument;
@@ -40,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
@@ -383,6 +386,149 @@ class SpecServiceImplTest {
         assertThat(workbench.getNodes().get(0).getOutputData())
                 .containsEntry("result", "最新任务拆分结果");
         verify(specVersionHandler, never()).getDocument("spec-1", "tasks");
+    }
+
+    @Test
+    void shouldRejectSubmittingWorkbenchDocumentWhenNodeIsNotCurrent() {
+        SpecMapper specMapper = mock(SpecMapper.class);
+        SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);
+        WorkflowInstanceMapper workflowInstanceMapper = mock(WorkflowInstanceMapper.class);
+        WorkflowNodeExecutionMapper workflowNodeExecutionMapper = mock(WorkflowNodeExecutionMapper.class);
+
+        Spec spec = new Spec();
+        spec.setId("spec-1");
+        spec.setLifecycleMode("workflow");
+        spec.setWorkflowInstanceId("wf-1");
+        when(specMapper.selectById("spec-1")).thenReturn(spec);
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-1");
+        instance.setSpecId("spec-1");
+        instance.setCurrentNodeId("node_agent_001");
+        instance.setDefinition(Map.of(
+                "nodes", List.of(Map.of(
+                        "id", "node_doc_001",
+                        "type", "document",
+                        "label", "交付确认",
+                        "config", Map.of("documentType", "delivery_confirmation")
+                ))
+        ));
+        when(workflowInstanceMapper.selectById("wf-1")).thenReturn(instance);
+
+        SpecServiceImpl service = new SpecServiceImpl(
+                specMapper,
+                mock(SpecDocumentMapper.class),
+                mock(SpecVersionMapper.class),
+                mock(SpecConverter.class),
+                mock(SpecDocumentConverter.class),
+                mock(SpecStatusValidator.class),
+                specVersionHandler,
+                new EntityValidator(),
+                mock(UserMapper.class),
+                workflowInstanceMapper,
+                workflowNodeExecutionMapper,
+                mock(WorkflowTemplateMapper.class),
+                mock(WorkflowInstanceService.class),
+                mock(ReviewSessionService.class),
+                mock(WorkflowNodeEngine.class),
+                mock(SpecWorkflowRuntimeService.class),
+                mock(BuiltinQualityAssuranceService.class),
+                mock(RabbitTemplate.class),
+                mock(ArtifactService.class)
+        );
+
+        SpecDocumentSubmitRequest request = new SpecDocumentSubmitRequest();
+        request.setContent("# 交付确认");
+        request.setComment("不应允许提前提交");
+
+        assertThatThrownBy(() -> service.submitWorkbenchDocument("spec-1", "node_doc_001", request))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("当前文档节点不可提交");
+        verify(workflowNodeExecutionMapper, never()).updateById(any(WorkflowNodeExecution.class));
+        verify(specVersionHandler, never()).saveDocument(eq("spec-1"), eq("delivery_confirmation"), eq("node_doc_001"), any());
+    }
+
+    @Test
+    void shouldSubmitWorkbenchDocumentUsingConfiguredDocumentType() {
+        SpecMapper specMapper = mock(SpecMapper.class);
+        SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);
+        WorkflowInstanceMapper workflowInstanceMapper = mock(WorkflowInstanceMapper.class);
+        WorkflowNodeExecutionMapper workflowNodeExecutionMapper = mock(WorkflowNodeExecutionMapper.class);
+        WorkflowNodeEngine workflowNodeEngine = mock(WorkflowNodeEngine.class);
+
+        Spec spec = new Spec();
+        spec.setId("spec-1");
+        spec.setLifecycleMode("workflow");
+        spec.setWorkflowInstanceId("wf-1");
+        when(specMapper.selectById("spec-1")).thenReturn(spec);
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-1");
+        instance.setSpecId("spec-1");
+        instance.setCurrentNodeId("node_doc_001");
+        instance.setVariables(Map.of("existing", "value"));
+        instance.setDefinition(Map.of(
+                "nodes", List.of(Map.of(
+                        "id", "node_doc_001",
+                        "type", "document",
+                        "label", "交付确认",
+                        "config", Map.of("documentType", "delivery_confirmation")
+                ))
+        ));
+        when(workflowInstanceMapper.selectById("wf-1")).thenReturn(instance);
+
+        WorkflowNodeExecution execution = new WorkflowNodeExecution();
+        execution.setId("exec-1");
+        execution.setInstanceId("wf-1");
+        execution.setNodeId("node_doc_001");
+        execution.setStatus("pending");
+        when(workflowNodeExecutionMapper.selectOne(any())).thenReturn(execution);
+
+        SpecDocument document = new SpecDocument();
+        document.setId("doc-1");
+        document.setSpecId("spec-1");
+        document.setDocType("delivery_confirmation");
+        document.setWorkflowNodeId("node_doc_001");
+        document.setVersion(2);
+        when(specVersionHandler.saveDocument(eq("spec-1"), eq("delivery_confirmation"), eq("node_doc_001"), any()))
+                .thenReturn(document);
+
+        SpecServiceImpl service = new SpecServiceImpl(
+                specMapper,
+                mock(SpecDocumentMapper.class),
+                mock(SpecVersionMapper.class),
+                mock(SpecConverter.class),
+                mock(SpecDocumentConverter.class),
+                mock(SpecStatusValidator.class),
+                specVersionHandler,
+                new EntityValidator(),
+                mock(UserMapper.class),
+                workflowInstanceMapper,
+                workflowNodeExecutionMapper,
+                mock(WorkflowTemplateMapper.class),
+                mock(WorkflowInstanceService.class),
+                mock(ReviewSessionService.class),
+                workflowNodeEngine,
+                mock(SpecWorkflowRuntimeService.class),
+                mock(BuiltinQualityAssuranceService.class),
+                mock(RabbitTemplate.class),
+                mock(ArtifactService.class)
+        );
+
+        SpecDocumentSubmitRequest request = new SpecDocumentSubmitRequest();
+        request.setContent("# 交付确认\n\n本轮真实回归已完成。");
+        request.setComment("E2E 自动化回归完成，提交交付确认。");
+
+        service.submitWorkbenchDocument("spec-1", "node_doc_001", request);
+
+        verify(specVersionHandler).saveDocument(eq("spec-1"), eq("delivery_confirmation"), eq("node_doc_001"), any());
+        verify(workflowInstanceMapper).updateById(any(WorkflowInstance.class));
+        ArgumentCaptor<Map<String, Object>> outputCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(workflowNodeEngine).advanceWorkflow(eq("wf-1"), eq("node_doc_001"), outputCaptor.capture());
+        assertThat(outputCaptor.getValue())
+                .containsEntry("documentType", "delivery_confirmation")
+                .containsEntry("documentId", "doc-1")
+                .containsEntry("workflowNodeId", "node_doc_001");
     }
 
     @Test

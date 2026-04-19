@@ -57,3 +57,17 @@ logging:
   level:
     com.schemaplexai: DEBUG
     org.springframework: INFO
+
+# 代码沙箱配置（Wasm 隔离执行）
+schemaplexai:
+  security:
+    aes-key: ${AES_SECRET_KEY:}
+  sandbox:
+    allowed-commands: ${SANDBOX_ALLOWED_COMMANDS:ls,cat,head,tail,grep,find,wc,sort,uniq,diff,echo,pwd,date,whoami}
+    code-exec:
+      enabled: true
+      default-timeout-ms: 5000
+      max-timeout-ms: 30000
+      max-code-length: 50000
+      max-output-length: 24000
+      max-concurrent-executions: 4

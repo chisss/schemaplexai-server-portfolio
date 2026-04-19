@@ -18,8 +18,8 @@ import java.lang.reflect.Field;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -124,10 +124,11 @@ class ContextInjectorTest {
         when(contextCacheService.getAgentPrompt("agent-1")).thenReturn("## 静态指令");
         AgentContextBinding binding = new AgentContextBinding();
         binding.setContextId("ctx-1");
+        binding.setStatus("active");
         when(agentContextBindingMapper.selectList(any())).thenReturn(List.of(binding));
         when(ragContentRetrieverFactory.createRetriever(anyString(), anyCollection()))
                 .thenThrow(new IllegalStateException("RAG retriever unavailable"));
-        when(milvusVectorService.searchSimilarContext("tenant-1", "agent-1", "请继续补齐上下文", 5))
+        when(milvusVectorService.searchSimilarContext("tenant-1", List.of("ctx-1"), "请继续补齐上下文", 5))
                 .thenReturn(List.of("Milvus 命中片段 A", "Milvus 命中片段 B"));
 
         ContextInjector injector = new ContextInjector(
@@ -144,7 +145,7 @@ class ContextInjectorTest {
         assertThat(prompt).contains("## 相关背景知识（语义检索）");
         assertThat(prompt).contains("Milvus 命中片段 A");
         assertThat(prompt).contains("Milvus 命中片段 B");
-        verify(milvusVectorService).searchSimilarContext("tenant-1", "agent-1", "请继续补齐上下文", 5);
+        verify(milvusVectorService).searchSimilarContext("tenant-1", List.of("ctx-1"), "请继续补齐上下文", 5);
     }
 
     private void setField(Object target, String fieldName, Object value) throws Exception {

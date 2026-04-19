@@ -35,4 +35,43 @@ public final class ToolConfigConstant {
             "password", "secret", "token", "api_key", "apikey", "private_key",
             "access_key", "credential", "auth", "cert", "key"
     };
+
+    // ==================== HTTP 工具执行相关 ====================
+
+    /** HTTP 请求方法参数 key（Agent 调用时通过此 key 指定 HTTP 方法） */
+    public static final String HTTP_METHOD_KEY = "_method";
+
+    /** HTTP 响应体最大长度（防止 Agent 上下文爆炸） */
+    public static final int HTTP_RESPONSE_MAX_LENGTH = 8192;
+
+    /** HTTP 响应截断后缀 */
+    public static final String HTTP_RESPONSE_TRUNCATED_SUFFIX = "...[truncated]";
+
+    /** HTTP 请求中禁止注入的危险头名称（小写） */
+    public static final java.util.Set<String> HTTP_FORBIDDEN_HEADERS = java.util.Set.of(
+            "host", "transfer-encoding", "content-length", "connection"
+    );
+
+    // ==================== Skill 配置 key ====================
+
+    /** Skill SCRIPT 类型 — 脚本内容 */
+    public static final String SKILL_CONFIG_SCRIPT_CONTENT = "scriptContent";
+
+    /** Skill SCRIPT 类型 — 脚本语言类型 */
+    public static final String SKILL_CONFIG_SCRIPT_TYPE = "scriptType";
+
+    /** Skill API 类型 — 请求 URL */
+    public static final String SKILL_CONFIG_API_URL = "apiUrl";
+
+    /** Skill API 类型 — 请求方法 */
+    public static final String SKILL_CONFIG_API_METHOD = "method";
+
+    /** Skill API 类型 — 请求头 */
+    public static final String SKILL_CONFIG_API_HEADERS = "headers";
+
+    /** Skill 配置 — 默认参数 */
+    public static final String SKILL_CONFIG_DEFAULT_ARGS = "defaultArgs";
+
+    /** Skill API 类型 — 认证 Token（从 AgentToolConfig 注入） */
+    public static final String SKILL_CONFIG_AUTH_TOKEN = "authToken";
 }

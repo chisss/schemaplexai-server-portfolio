@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -743,6 +744,33 @@ public class GitOperationService {
     }
 
     /**
+     * 检查工作树当前变更，区分“任意改动”与“实现类改动”
+     */
+    public WorkspaceChangeSummary inspectWorkspaceChanges(String worktreePath) throws IOException {
+        String statusOutput = runGitCommand(worktreePath, "git", "status", "--porcelain", "--untracked-files=all");
+        if (!StringUtils.hasText(statusOutput)) {
+            return new WorkspaceChangeSummary(true, List.of(), List.of());
+        }
+
+        List<String> changedFiles = new ArrayList<>();
+        List<String> implementationFiles = new ArrayList<>();
+        for (String line : statusOutput.lines().toList()) {
+            if (!StringUtils.hasText(line)) {
+                continue;
+            }
+            String filePath = extractStatusFilePath(line);
+            if (!StringUtils.hasText(filePath)) {
+                continue;
+            }
+            changedFiles.add(filePath);
+            if (isImplementationEvidencePath(filePath)) {
+                implementationFiles.add(filePath);
+            }
+        }
+        return new WorkspaceChangeSummary(changedFiles.isEmpty(), List.copyOf(changedFiles), List.copyOf(implementationFiles));
+    }
+
+    /**
      * 确保裸仓库存在（若不存在则创建）
      */
     public void ensureBareMirror(String workspaceRoot, String mirrorPath) throws GitAPIException, IOException {
@@ -790,6 +818,74 @@ public class GitOperationService {
         }
     }
 
+    private String extractStatusFilePath(String statusLine) {
+        if (!StringUtils.hasText(statusLine)) {
+            return null;
+        }
+        String normalized = statusLine.length() > 3 ? statusLine.substring(3).trim() : statusLine.trim();
+        int renamedMarker = normalized.indexOf(" -> ");
+        if (renamedMarker >= 0) {
+            normalized = normalized.substring(renamedMarker + 4).trim();
+        }
+        return normalized.replace('\\', '/');
+    }
+
+    private boolean isImplementationEvidencePath(String filePath) {
+        if (!StringUtils.hasText(filePath)) {
+            return false;
+        }
+        String normalized = filePath.trim().replace('\\', '/');
+        String lowerCasePath = normalized.toLowerCase(Locale.ROOT);
+        if (lowerCasePath.startsWith("docs/")) {
+            return false;
+        }
+        if (lowerCasePath.endsWith(".md")
+                || lowerCasePath.endsWith(".txt")
+                || lowerCasePath.endsWith(".png")
+                || lowerCasePath.endsWith(".jpg")
+                || lowerCasePath.endsWith(".jpeg")
+                || lowerCasePath.endsWith(".gif")
+                || lowerCasePath.endsWith(".svg")
+                || lowerCasePath.endsWith(".pdf")) {
+            return false;
+        }
+        return lowerCasePath.endsWith(".java")
+                || lowerCasePath.endsWith(".kt")
+                || lowerCasePath.endsWith(".groovy")
+                || lowerCasePath.endsWith(".xml")
+                || lowerCasePath.endsWith(".sql")
+                || lowerCasePath.endsWith(".yml")
+                || lowerCasePath.endsWith(".yaml")
+                || lowerCasePath.endsWith(".json")
+                || lowerCasePath.endsWith(".properties")
+                || lowerCasePath.endsWith(".js")
+                || lowerCasePath.endsWith(".jsx")
+                || lowerCasePath.endsWith(".ts")
+                || lowerCasePath.endsWith(".tsx")
+                || lowerCasePath.endsWith(".vue")
+                || lowerCasePath.endsWith(".py")
+                || lowerCasePath.endsWith(".rb")
+                || lowerCasePath.endsWith(".go")
+                || lowerCasePath.endsWith(".rs")
+                || lowerCasePath.endsWith(".c")
+                || lowerCasePath.endsWith(".cc")
+                || lowerCasePath.endsWith(".cpp")
+                || lowerCasePath.endsWith(".h")
+                || lowerCasePath.endsWith(".hpp")
+                || lowerCasePath.endsWith(".cs")
+                || lowerCasePath.endsWith(".sh")
+                || lowerCasePath.endsWith(".gradle")
+                || lowerCasePath.endsWith("pom.xml")
+                || lowerCasePath.endsWith("build.gradle")
+                || lowerCasePath.endsWith("build.gradle.kts")
+                || lowerCasePath.endsWith("settings.gradle")
+                || lowerCasePath.endsWith("settings.gradle.kts")
+                || lowerCasePath.endsWith("package.json")
+                || lowerCasePath.endsWith("package-lock.json")
+                || lowerCasePath.endsWith("pnpm-lock.yaml")
+                || lowerCasePath.endsWith("dockerfile");
+    }
+
     /**
      * 执行 git 命令并返回输出内容
      */
@@ -834,6 +930,21 @@ public class GitOperationService {
             return Integer.parseInt(value.trim());
         } catch (NumberFormatException ex) {
             return 0;
+        }
+    }
+
+    public record WorkspaceChangeSummary(
+            boolean clean,
+            List<String> changedFiles,
+            List<String> implementationFiles
+    ) {
+
+        public int totalChangedFiles() {
+            return changedFiles == null ? 0 : changedFiles.size();
+        }
+
+        public int implementationChangedFileCount() {
+            return implementationFiles == null ? 0 : implementationFiles.size();
         }
     }
 }

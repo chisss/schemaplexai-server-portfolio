@@ -40,15 +40,14 @@ import org.bsc.langgraph4j.GraphInput;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.StateGraph;
 import org.bsc.langgraph4j.checkpoint.PostgresSaver;
-import org.postgresql.Driver;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
+import javax.sql.DataSource;
 import java.net.URI;
-import java.sql.DriverManager;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -123,6 +122,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     private final AgentLoopQualityChecker qualityChecker;
     private final com.schemaplexai.service.agent.execution.ExecutionEventStreamService executionEventStreamService;
     private final AgentContextPublisher agentContextPublisher;
+    private final DataSource dataSource;
 
     @Value("${spring.datasource.url:}")
     private String datasourceUrl;
@@ -721,7 +721,6 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     }
 
     private synchronized PostgresSaver buildSaver(StateGraph<TeamGraphState> graphDefinition) throws Exception {
-        DriverManager.registerDriver(new Driver());
         if (!StringUtils.hasText(datasourceUrl) || !datasourceUrl.startsWith(JDBC_POSTGRES_PREFIX)) {
             throw new IllegalStateException("Team Agent 仅支持 PostgreSQL checkpoint，当前数据源配置无效");
         }
@@ -745,7 +744,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     }
 
     private boolean checkpointTablesExist() throws Exception {
-        try (var connection = DriverManager.getConnection(datasourceUrl, datasourceUsername, datasourcePassword);
+        try (var connection = dataSource.getConnection();
              var statement = connection.prepareStatement(CHECKPOINT_TABLE_EXISTS_SQL)) {
             statement.setString(1, CHECKPOINT_THREAD_REGCLASS);
             statement.setString(2, CHECKPOINT_STATE_REGCLASS);

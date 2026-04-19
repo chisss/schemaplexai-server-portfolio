@@ -53,7 +53,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         String traceId = StringUtils.hasText(request.getTraceId())
                 ? request.getTraceId()
                 : UUID.randomUUID().toString().replace("-", "");
-        String tenantId = SecurityUtil.getCurrentTenantId();
+        String tenantId = resolveTenantId(request);
         String content = buildCorpus(request);
 
         List<SecurityMatchedRuleVO> matchedPolicies = matchPolicies(request, tenantId, content);
@@ -84,6 +84,13 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
 
         recordAuditEvent(request, auditContext, result, tenantId, traceId);
         return result;
+    }
+
+    private String resolveTenantId(SecurityRuntimeCheckRequest request) {
+        if (request != null && StringUtils.hasText(request.getTenantId())) {
+            return request.getTenantId().trim();
+        }
+        return SecurityUtil.getCurrentTenantId();
     }
 
     private List<SecurityMatchedRuleVO> matchPolicies(SecurityRuntimeCheckRequest request, String tenantId, String corpus) {

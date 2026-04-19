@@ -230,6 +230,9 @@ public class MessageTemplateServiceImpl implements MessageTemplateService {
         definitions.put(MessageTemplateTypeEnum.APPROVAL_RESULT.getCode(), approvalResultMetadata());
         definitions.put(MessageTemplateTypeEnum.SYSTEM_ALERT.getCode(), systemAlertMetadata());
         definitions.put(MessageTemplateTypeEnum.PROJECT_SYNC_SUMMARY.getCode(), projectSyncSummaryMetadata());
+        definitions.put(MessageTemplateTypeEnum.REVIEW_COMPLETED.getCode(), reviewCompletedMetadata());
+        definitions.put(MessageTemplateTypeEnum.REVIEW_REMIND.getCode(), reviewRemindMetadata());
+        definitions.put(MessageTemplateTypeEnum.REVIEW_ESCALATE.getCode(), reviewEscalateMetadata());
         return definitions;
     }
 
@@ -345,6 +348,44 @@ public class MessageTemplateServiceImpl implements MessageTemplateService {
 - 查看详情：${previewUrl}
 """.trim());
         metadata.setSupportedVariables(baseWorkflowVariables());
+        return metadata;
+    }
+
+    private MessageTemplateMetadataVO reviewCompletedMetadata() {
+        MessageTemplateMetadataVO metadata = new MessageTemplateMetadataVO();
+        metadata.setTemplateType(MessageTemplateTypeEnum.REVIEW_COMPLETED.getCode());
+        metadata.setTemplateName(MessageTemplateTypeEnum.REVIEW_COMPLETED.getDescription());
+        metadata.setDefaultTitleTemplate("评审已完成");
+        metadata.setDefaultContentTemplate("评审会话「${sessionTitle}」已完成，最终决策：${decision}");
+        metadata.setSupportedVariables(List.of(
+                variable("sessionTitle", "评审会话标题", "评审会话的标题", "API 接口设计评审"),
+                variable("decision", "评审决策", "最终评审决策结果", "approved")
+        ));
+        return metadata;
+    }
+
+    private MessageTemplateMetadataVO reviewRemindMetadata() {
+        MessageTemplateMetadataVO metadata = new MessageTemplateMetadataVO();
+        metadata.setTemplateType(MessageTemplateTypeEnum.REVIEW_REMIND.getCode());
+        metadata.setTemplateName(MessageTemplateTypeEnum.REVIEW_REMIND.getDescription());
+        metadata.setDefaultTitleTemplate("评审催办提醒");
+        metadata.setDefaultContentTemplate("评审会话「${sessionTitle}」已超过截止时间，请尽快提交评审意见。");
+        metadata.setSupportedVariables(List.of(
+                variable("sessionTitle", "评审会话标题", "评审会话的标题", "API 接口设计评审"),
+                variable("deadline", "截止时间", "评审截止时间", "2026-04-20 18:00:00")
+        ));
+        return metadata;
+    }
+
+    private MessageTemplateMetadataVO reviewEscalateMetadata() {
+        MessageTemplateMetadataVO metadata = new MessageTemplateMetadataVO();
+        metadata.setTemplateType(MessageTemplateTypeEnum.REVIEW_ESCALATE.getCode());
+        metadata.setTemplateName(MessageTemplateTypeEnum.REVIEW_ESCALATE.getDescription());
+        metadata.setDefaultTitleTemplate("评审超时升级");
+        metadata.setDefaultContentTemplate("评审会话「${sessionTitle}」已超时且未完成，已升级处理。");
+        metadata.setSupportedVariables(List.of(
+                variable("sessionTitle", "评审会话标题", "评审会话的标题", "API 接口设计评审")
+        ));
         return metadata;
     }
 

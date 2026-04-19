@@ -7,6 +7,8 @@ import com.schemaplexai.model.dto.integration.IntegrationUpdateRequest;
 import com.schemaplexai.model.dto.integration.ProjectImportRequest;
 import com.schemaplexai.model.vo.integration.ConnectionTestVO;
 import com.schemaplexai.model.vo.integration.IntegrationProjectVO;
+import com.schemaplexai.model.vo.integration.IntegrationRepositoryTreeNodeVO;
+import com.schemaplexai.model.vo.integration.IntegrationRepositoryVO;
 import com.schemaplexai.model.vo.integration.IntegrationVO;
 import com.schemaplexai.model.vo.integration.WebhookEventVO;
 
@@ -53,4 +55,14 @@ public interface IntegrationService {
      * 获取当前租户下所有已导入的集成项目（跨所有集成）
      */
     List<IntegrationProjectVO> listAllImportedProjects();
+
+    /**
+     * 列出集成下的远端仓库
+     */
+    List<IntegrationRepositoryVO> listRepositories(String integrationId);
+
+    /**
+     * 获取远端仓库文件树
+     */
+    List<IntegrationRepositoryTreeNodeVO> listRepositoryTree(String integrationId, String repositoryId, String ref, String path);
 }

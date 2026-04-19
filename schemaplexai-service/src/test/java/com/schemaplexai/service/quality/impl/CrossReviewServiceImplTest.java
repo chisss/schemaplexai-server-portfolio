@@ -82,6 +82,7 @@ class CrossReviewServiceImplTest {
                 eq("manual"),
                 isNull(),
                 eq("## 最终交付物\n\n这里是干净的营销文案终稿"),
+                isNull(),
                 eq("tenant-1")
         )).thenReturn(entity);
 
@@ -109,6 +110,7 @@ class CrossReviewServiceImplTest {
                 eq("manual"),
                 isNull(),
                 eq("## 最终交付物\n\n这里是干净的营销文案终稿"),
+                isNull(),
                 eq("tenant-1")
         );
     }
@@ -151,6 +153,7 @@ class CrossReviewServiceImplTest {
                 eq("manual"),
                 isNull(),
                 eq("# 营销终稿\n\n这是用户最终需要审查的文案。"),
+                isNull(),
                 eq("tenant-2")
         )).thenReturn(entity);
 
@@ -177,6 +180,7 @@ class CrossReviewServiceImplTest {
                 eq("manual"),
                 isNull(),
                 eq("# 营销终稿\n\n这是用户最终需要审查的文案。"),
+                isNull(),
                 eq("tenant-2")
         );
     }

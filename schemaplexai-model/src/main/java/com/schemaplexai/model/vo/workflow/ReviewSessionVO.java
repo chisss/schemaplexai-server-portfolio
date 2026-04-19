@@ -33,7 +33,7 @@ public class ReviewSessionVO {
 
     private String ownerName;
 
-    /** 评审人列表 [{userId, role, status, submittedAt}] */
+    /** 评审人列表 [{userId, reviewerName, role, status, submittedAt}] */
     private List<Map<String, Object>> reviewers;
 
     private LocalDateTime deadline;
@@ -47,6 +47,15 @@ public class ReviewSessionVO {
     private String reviewActionUrl;
 
     private String messageTemplateId;
+
+    /** 最终审批人ID */
+    private String approverId;
+
+    /** 最终审批人名称 */
+    private String approverName;
+
+    /** 最终审批时间 */
+    private LocalDateTime approverAt;
 
     /** 评审意见列表 */
     private List<ReviewCommentVO> comments;

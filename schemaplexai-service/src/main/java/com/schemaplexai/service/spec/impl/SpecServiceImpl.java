@@ -366,6 +366,7 @@ public class SpecServiceImpl implements SpecService {
         Spec spec = entityValidator.requireExists(specMapper, specId, ResultCode.SPEC_NOT_FOUND);
         requireWorkflowMode(spec);
         WorkflowInstance instance = requireWorkflowInstance(spec);
+        validateCurrentWorkbenchNode(instance, nodeId, "当前文档节点不可提交");
         Map<String, Object> nodeDef = requireNodeDef(instance, nodeId);
         validateDocumentNode(nodeDef, nodeId);
         WorkflowNodeExecution execution = requireNodeExecution(instance.getId(), nodeId);
@@ -822,6 +823,15 @@ public class SpecServiceImpl implements SpecService {
         }
     }
 
+    private void validateCurrentWorkbenchNode(WorkflowInstance instance, String nodeId, String message) {
+        if (instance == null || !StringUtils.hasText(nodeId)) {
+            throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED, message);
+        }
+        if (!StringUtils.hasText(instance.getCurrentNodeId()) || !nodeId.equals(instance.getCurrentNodeId())) {
+            throw new BusinessException(ResultCode.WORKFLOW_STATUS_NOT_ALLOWED, message);
+        }
+    }
+
     private WorkflowNodeExecution requireNodeExecution(String instanceId, String nodeId) {
         WorkflowNodeExecution execution = workflowNodeExecutionMapper.selectOne(
                 new LambdaQueryWrapper<WorkflowNodeExecution>()
@@ -836,8 +846,8 @@ public class SpecServiceImpl implements SpecService {
     }
 
     private String resolveDocumentType(Map<String, Object> nodeDef, String nodeId) {
-        String documentKey = str(getConfig(nodeDef), "documentKey");
-        return StringUtils.hasText(documentKey) ? documentKey : nodeId;
+        String configuredDocumentType = resolveNodeDocumentType(getConfig(nodeDef));
+        return StringUtils.hasText(configuredDocumentType) ? configuredDocumentType : nodeId;
     }
 
     private void appendDocumentVariables(WorkflowInstance instance, String docType, String content) {
@@ -967,7 +977,15 @@ public class SpecServiceImpl implements SpecService {
             return null;
         }
         if (NodeTypeEnum.DOCUMENT.getCode().equals(nodeType)) {
-            return specVersionHandler.getDocumentByNode(specId, nodeId);
+            SpecDocument document = specVersionHandler.getDocumentByNode(specId, nodeId);
+            if (document != null) {
+                return document;
+            }
+            String docType = resolveNodeDocumentType(config);
+            if (StringUtils.hasText(docType)) {
+                return specVersionHandler.getDocument(specId, docType);
+            }
+            return null;
         }
         if (NodeTypeEnum.AGENT.getCode().equals(nodeType)) {
             return resolveAgentWorkbenchDocument(specId, nodeId, config, execution);
@@ -1016,7 +1034,11 @@ public class SpecServiceImpl implements SpecService {
             return artifactDocType;
         }
         String documentKey = str(config, "documentKey");
-        return StringUtils.hasText(documentKey) ? documentKey : null;
+        if (StringUtils.hasText(documentKey)) {
+            return documentKey;
+        }
+        String documentType = str(config, "documentType");
+        return StringUtils.hasText(documentType) ? documentType : null;
     }
 
     private String resolveWorkflowDrivenSpecStatus(WorkflowInstanceVO workflowInstance) {

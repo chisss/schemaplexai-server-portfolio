@@ -51,6 +51,9 @@ public class WorkflowInstance implements Serializable {
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> definition;
 
+    /** Flowable 流程实例ID */
+    private String processInstanceId;
+
     /** 开始时间 */
     private LocalDateTime startedAt;
 

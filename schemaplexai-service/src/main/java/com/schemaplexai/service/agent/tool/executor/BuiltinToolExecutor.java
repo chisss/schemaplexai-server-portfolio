@@ -11,6 +11,9 @@ import com.schemaplexai.service.agent.tool.executor.os.CommandValidator;
 import com.schemaplexai.service.agent.tool.executor.os.ShellCommandAdapter;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.common.model.ToolResult;
+import com.schemaplexai.service.agent.tool.sandbox.CodeExecRequest;
+import com.schemaplexai.service.agent.tool.sandbox.CodeExecResult;
+import com.schemaplexai.service.agent.tool.sandbox.WasmSandboxService;
 import com.schemaplexai.service.tool.security.ToolSecurityValidator;
 import com.schemaplexai.service.workspace.WorkspacePathResolver;
 import okhttp3.HttpUrl;
@@ -20,6 +23,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.util.HtmlUtils;
 
@@ -50,7 +54,8 @@ public class BuiltinToolExecutor implements ToolExecutor {
 
     private static final Set<String> SUPPORTED_CODES = Set.of(
             "sys.read", "sys.write", "sys.edit", "sys.bash", "sys.glob", "sys.grep",
-            "sys.ls", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv", "sys.stat", "web.fetch"
+            "sys.ls", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv", "sys.stat",
+            "web.fetch", "code.exec"
     );
 
     private static final long PROCESS_TIMEOUT_SECONDS = 30;
@@ -95,6 +100,7 @@ public class BuiltinToolExecutor implements ToolExecutor {
     private final SandboxGuard sandboxGuard;
     private final OkHttpClient httpClient;
     private final ToolSecurityValidator toolSecurityValidator;
+    private final WasmSandboxService wasmSandboxService;
 
     @Override
     public String sourceType() {
@@ -131,16 +137,29 @@ public class BuiltinToolExecutor implements ToolExecutor {
 
             Map<String, Object> args = objectMapper.convertValue(toolCall.getArguments(), Map.class);
             if (args == null) {
-                args = Map.of();
+                args = new LinkedHashMap<>();
+            } else {
+                args = new LinkedHashMap<>(args);
             }
+            prepareWorkingDirectory(toolCode, args, sandboxPolicy);
             Map<String, Object> safeArgsForLog = sanitizeArgsForLog(args);
             if ("web.fetch".equals(toolCode)) {
                 return executeWebFetch(tenantId, agentId, toolCall, sandboxPolicy, startAt, args, safeArgsForLog);
+            }
+            if ("code.exec".equals(toolCode)) {
+                return executeCodeExec(tenantId, agentId, toolCall, sandboxPolicy, startAt, args, safeArgsForLog);
             }
             if (!commandValidator.validateToolArguments(toolCode, args)) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
                         SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, "系统工具参数校验失败");
                 return failure(toolCall, "系统工具参数校验失败");
+            }
+            Path workingDirectory = resolveWorkingDirectory(toolCode, args, sandboxPolicy);
+            if (requiresWorkingDirectory(toolCode) && workingDirectory == null) {
+                String error = "系统工具调用缺少 workdir";
+                logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, error);
+                return failure(toolCall, error);
             }
 
             String command = adapter.adaptCommand(toolCode, args);
@@ -152,7 +171,6 @@ public class BuiltinToolExecutor implements ToolExecutor {
             }
 
             ProcessBuilder processBuilder = new ProcessBuilder(adapter.wrapShellCommand(command));
-            Path workingDirectory = resolveWorkingDirectory(args);
             sandboxGuard.validateBuiltinExecution(sandboxPolicy, toolCode, args, workingDirectory, command);
             if (workingDirectory != null) {
                 processBuilder.directory(workingDirectory.toFile());
@@ -304,6 +322,79 @@ public class BuiltinToolExecutor implements ToolExecutor {
                     SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(), ToolExecutionStatusEnum.ERROR.getCode(),
                     startAt, LocalDateTime.now(), safeArgsForLog, null, exception.getMessage());
             return failure(toolCall, "执行失败: " + exception.getMessage());
+        }
+    }
+
+    /**
+     * 在 Wasm 沙箱中执行代码（code.exec）
+     * <p>基于 Chicory + QuickJs4j，代码在 Wasm 双重隔离环境中运行，
+     * 无法访问文件系统、网络或操作系统资源。
+     */
+    private ToolResult executeCodeExec(String tenantId,
+                                       String agentId,
+                                       ToolCall toolCall,
+                                       SandboxPolicy sandboxPolicy,
+                                       LocalDateTime startAt,
+                                       Map<String, Object> args,
+                                       Map<String, Object> safeArgsForLog) {
+        try {
+            String language = asString(args.get("language"));
+            String code = asString(args.get("code"));
+            int timeout = 0;
+            Object timeoutArg = args.get("timeout");
+            if (timeoutArg instanceof Number) {
+                timeout = ((Number) timeoutArg).intValue();
+            }
+
+            if (!StringUtils.hasText(code)) {
+                logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                        SourceTypeEnum.BUILTIN.getCode(), "code.exec", ToolExecutionStatusEnum.FAILED.getCode(),
+                        startAt, LocalDateTime.now(), safeArgsForLog, null, "代码参数不能为空");
+                return failure(toolCall, "代码参数不能为空");
+            }
+
+            // 沙箱策略校验
+            sandboxGuard.validateBuiltinExecution(sandboxPolicy, "code.exec", args, null, null);
+
+            // 构建并执行
+            CodeExecRequest request = CodeExecRequest.builder()
+                    .language(StringUtils.hasText(language) ? language : "javascript")
+                    .code(code)
+                    .timeoutMs(timeout)
+                    .build();
+
+            CodeExecResult execResult = wasmSandboxService.execute(request);
+            LocalDateTime endAt = LocalDateTime.now();
+
+            // 构建返回结果
+            Map<String, Object> resultMap = new LinkedHashMap<>();
+            resultMap.put("stdout", execResult.getStdout());
+            resultMap.put("stderr", execResult.getStderr());
+            resultMap.put("exitCode", execResult.getExitCode());
+            resultMap.put("executionMs", execResult.getExecutionMs());
+            resultMap.put("language", execResult.getLanguage());
+
+            boolean success = execResult.getExitCode() == 0;
+            String status = success ? ToolExecutionStatusEnum.SUCCESS.getCode() : ToolExecutionStatusEnum.FAILED.getCode();
+            String errorMsg = success ? null : execResult.getStderr();
+
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), "code.exec", status,
+                    startAt, endAt, safeArgsForLog, resultMap, errorMsg);
+
+            return ToolResult.builder()
+                    .callId(toolCall.getCallId())
+                    .toolCode("code.exec")
+                    .success(success)
+                    .result(objectMapper.valueToTree(resultMap))
+                    .errorMessage(errorMsg)
+                    .build();
+        } catch (Exception exception) {
+            log.error("代码沙箱执行异常: {}", exception.getMessage());
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), "code.exec", ToolExecutionStatusEnum.ERROR.getCode(),
+                    startAt, LocalDateTime.now(), safeArgsForLog, null, exception.getMessage());
+            return failure(toolCall, "代码执行失败: " + exception.getMessage());
         }
     }
 
@@ -536,11 +627,31 @@ public class BuiltinToolExecutor implements ToolExecutor {
         if (copy.containsKey("command")) {
             copy.put("command", "[REDACTED]");
         }
+        // code.exec 的代码字段截断（避免日志过大）
+        if (copy.containsKey("code") && copy.get("code") instanceof String codeStr && codeStr.length() > 200) {
+            copy.put("code", codeStr.substring(0, 200) + "...[截断]");
+        }
         return copy;
     }
 
-    private Path resolveWorkingDirectory(Map<String, Object> args) {
-        if (args == null || !args.containsKey("workdir")) {
+    private void prepareWorkingDirectory(String toolCode, Map<String, Object> args, SandboxPolicy sandboxPolicy) {
+        if (!requiresWorkingDirectory(toolCode) || args == null || sandboxPolicy == null) {
+            return;
+        }
+        String workdir = asString(args.get("workdir"));
+        if (!StringUtils.hasText(workdir)) {
+            Path defaultWorkingDirectory = sandboxPolicy.getDefaultWorkingDirectory();
+            if (defaultWorkingDirectory != null) {
+                args.put("workdir", defaultWorkingDirectory.toString());
+            }
+            return;
+        }
+        Path translated = translateWorkspaceAlias(Path.of(workdir).toAbsolutePath().normalize(), sandboxPolicy);
+        args.put("workdir", translated.toString());
+    }
+
+    private Path resolveWorkingDirectory(String toolCode, Map<String, Object> args, SandboxPolicy sandboxPolicy) {
+        if (!requiresWorkingDirectory(toolCode) || args == null || !args.containsKey("workdir")) {
             return null;
         }
         String workdir = String.valueOf(args.get("workdir")).trim();
@@ -548,11 +659,35 @@ public class BuiltinToolExecutor implements ToolExecutor {
             return null;
         }
         Path normalized = Path.of(workdir).toAbsolutePath().normalize();
-        Path currentProjectRoot = Path.of("").toAbsolutePath().normalize();
-        if (normalized.startsWith(currentProjectRoot)) {
-            return normalized;
+        Path translated = translateWorkspaceAlias(normalized, sandboxPolicy);
+        return workspacePathResolver.validateWithinWorkspaceRoot(translated);
+    }
+
+    private Path translateWorkspaceAlias(Path requestedPath, SandboxPolicy sandboxPolicy) {
+        if (requestedPath == null || sandboxPolicy == null || sandboxPolicy.getDefaultWorkingDirectory() == null) {
+            return requestedPath;
         }
-        return workspacePathResolver.validateWithinWorkspaceRoot(normalized);
+        Set<Path> aliases = sandboxPolicy.getWorkspacePathAliases();
+        if (CollectionUtils.isEmpty(aliases)) {
+            return requestedPath;
+        }
+        Path normalizedRequested = requestedPath.toAbsolutePath().normalize();
+        for (Path alias : aliases) {
+            if (alias == null) {
+                continue;
+            }
+            Path normalizedAlias = alias.toAbsolutePath().normalize();
+            if (!normalizedRequested.startsWith(normalizedAlias)) {
+                continue;
+            }
+            Path relativePath = normalizedAlias.relativize(normalizedRequested);
+            return sandboxPolicy.getDefaultWorkingDirectory().resolve(relativePath).normalize();
+        }
+        return requestedPath;
+    }
+
+    private boolean requiresWorkingDirectory(String toolCode) {
+        return StringUtils.hasText(toolCode) && toolCode.startsWith("sys.");
     }
 
     private ToolResult failure(ToolCall toolCall, String message) {

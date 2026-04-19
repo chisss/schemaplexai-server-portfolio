@@ -50,6 +50,14 @@ milvus:
   host: ${MILVUS_HOST:localhost}
   port: ${MILVUS_PORT:19530}
 
+# ONNX 向量评分模型（Reranker）
+ai:
+  scoring:
+    enabled: ${SCORING_ENABLED:false}
+    model-path: ${SCORING_MODEL_PATH:}
+    tokenizer-path: ${SCORING_TOKENIZER_PATH:}
+    min-score: ${SCORING_MIN_SCORE:0.0}
+
 # ClickHouse
 clickhouse:
   url: jdbc:clickhouse://${CLICKHOUSE_HOST:localhost}:${CLICKHOUSE_PORT:8123}/${CLICKHOUSE_DB:schemaplexai}

@@ -1,5 +1,8 @@
 package com.schemaplexai.service.quality.task;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.enums.TaskStatusEnum;
 import com.schemaplexai.dao.mapper.QualityTaskMapper;
 import com.schemaplexai.model.entity.QualityTask;
@@ -103,5 +106,16 @@ public class QualityTaskManager {
     public String getStatus(String taskId) {
         QualityTask task = qualityTaskMapper.selectById(taskId);
         return task == null ? "unknown" : task.getStatus();
+    }
+
+    public PageResult<QualityTask> pageTasks(String tenantId, Integer page, Integer size) {
+        long current = page == null || page < 1 ? 1L : page;
+        long pageSize = size == null || size < 1 ? 20L : size;
+        Page<QualityTask> pageParam = new Page<>(current, pageSize);
+        LambdaQueryWrapper<QualityTask> wrapper = new LambdaQueryWrapper<QualityTask>()
+                .eq(StringUtils.hasText(tenantId), QualityTask::getTenantId, tenantId)
+                .orderByDesc(QualityTask::getCreatedAt);
+        Page<QualityTask> result = qualityTaskMapper.selectPage(pageParam, wrapper);
+        return new PageResult<>(result.getRecords(), result.getTotal(), result.getCurrent(), result.getSize());
     }
 }

@@ -6,6 +6,7 @@ import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.ModelProviderEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.AesEncryptUtil;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.AiModelRouteMapper;
@@ -22,6 +23,7 @@ import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.config.SystemConfigService;
+import com.schemaplexai.service.event.AiModelConfigChangedEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.MediaType;
@@ -29,6 +31,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -37,7 +40,6 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
-import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -59,6 +61,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     private final AiModelRouteMapper aiModelRouteMapper;
     private final TeamTemplateMapper teamTemplateMapper;
     private final EntityValidator entityValidator;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     private static final String CONNECTIVITY_PROMPT = "Reply with exactly: CONNECTIVITY_OK";
     private static final String EMBEDDING_CONNECTIVITY_INPUT = "SchemaPlexAI embedding connectivity check";
@@ -106,9 +109,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         model.setProviderCode(request.getProviderCode());
         model.setUseCase(request.getUseCase());
         model.setModelId(request.getModelId());
-        // apiKey 使用 Base64 编码存储（后续替换为加密）
-        model.setApiKeyEncrypted(Base64.getEncoder().encodeToString(
-                request.getApiKey().getBytes()));
+        model.setApiKeyEncrypted(AesEncryptUtil.encrypt(request.getApiKey()));
         model.setBaseUrl(request.getBaseUrl());
         model.setDefaultParams(request.getDefaultParams());
         model.setInputPrice(request.getInputPrice());
@@ -126,6 +127,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         model.setStatus(CommonConstant.STATUS_ACTIVE);
 
         aiModelMapper.insert(model);
+        applicationEventPublisher.publishEvent(new AiModelConfigChangedEvent(model.getId()));
         log.info("创建AI模型成功: modelId={}, name={}", model.getId(), model.getName());
         return model;
     }
@@ -165,8 +167,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         }
         // apiKey 不传则不更新
         if (StringUtils.hasText(request.getApiKey())) {
-            updateEntity.setApiKeyEncrypted(Base64.getEncoder().encodeToString(
-                    request.getApiKey().getBytes()));
+            updateEntity.setApiKeyEncrypted(AesEncryptUtil.encrypt(request.getApiKey()));
         }
         if (request.getBaseUrl() != null) {
             updateEntity.setBaseUrl(request.getBaseUrl());
@@ -200,6 +201,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         }
 
         aiModelMapper.updateById(updateEntity);
+        applicationEventPublisher.publishEvent(new AiModelConfigChangedEvent(id));
         log.info("更新AI模型成功: modelId={}", id);
         return aiModelMapper.selectById(id);
     }
@@ -209,6 +211,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     public void deleteAiModel(String id) {
         entityValidator.requireExists(aiModelMapper, id, ResultCode.CONFIG_NOT_FOUND);
         aiModelMapper.deleteById(id);
+        applicationEventPublisher.publishEvent(new AiModelConfigChangedEvent(id));
         log.info("删除AI模型成功: modelId={}", id);
     }
 
@@ -665,7 +668,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
 
     private String decodeApiKey(String encoded) {
         if (!StringUtils.hasText(encoded)) return "";
-        return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        return AesEncryptUtil.decrypt(encoded);
     }
 
     private String trimError(String msg) {

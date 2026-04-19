@@ -12,7 +12,8 @@ public enum SourceTypeEnum {
 
     BUILTIN("builtin", "内置系统工具"),
     MCP("mcp", "MCP 协议工具"),
-    SKILL("skill", "Skill 工具");
+    SKILL("skill", "Skill 工具"),
+    API_GATEWAY("api_gateway", "API 网关工具");
 
     private final String code;
     private final String description;

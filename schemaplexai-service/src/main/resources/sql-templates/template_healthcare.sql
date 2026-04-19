@@ -49,7 +49,12 @@ INSERT INTO sf_agent (id, tenant_id, name, agent_type, description, ai_model, ai
      '辅助医生完成结构化临床文档，包括出院小结、手术记录和会诊意见的规范化整理',
      'DEFAULT_MODEL', 'model', 'active', 3, 'manual',
      '["clinical_documentation","discharge_summary","structured_record"]'::jsonb,
-     'healthcare', NOW(), NOW(), 0)
+     'healthcare', NOW(), NOW(), 0),
+    (gen_random_uuid(), :tenant_id, '工作流编排助手', 'solo',
+     '围绕病历质控、临床文档整理和医疗协同场景，自动生成可编辑的工作流编排草图',
+     'DEFAULT_MODEL', 'model', 'active', 2, 'manual',
+     '["workflow_arrange","flow_planning","clinical_process_design"]'::jsonb,
+     'workflow_arrange', NOW(), NOW(), 0)
 ON CONFLICT DO NOTHING;
 
 -- =====================

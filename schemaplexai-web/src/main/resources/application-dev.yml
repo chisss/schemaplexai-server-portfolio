@@ -67,6 +67,14 @@ milvus:
   port: 19530
   enabled: true   # 设为 false 可完全禁用 Milvus，系统自动降级
 
+# ONNX 向量评分模型（Reranker）
+ai:
+  scoring:
+    enabled: false
+    model-path: ${SCORING_MODEL_PATH:}
+    tokenizer-path: ${SCORING_TOKENIZER_PATH:}
+    min-score: 0.0
+
 # ClickHouse 分析数据库
 clickhouse:
   url: jdbc:clickhouse://localhost:8123/schemaplexai

@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.constant.ToolConfigConstant;
+import com.schemaplexai.common.enums.HttpMethodEnum;
 import com.schemaplexai.common.enums.McpServerStatusEnum;
 import com.schemaplexai.common.enums.SkillImplementationTypeEnum;
 import com.schemaplexai.common.enums.SkillStatusEnum;
@@ -24,6 +26,7 @@ import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import lombok.RequiredArgsConstructor;
+import okhttp3.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -48,6 +51,7 @@ public class SkillToolExecutor implements ToolExecutor {
     private final ObjectMapper objectMapper;
     private final ToolExecutionLogService logService;
     private final List<BuiltinSkillExecutor> builtinExecutors;
+    private final OkHttpClient okHttpClient;
 
     @Override
     public String sourceType() {
@@ -102,7 +106,8 @@ public class SkillToolExecutor implements ToolExecutor {
             ToolResult result = switch (typeEnum) {
                 case MCP -> executeMcpSkill(tenantId, skill, toolCall, implementation);
                 case BUILTIN -> executeBuiltinSkill(tenantId, agentId, skill, toolCall, implementation, binding.getId());
-                case SCRIPT, API -> failure(toolCall, "Skill 执行类型暂未接入: " + implementationType);
+                case SCRIPT -> executeScriptSkill(skill, toolCall, implementation);
+                case API -> executeApiSkill(tenantId, agentId, skill, toolCall, implementation, binding);
             };
 
             LocalDateTime endAt = LocalDateTime.now();
@@ -228,6 +233,142 @@ public class SkillToolExecutor implements ToolExecutor {
             }
         }
         return null;
+    }
+
+    /**
+     * SCRIPT 类型 Skill 执行
+     * <p>
+     * implementation 中需包含 "script"（脚本内容）和可选的 "language"（默认 javascript）。
+     * 当前仅支持 JavaScript（Nashorn/GraalJS），其他语言返回不支持提示。
+     * </p>
+     */
+    private ToolResult executeScriptSkill(Skill skill, ToolCall toolCall, Map<String, Object> implementation) {
+        String script = firstText(implementation, "script", "scriptContent", "code");
+        if (!StringUtils.hasText(script)) {
+            return failure(toolCall, "SCRIPT Skill 缺少 script 内容");
+        }
+        String language = firstText(implementation, "language", "lang");
+        if (!StringUtils.hasText(language)) {
+            language = "javascript";
+        }
+
+        if (!"javascript".equalsIgnoreCase(language) && !"js".equalsIgnoreCase(language)) {
+            return failure(toolCall, "SCRIPT Skill 暂不支持语言: " + language);
+        }
+
+        try {
+            javax.script.ScriptEngineManager manager = new javax.script.ScriptEngineManager();
+            javax.script.ScriptEngine engine = manager.getEngineByName("js");
+            if (engine == null) {
+                engine = manager.getEngineByName("nashorn");
+            }
+            if (engine == null) {
+                return failure(toolCall, "当前 JVM 不支持 JavaScript 脚本引擎");
+            }
+
+            // 注入调用参数
+            Map<String, Object> args = convertArguments(toolCall != null ? toolCall.getArguments() : null);
+            engine.put("args", args);
+            engine.put("skillName", skill.getName());
+
+            Object result = engine.eval(script);
+            return success(toolCall, Map.of("output", result != null ? result.toString() : "null"));
+        } catch (Exception e) {
+            log.error("SCRIPT Skill 执行异常: skillId={}", skill.getId(), e);
+            return failure(toolCall, "脚本执行失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * API 类型 Skill 执行
+     * <p>
+     * implementation 中需包含 "url"，可选 "method"（默认 POST）、"headers"。
+     * 使用 OkHttpClient 发起 HTTP 请求。
+     * </p>
+     */
+    private ToolResult executeApiSkill(String tenantId, String agentId, Skill skill, ToolCall toolCall,
+                                       Map<String, Object> implementation, AgentToolBinding binding) {
+        String url = firstText(implementation, "url", "apiUrl", "endpoint");
+        if (!StringUtils.hasText(url)) {
+            return failure(toolCall, "API Skill 缺少 url 配置");
+        }
+
+        String methodStr = firstText(implementation, "method", "httpMethod");
+        HttpMethodEnum method = HttpMethodEnum.fromCode(methodStr);
+
+        Map<String, Object> args = convertArguments(toolCall != null ? toolCall.getArguments() : null);
+
+        // 合并默认参数
+        Map<String, Object> mergedArgs = new LinkedHashMap<>();
+        Object defaultArgs = implementation.get("defaultArgs");
+        if (defaultArgs instanceof Map<?, ?> defaultArgMap) {
+            for (Map.Entry<?, ?> entry : defaultArgMap.entrySet()) {
+                mergedArgs.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+        }
+        mergedArgs.putAll(args);
+
+        try {
+            Request.Builder requestBuilder = new Request.Builder();
+
+            // 注入请求头
+            Object headersObj = implementation.get("headers");
+            if (headersObj instanceof Map<?, ?> headersMap) {
+                for (Map.Entry<?, ?> entry : headersMap.entrySet()) {
+                    if (entry.getValue() != null) {
+                        requestBuilder.header(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+                    }
+                }
+            }
+            requestBuilder.header("Content-Type", "application/json");
+
+            switch (method) {
+                case GET -> {
+                    HttpUrl parsedUrl = HttpUrl.parse(url);
+                    if (parsedUrl == null) {
+                        return failure(toolCall, "URL 格式非法: " + url);
+                    }
+                    HttpUrl.Builder urlBuilder = parsedUrl.newBuilder();
+                    mergedArgs.forEach((k, v) -> urlBuilder.addQueryParameter(k, String.valueOf(v)));
+                    requestBuilder.url(urlBuilder.build()).get();
+                }
+                case DELETE -> requestBuilder.url(url).delete();
+                case PUT -> requestBuilder.url(url).put(buildJsonBody(mergedArgs));
+                case PATCH -> requestBuilder.url(url).patch(buildJsonBody(mergedArgs));
+                default -> requestBuilder.url(url).post(buildJsonBody(mergedArgs));
+            }
+
+            try (okhttp3.Response response = okHttpClient.newCall(requestBuilder.build()).execute()) {
+                int statusCode = response.code();
+                String responseBody = response.body() != null ? response.body().string() : "";
+
+                if (responseBody.length() > ToolConfigConstant.HTTP_RESPONSE_MAX_LENGTH) {
+                    responseBody = responseBody.substring(0, ToolConfigConstant.HTTP_RESPONSE_MAX_LENGTH)
+                            + ToolConfigConstant.HTTP_RESPONSE_TRUNCATED_SUFFIX;
+                }
+
+                Object parsedBody;
+                try {
+                    parsedBody = objectMapper.readValue(responseBody, Object.class);
+                } catch (Exception e) {
+                    parsedBody = responseBody;
+                }
+
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("statusCode", statusCode);
+                result.put("body", parsedBody);
+                result.put("success", statusCode >= 200 && statusCode < 300);
+                return success(toolCall, result);
+            }
+        } catch (Exception e) {
+            log.error("API Skill 执行异常: skillId={}, url={}", skill.getId(), url, e);
+            return failure(toolCall, "API 调用失败: " + e.getMessage());
+        }
+    }
+
+    private RequestBody buildJsonBody(Map<String, Object> params) throws Exception {
+        byte[] json = objectMapper.writeValueAsBytes(params);
+        return RequestBody.create(json, MediaType.parse("application/json"));
     }
 
     private Map<String, Object> convertArguments(JsonNode argumentsNode) {

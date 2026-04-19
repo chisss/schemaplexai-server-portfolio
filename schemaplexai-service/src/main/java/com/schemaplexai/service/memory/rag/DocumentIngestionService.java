@@ -7,6 +7,7 @@ import com.schemaplexai.model.entity.RagOperationLog;
 import com.schemaplexai.service.rag.EmbeddingQuotaGuard;
 import com.schemaplexai.service.rag.RagConfigService;
 import com.schemaplexai.service.rag.RagRuntimeSettings;
+import com.schemaplexai.service.storage.DocumentStorageService;
 import com.schemaplexai.service.vector.EmbeddingService;
 import com.schemaplexai.service.vector.EmbeddingTokenEstimator;
 import dev.langchain4j.data.document.Document;
@@ -45,18 +46,21 @@ public class DocumentIngestionService {
     private final EmbeddingQuotaGuard embeddingQuotaGuard;
     private final EmbeddingService embeddingService;
     private final KnowledgeDocumentMapper documentMapper;
+    private final DocumentStorageService documentStorageService;
 
     public DocumentIngestionService(
             @Autowired(required = false) RagMilvusStoreFactory ragMilvusStoreFactory,
             RagConfigService ragConfigService,
             EmbeddingQuotaGuard embeddingQuotaGuard,
             EmbeddingService embeddingService,
-            KnowledgeDocumentMapper documentMapper) {
+            KnowledgeDocumentMapper documentMapper,
+            DocumentStorageService documentStorageService) {
         this.ragMilvusStoreFactory = ragMilvusStoreFactory;
         this.ragConfigService = ragConfigService;
         this.embeddingQuotaGuard = embeddingQuotaGuard;
         this.embeddingService = embeddingService;
         this.documentMapper = documentMapper;
+        this.documentStorageService = documentStorageService;
     }
 
     @lombok.Getter
@@ -90,10 +94,23 @@ public class DocumentIngestionService {
     }
 
     /**
-     * 执行文档摄入管线
+     * 执行文档摄入管线。
+     *
+     * <p>从 MinIO 加载文件 → 解析 → 清洗 → 分块 → 向量化 → 写入 Milvus。
+     *
+     * @param documentId 文档 ID（从 DB 查询 bucket/objectKey/tenantId/contextId）
      */
-    public void ingestDocument(String documentId, String tenantId, String contextId,
-                               InputStream fileStream, String fileName) {
+    public void ingestDocument(String documentId) {
+        KnowledgeDocument doc = documentMapper.selectById(documentId);
+        if (doc == null) {
+            log.warn("文档不存在，跳过摄入: documentId={}", documentId);
+            return;
+        }
+
+        String tenantId = doc.getTenantId();
+        String contextId = doc.getContextId();
+        String fileName = doc.getFileName();
+
         RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
         EmbeddingStore<TextSegment> embeddingStore = resolveStore(tenantId);
         if (!settings.isEnabled() || embeddingStore == null) {
@@ -108,7 +125,7 @@ public class DocumentIngestionService {
         updateDocumentStatus(documentId, "processing", null, 0, 0, settings.getModelId());
         long startMs = System.currentTimeMillis();
 
-        try {
+        try (InputStream fileStream = documentStorageService.getObject(doc.getBucket(), doc.getObjectKey())) {
             ApacheTikaDocumentParser parser = new ApacheTikaDocumentParser();
             Document document = parser.parse(fileStream);
             log.info("文档解析完成: documentId={}, fileName={}, 原始长度={}",

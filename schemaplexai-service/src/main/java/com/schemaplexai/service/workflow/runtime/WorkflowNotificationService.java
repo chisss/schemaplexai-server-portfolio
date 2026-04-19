@@ -186,15 +186,18 @@ public class WorkflowNotificationService {
     }
 
     public String buildSpecReviewActionPath(String specId, String instanceId, String nodeId, String sessionId) {
-        StringBuilder builder = new StringBuilder("/spec/")
-                .append(specId)
-                .append("/edit?instanceId=")
-                .append(instanceId)
-                .append("&nodeId=")
-                .append(nodeId)
-                .append("&mode=review");
+        StringBuilder builder = new StringBuilder("/approval-center?type=workflow_review");
         if (StringUtils.hasText(sessionId)) {
-            builder.append("&sessionId=").append(sessionId);
+            builder.append("&id=").append(sessionId);
+        }
+        if (StringUtils.hasText(specId)) {
+            builder.append("&specId=").append(specId);
+        }
+        if (StringUtils.hasText(instanceId)) {
+            builder.append("&instanceId=").append(instanceId);
+        }
+        if (StringUtils.hasText(nodeId)) {
+            builder.append("&nodeId=").append(nodeId);
         }
         return builder.toString();
     }

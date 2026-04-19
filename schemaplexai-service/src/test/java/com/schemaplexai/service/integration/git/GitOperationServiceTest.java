@@ -95,6 +95,42 @@ class GitOperationServiceTest {
         assertThat(run(worktree, "git", "ls-files", "docs/output.md")).isEqualTo("docs/output.md");
     }
 
+    @Test
+    void inspectWorkspaceChangesShouldSeparateImplementationFilesFromDocs() throws Exception {
+        Assumptions.assumeTrue(isGitAvailable(), "git 命令不可用，跳过工作树变更检测测试");
+
+        Path repo = tempDir.resolve("status-source");
+        run(tempDir, "git", "init", "--initial-branch=main", repo.toString());
+        Files.createDirectories(repo.resolve("src/main/java/com/example"));
+        Files.writeString(repo.resolve("src/main/java/com/example/App.java"), "class App {}\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("README.md"), "# demo\n", StandardCharsets.UTF_8);
+        run(repo, "git", "add", "src/main/java/com/example/App.java", "README.md");
+        run(
+                repo,
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init"
+        );
+
+        Files.writeString(repo.resolve("src/main/java/com/example/App.java"), "class App { void run() {} }\n", StandardCharsets.UTF_8);
+        Files.createDirectories(repo.resolve("docs"));
+        Files.writeString(repo.resolve("docs/output.md"), "# artifact\n", StandardCharsets.UTF_8);
+
+        GitOperationService service = new GitOperationService();
+        GitOperationService.WorkspaceChangeSummary summary = service.inspectWorkspaceChanges(repo.toString());
+
+        assertThat(summary.clean()).isFalse();
+        assertThat(summary.changedFiles()).contains("src/main/java/com/example/App.java", "docs/output.md");
+        assertThat(summary.implementationFiles()).containsExactly("src/main/java/com/example/App.java");
+        assertThat(summary.totalChangedFiles()).isEqualTo(2);
+        assertThat(summary.implementationChangedFileCount()).isEqualTo(1);
+    }
+
     private boolean isGitAvailable() {
         try {
             run(tempDir, "git", "--version");

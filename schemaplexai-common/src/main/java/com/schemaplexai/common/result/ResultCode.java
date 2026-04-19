@@ -164,7 +164,16 @@ public enum ResultCode {
     SECURITY_BINDING_NOT_FOUND(91066, "安全绑定关系不存在"),
     SECURITY_CHECK_BLOCKED(91067, "请求被安全策略阻断"),
     SECURITY_CHECK_PAUSED(91068, "请求因安全策略已暂停"),
-    SECURITY_POLICY_VERSION_NOT_FOUND(91069, "安全策略版本不存在");
+    SECURITY_POLICY_VERSION_NOT_FOUND(91069, "安全策略版本不存在"),
+
+    // ---- API网关 92000~92009 ----
+    API_GATEWAY_NOT_FOUND(92000, "API网关不存在"),
+    API_GATEWAY_NAME_DUPLICATE(92001, "API网关名称已存在"),
+    API_GATEWAY_CALL_FAILED(92002, "API网关调用失败"),
+    API_GATEWAY_RATE_LIMITED(92003, "API调用频率超限"),
+    API_GATEWAY_COST_EXCEEDED(92004, "API调用费用超限"),
+    API_GATEWAY_POLICY_NOT_FOUND(92005, "API网关策略不存在"),
+    API_GATEWAY_UNAUTHORIZED(92006, "API网关认证失败");
 
     private final int code;
     private final String message;

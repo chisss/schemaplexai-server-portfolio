@@ -150,4 +150,39 @@ public final class SecurityComplianceConstant {
     public static final String CHECK_SCENE_TOOL_PRE = "tool_pre";
     public static final String CHECK_SCENE_TOOL_POST = "tool_post";
     public static final String CHECK_SCENE_OUTPUT = "output";
+
+    // ========== 知识文档摄入（RAG upload） ==========
+
+    /** 资源类型：知识文档 */
+    public static final String RESOURCE_TYPE_KNOWLEDGE_DOCUMENT = "knowledge_document";
+
+    /** 审计事件来源：知识摄入管线 */
+    public static final String AUDIT_SOURCE_KNOWLEDGE_INGEST = "knowledge_ingest";
+
+    /** 策略类型：文档上传前置策略（文件名/扩展名/MIME/大小） */
+    public static final String POLICY_TYPE_KNOWLEDGE_UPLOAD = "knowledge_upload";
+
+    /** 策略类型：文档内容扫描策略（规则包引用） */
+    public static final String POLICY_TYPE_KNOWLEDGE_INGEST_CONTENT = "knowledge_ingest_content";
+
+    /** 检查场景：知识上传前置 */
+    public static final String CHECK_SCENE_KNOWLEDGE_UPLOAD = "knowledge_upload";
+
+    /** 检查场景：知识摄入内容 */
+    public static final String CHECK_SCENE_KNOWLEDGE_INGEST = "knowledge_ingest";
+
+    // 知识文档审计事件类型
+    public static final String EVENT_KB_UPLOAD_REQUESTED = "kb_upload_requested";
+    public static final String EVENT_KB_UPLOAD_BLOCKED = "kb_upload_blocked";
+    public static final String EVENT_KB_UPLOAD_DEDUPLICATED = "kb_upload_deduplicated";
+    public static final String EVENT_KB_UPLOAD_ACCEPTED = "kb_upload_accepted";
+    public static final String EVENT_KB_INGEST_STARTED = "kb_ingest_started";
+    public static final String EVENT_KB_INGEST_CONTENT_WARNING = "kb_ingest_content_warning";
+    public static final String EVENT_KB_INGEST_CONTENT_BLOCKED = "kb_ingest_content_blocked";
+    public static final String EVENT_KB_INGEST_SUCCESS = "kb_ingest_success";
+    public static final String EVENT_KB_INGEST_FAILED = "kb_ingest_failed";
+
+    // 审计动作（写入 sf_audit_log.action）
+    public static final String ACTION_KB_DOC_UPLOAD = "knowledge_document.upload";
+    public static final String ACTION_KB_DOC_INGEST = "knowledge_document.ingest";
 }

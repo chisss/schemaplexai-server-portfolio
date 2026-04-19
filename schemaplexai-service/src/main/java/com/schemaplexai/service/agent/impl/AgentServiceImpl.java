@@ -675,6 +675,7 @@ public class AgentServiceImpl implements AgentService {
                     availableTool.setInputSchema(tool.getInputSchema());
                     availableTool.setOsSupport(tool.getOsSupport());
                     availableTool.setSourceType("builtin");
+                    availableTool.setCategory(resolveBuiltinToolCategory(tool.getCode()));
                     availableTool.setSourceRefId(null);
                     availableTool.setAlreadyBound(boundKeys.contains(
                             buildToolKey("builtin", null, tool.getCode())));
@@ -710,6 +711,7 @@ public class AgentServiceImpl implements AgentService {
             availableTool.setName(StringUtils.hasText(skill.getDisplayName()) ? skill.getDisplayName() : toolCode);
             availableTool.setDescription(skill.getDescription());
             availableTool.setSourceType("skill");
+            availableTool.setCategory("skill");
             availableTool.setSourceRefId(skill.getId());
             availableTool.setAlreadyBound(boundKeys.contains(key));
             deduplicated.put(key, availableTool);
@@ -757,6 +759,7 @@ public class AgentServiceImpl implements AgentService {
                 }
                 availableTool.setInputSchema(inputSchema != null ? String.valueOf(inputSchema) : null);
                 availableTool.setSourceType("mcp");
+                availableTool.setCategory("mcp");
                 availableTool.setSourceRefId(mcpServer.getId());
                 availableTool.setAlreadyBound(boundKeys.contains(key));
                 results.add(availableTool);
@@ -770,6 +773,20 @@ public class AgentServiceImpl implements AgentService {
             return "builtin||";
         }
         return buildToolKey(binding.getSourceType(), binding.getSourceRefId(), binding.getToolCode());
+    }
+
+    private String resolveBuiltinToolCategory(String toolCode) {
+        if (!StringUtils.hasText(toolCode)) {
+            return "system";
+        }
+        String normalizedCode = toolCode.trim().toLowerCase();
+        if (normalizedCode.startsWith("web.")) {
+            return "web";
+        }
+        if (normalizedCode.startsWith("code.")) {
+            return "code";
+        }
+        return "system";
     }
 
     private String buildToolKey(String sourceType, String sourceRefId, String toolCode) {
@@ -1179,6 +1196,10 @@ public class AgentServiceImpl implements AgentService {
                 .agentModelGroupId(agent.getAiModelGroupId())
                 .inputContext(dto.getContext())
                 .conversationId(execution.getConversationId())
+                .attachmentIds(dto.getAttachmentIds())
+                .reasoningStrength(dto.getReasoningStrength())
+                .skillCode(dto.getSkillCode())
+                .outputFormat(dto.getOutputFormat())
                 .stream(Boolean.TRUE.equals(dto.getStream()))
                 .build());
 
@@ -1197,6 +1218,9 @@ public class AgentServiceImpl implements AgentService {
 
     private SecurityRuntimeCheckRequest buildSecurityCheckRequest(Agent agent, AgentExecution execution, AgentExecuteDTO dto) {
         var request = new SecurityRuntimeCheckRequest();
+        request.setTenantId(execution != null && StringUtils.hasText(execution.getTenantId())
+                ? execution.getTenantId()
+                : agent.getTenantId());
         request.setScene(SecurityComplianceConstant.CHECK_SCENE_AGENT_EXECUTE);
         request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
         request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION);
