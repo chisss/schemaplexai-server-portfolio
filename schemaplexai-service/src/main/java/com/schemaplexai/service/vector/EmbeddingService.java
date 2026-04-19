@@ -9,7 +9,7 @@ import com.schemaplexai.common.util.SecurityUtil;
  * 实现类：
  * <ul>
  *   <li>{@link OpenAiEmbeddingServiceImpl} — 调用 OpenAI/Doubao 兼容 Embedding 接口</li>
- *   <li>{@link MockEmbeddingServiceImpl}   — 确定性伪随机向量，用于测试/开发环境</li>
+ *   <li>{@link InProcessEmbeddingServiceImpl} — 本地 ONNX 量化模型（AllMiniLmL6V2），用于降级兜底和开发环境</li>
  * </ul>
  */
 public interface EmbeddingService {

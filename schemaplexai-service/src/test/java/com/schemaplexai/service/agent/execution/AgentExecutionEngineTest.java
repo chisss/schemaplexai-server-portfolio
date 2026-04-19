@@ -11,6 +11,8 @@ import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jResolution;
 import com.schemaplexai.service.quality.detector.QualityDetector;
 import com.schemaplexai.service.quality.orchestrator.QualityOrchestrator;
+import com.schemaplexai.service.storage.DocumentStorageService;
+import com.schemaplexai.service.util.FileContentExtractor;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -27,6 +29,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -253,6 +258,72 @@ class AgentExecutionEngineTest {
         verify(rateLimitedModel, times(1)).chat(any(ChatRequest.class));
         verify(healthyModel, times(2)).chat(any(ChatRequest.class));
         invoker.clearTemporaryUnavailableModels();
+    }
+
+    @Test
+    void shouldFastFailNonFinalFallbackCandidateWithoutExtraRetries() throws Exception {
+        ChatModel healthyModel = mock(ChatModel.class);
+        when(healthyModel.chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("healthy")).build());
+
+        AtomicInteger fallbackAttempts = new AtomicInteger();
+        AtomicLong capturedTimeoutMillis = new AtomicLong();
+        AgentModelInvoker invoker = new AgentModelInvoker() {
+            @Override
+            public ChatResponse invokeWithTimeout(LangChain4jResolution resolution,
+                                                  ChatRequest request,
+                                                  long timeoutMillis) throws Exception {
+                if ("slow-fallback".equals(resolution.config().getModelId())) {
+                    fallbackAttempts.incrementAndGet();
+                    capturedTimeoutMillis.set(timeoutMillis);
+                    throw new IllegalStateException("timeout");
+                }
+                return super.invokeWithTimeout(resolution, request, timeoutMillis);
+            }
+        };
+
+        AgentEngineParams params = AgentEngineParams.builder()
+                .modelCallTimeoutMillis(TimeUnit.MINUTES.toMillis(2))
+                .maxModelRetries(3)
+                .build();
+        ChatRequest request = ChatRequest.builder()
+                .messages(List.of(UserMessage.from("请输出结果")))
+                .toolSpecifications(List.of())
+                .build();
+
+        AgentModelInvoker.ModelCallResult result = invoker.invokeChainWithRetry(
+                List.of(
+                        new LangChain4jResolution(
+                                mock(ChatModel.class),
+                                AiModelConfig.builder()
+                                        .provider("anthropic")
+                                        .modelId("slow-fallback")
+                                        .timeoutSeconds(120)
+                                        .retryCount(5)
+                                        .retryIntervalSeconds(2)
+                                        .build()
+                        ),
+                        new LangChain4jResolution(
+                                healthyModel,
+                                AiModelConfig.builder()
+                                        .provider("anthropic")
+                                        .modelId("healthy-model")
+                                        .timeoutSeconds(120)
+                                        .retryCount(5)
+                                        .retryIntervalSeconds(2)
+                                        .build()
+                        )
+                ),
+                request,
+                params,
+                "exec-fast-fail-1", "agent-1", "tenant-1", 1, System.currentTimeMillis(),
+                mock(AgentLogService.class)
+        );
+
+        assertThat(result.response().aiMessage().text()).isEqualTo("healthy");
+        assertThat(fallbackAttempts.get()).isEqualTo(1);
+        assertThat(capturedTimeoutMillis.get()).isEqualTo(TimeUnit.SECONDS.toMillis(30));
+        verify(healthyModel, times(1)).chat(any(ChatRequest.class));
     }
 
     // =========================================================================
@@ -659,6 +730,7 @@ class AgentExecutionEngineTest {
         return new AgentExecutionEngine(
                 agentLogService, null, null, null, new ObjectMapper(),
                 eventStreamService, null, null, null,
-                modelInvoker, toolHandler, completionHandler, checker, shadowReviewService);
+                modelInvoker, toolHandler, completionHandler, checker, shadowReviewService, null,
+                mock(DocumentStorageService.class), mock(FileContentExtractor.class));
     }
 }

@@ -12,6 +12,7 @@ import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.context.ContextCacheService;
 import com.schemaplexai.service.memory.rag.RagContentRetrieverFactory;
 import com.schemaplexai.service.vector.MilvusVectorService;
+import com.schemaplexai.service.vector.ScoringService;
 import dev.langchain4j.rag.content.Content;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.query.Query;
@@ -76,6 +77,11 @@ public class ContextInjector {
     @Lazy
     @Autowired(required = false)
     private RagContentRetrieverFactory ragContentRetrieverFactory;
+
+    /** ONNX Scoring 评分服务（用于 Milvus fallback 路径的 Reranker 精排） */
+    @Lazy
+    @Autowired(required = false)
+    private ScoringService scoringService;
 
     // =========================================================================
     //  公开方法
@@ -414,8 +420,15 @@ public class ContextInjector {
         // Fallback: 原始 MilvusVectorService
         if (milvusVectorService != null) {
             try {
-                List<String> results = milvusVectorService.searchSimilarContext(tenantId, agentId, query, 5);
+                List<String> results = boundContextIds.isEmpty()
+                        ? milvusVectorService.searchSimilarContext(tenantId, agentId, query, 5)
+                        : milvusVectorService.searchSimilarContext(tenantId, boundContextIds, query, 5);
                 if (results != null && !results.isEmpty()) {
+                    // 若 Reranker 可用，对 Milvus fallback 结果也进行精排
+                    if (scoringService != null && scoringService.isAvailable()) {
+                        List<ScoringService.ScoredPassage> reranked = scoringService.rerank(query, results, 5);
+                        results = reranked.stream().map(ScoringService.ScoredPassage::text).toList();
+                    }
                     return new RetrievalResult("语义检索", results);
                 }
             } catch (Exception e) {

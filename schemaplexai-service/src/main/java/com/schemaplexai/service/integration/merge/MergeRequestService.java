@@ -1,12 +1,18 @@
 package com.schemaplexai.service.integration.merge;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.enums.MergeRequestStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.BranchRuleMapper;
+import com.schemaplexai.dao.mapper.IntegrationMapper;
 import com.schemaplexai.dao.mapper.IntegrationProjectMapper;
 import com.schemaplexai.model.entity.BranchRule;
+import com.schemaplexai.model.entity.Integration;
 import com.schemaplexai.model.entity.IntegrationProject;
+import com.schemaplexai.service.integration.platform.GitPlatformAdapter;
+import com.schemaplexai.service.integration.platform.GitPlatformAdapterFactory;
+import com.schemaplexai.service.integration.platform.RemoteMergeRequest;
 import lombok.Builder;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -15,7 +21,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
-import java.util.UUID;
 
 /**
  * 合并请求服务
@@ -27,7 +32,9 @@ import java.util.UUID;
 public class MergeRequestService {
 
     private final IntegrationProjectMapper integrationProjectMapper;
+    private final IntegrationMapper integrationMapper;
     private final BranchRuleMapper branchRuleMapper;
+    private final GitPlatformAdapterFactory gitPlatformAdapterFactory;
 
     /**
      * 创建合并请求
@@ -57,21 +64,33 @@ public class MergeRequestService {
         }
 
         String targetBranch = resolveTargetBranch(tenantId, integrationProjectId);
-        String requestId = "mr-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String mrTitle = StringUtils.hasText(title) ? title : "Agent Auto Merge Request";
 
-        log.info("创建合并请求: requestId={}, integrationProjectId={}, source={}, target={}, title={}",
-                requestId, integrationProjectId, sourceBranch, targetBranch, title);
+        // 查找关联的集成配置
+        Integration integration = integrationMapper.selectById(integrationProject.getIntegrationId());
+        if (integration == null) {
+            throw new BusinessException(ResultCode.INTEGRATION_NOT_FOUND);
+        }
 
-        // TODO: 接入具体Git平台API（GitLab/GitHub）
+        GitPlatformAdapter adapter = gitPlatformAdapterFactory.getAdapter(integration.getPlatform());
+        RemoteMergeRequest remoteMr = adapter.createMergeRequest(
+                integration.getConfig(),
+                integrationProject.getExternalProjectName(),
+                sourceBranch, targetBranch,
+                mrTitle, description);
+
+        log.info("创建合并请求成功: remoteMrId={}, integrationProjectId={}, source={}, target={}, webUrl={}",
+                remoteMr.getRemoteMrId(), integrationProjectId, sourceBranch, targetBranch, remoteMr.getWebUrl());
 
         return MergeRequestTicket.builder()
-                .requestId(requestId)
+                .requestId(remoteMr.getRemoteMrId())
                 .integrationProjectId(integrationProjectId)
                 .sourceBranch(sourceBranch)
                 .targetBranch(targetBranch)
-                .title(StringUtils.hasText(title) ? title : "Agent Auto Merge Request")
+                .title(mrTitle)
                 .description(description)
-                .status(MrStatus.OPENED)
+                .webUrl(remoteMr.getWebUrl())
+                .status(MergeRequestStatusEnum.OPENED)
                 .createdAt(LocalDateTime.now())
                 .build();
     }
@@ -83,8 +102,8 @@ public class MergeRequestService {
         if (!StringUtils.hasText(requestId)) {
             return;
         }
-        log.info("处理合并请求Webhook: requestId={}, status={}", requestId, status);
-        // TODO: 更新MR状态
+        MergeRequestStatusEnum mrStatus = MergeRequestStatusEnum.fromCode(status);
+        log.info("处理合并请求Webhook: requestId={}, status={}", requestId, mrStatus.getCode());
     }
 
     /**
@@ -127,13 +146,8 @@ public class MergeRequestService {
         private String targetBranch;
         private String title;
         private String description;
-        private MrStatus status;
+        private String webUrl;
+        private MergeRequestStatusEnum status;
         private LocalDateTime createdAt;
-    }
-
-    public enum MrStatus {
-        OPENED,
-        MERGED,
-        CLOSED
     }
 }

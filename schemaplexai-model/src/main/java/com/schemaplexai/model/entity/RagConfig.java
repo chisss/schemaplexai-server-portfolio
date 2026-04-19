@@ -22,7 +22,13 @@ public class RagConfig implements Serializable {
     /** 是否启用 RAG */
     private Boolean enabled;
 
-    /** 绑定的向量模型配置 ID（sf_ai_model.id） */
+    /** 向量模型来源: builtin（内置ONNX）/ api（外部API） */
+    private String embeddingSource;
+
+    /** 内置 ONNX 向量模型标识，如 all-MiniLM-L6-v2、bge-small-en-v1.5 */
+    private String builtinEmbeddingModelId;
+
+    /** 绑定的外部向量模型配置 ID（sf_ai_model.id） */
     private String vectorModelId;
 
     /** 向量集合名称 */
@@ -45,6 +51,18 @@ public class RagConfig implements Serializable {
 
     /** 是否启用文本清洗 */
     private Boolean textCleaningEnabled;
+
+    /** 是否启用 Reranker 二阶段精排 */
+    private Boolean rerankerEnabled;
+
+    /** Reranker 模型来源: builtin（内置ONNX）/ api（外部API，预留） */
+    private String rerankerSource;
+
+    /** Reranker 精排后返回的最大数量 */
+    private Integer rerankerTopN;
+
+    /** Reranker 精排最小评分阈值 */
+    private Double rerankerMinScore;
 
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;

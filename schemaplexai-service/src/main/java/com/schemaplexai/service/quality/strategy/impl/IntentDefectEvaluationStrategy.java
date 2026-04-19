@@ -1,5 +1,6 @@
 package com.schemaplexai.service.quality.strategy.impl;
 
+import com.schemaplexai.common.enums.QualityIssueTypeEnum;
 import com.schemaplexai.service.quality.strategy.ModelBasedQualityEvaluator;
 import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategy;
 import com.schemaplexai.service.quality.strategy.QualityReviewPolicyService;
@@ -51,7 +52,7 @@ public class IntentDefectEvaluationStrategy implements QualityEvaluationStrategy
 
     @Override
     public String supportedIssueType() {
-        return "intent_defect";
+        return QualityIssueTypeEnum.INTENT_DEFECT.getCode();
     }
 
     @Override

@@ -19,6 +19,9 @@ import java.util.List;
 public interface WorkflowInstanceConverter {
 
     @Mapping(target = "nodeExecutions", ignore = true)
+    @Mapping(target = "triggerType", ignore = true)
+    @Mapping(target = "templateName", ignore = true)
+    @Mapping(target = "errorMessage", ignore = true)
     WorkflowInstanceVO toVO(WorkflowInstance instance);
 
     List<WorkflowInstanceVO> toVOList(List<WorkflowInstance> instances);

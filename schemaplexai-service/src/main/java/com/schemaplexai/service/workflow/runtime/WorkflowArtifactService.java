@@ -388,10 +388,57 @@ public class WorkflowArtifactService {
         if (StringUtils.hasText(declaredArtifactOutputPath)) {
             return declaredArtifactOutputPath.trim();
         }
+        if (shouldUseInheritedArtifactOutputPath(instance, nodeExec, nodeConfig)) {
+            String inheritedPath = getVariable(instance, "artifactOutputPath", null);
+            if (StringUtils.hasText(inheritedPath)) {
+                return inheritedPath;
+            }
+        }
+        String artifactDocType = resolveArtifactDocType(instance, nodeExec, nodeConfig);
+        if (StringUtils.hasText(artifactDocType)) {
+            String inferredPath = buildDefaultArtifactOutputPath(instance, artifactDocType);
+            if (StringUtils.hasText(inferredPath)) {
+                return inferredPath;
+            }
+        }
         if (!shouldUseInheritedArtifactOutputPath(instance, nodeExec, nodeConfig)) {
             return null;
         }
-        return getVariable(instance, "artifactOutputPath", null);
+        return null;
+    }
+
+    private String buildDefaultArtifactOutputPath(WorkflowInstance instance, String artifactDocType) {
+        if (!StringUtils.hasText(artifactDocType)) {
+            return null;
+        }
+        String fileKey = resolveArtifactFileKey(instance);
+        return switch (artifactDocType.trim()) {
+            case "requirements" -> "docs/" + fileKey + "-requirements.md";
+            case "design" -> "docs/" + fileKey + "-technical-design.md";
+            case "tasks" -> "docs/" + fileKey + "-task-breakdown.md";
+            case "implementation" -> "docs/" + fileKey + "-implementation.md";
+            case "test_plan" -> "docs/" + fileKey + "-test-plan.md";
+            case "delivery" -> "docs/" + fileKey + "-delivery.md";
+            default -> null;
+        };
+    }
+
+    private String resolveArtifactFileKey(WorkflowInstance instance) {
+        String jiraTicket = getVariable(instance, "jiraTicket", null);
+        if (StringUtils.hasText(jiraTicket)) {
+            return jiraTicket.trim();
+        }
+        String specName = getVariable(instance, "specName", null);
+        if (StringUtils.hasText(specName)) {
+            String sanitized = specName.trim().toLowerCase(Locale.ROOT)
+                    .replaceAll("[^a-z0-9._-]+", "-")
+                    .replaceAll("-{2,}", "-")
+                    .replaceAll("^-|-$", "");
+            if (StringUtils.hasText(sanitized)) {
+                return sanitized;
+            }
+        }
+        return "spec";
     }
 
     private String normalizeMarkdown(WorkflowInstance instance,

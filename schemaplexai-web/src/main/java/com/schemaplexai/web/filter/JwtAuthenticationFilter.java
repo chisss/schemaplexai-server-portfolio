@@ -1,9 +1,7 @@
 package com.schemaplexai.web.filter;
 
-import com.auth0.jwt.JWT;
-import com.auth0.jwt.algorithms.Algorithm;
-import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.schemaplexai.common.util.JwtUtil;
 import com.schemaplexai.common.util.SecurityUtil;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -42,30 +40,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         try {
             String token = extractToken(request);
             if (token != null) {
-                try {
-                    DecodedJWT jwt = JWT.require(Algorithm.HMAC256(jwtSecret))
-                            .build()
-                            .verify(token);
-
-                    String userId = jwt.getSubject();
-                    String tenantId = jwt.getClaim("tid").asString();
-                    List<String> roles = jwt.getClaim("roles").asList(String.class);
-
-                    // 设置安全上下文
-                    SecurityUtil.setCurrentUserId(userId);
-                    SecurityUtil.setCurrentTenantId(tenantId);
-
-                    // 设置Spring Security认证信息
-                    List<SimpleGrantedAuthority> authorities = roles != null
-                            ? roles.stream().map(r -> new SimpleGrantedAuthority("ROLE_" + r)).toList()
-                            : List.of();
-
-                    UsernamePasswordAuthenticationToken authentication =
-                            new UsernamePasswordAuthenticationToken(userId, null, authorities);
-                    SecurityContextHolder.getContext().setAuthentication(authentication);
-                } catch (JWTVerificationException e) {
-                    // Token 无效（签名错误、过期等），不设置认证上下文，由 Spring Security 的授权检查拒绝
-                    log.warn("JWT验证失败: {} - 请求路径: {}", e.getMessage(), request.getServletPath());
+                DecodedJWT jwt = JwtUtil.verifyToken(token, jwtSecret);
+                if (jwt == null) {
+                    log.warn("JWT验证失败 - 请求路径: {}", request.getServletPath());
+                } else if (JwtUtil.isRefreshToken(jwt)) {
+                    log.warn("检测到 RefreshToken 访问受保护接口，已拒绝认证: path={}", request.getServletPath());
+                } else {
+                    bindAuthentication(jwt);
                 }
             }
 
@@ -82,6 +63,25 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             return header.substring(BEARER_PREFIX.length());
         }
         return null;
+    }
+
+    private void bindAuthentication(DecodedJWT jwt) {
+        String userId = JwtUtil.getUserId(jwt);
+        String tenantId = JwtUtil.getTenantId(jwt);
+        List<String> roles = JwtUtil.getRoles(jwt);
+        if (!StringUtils.hasText(userId)) {
+            return;
+        }
+
+        SecurityUtil.setCurrentUserId(userId);
+        SecurityUtil.setCurrentTenantId(tenantId);
+
+        List<SimpleGrantedAuthority> authorities = roles != null
+                ? roles.stream().filter(StringUtils::hasText).map(r -> new SimpleGrantedAuthority("ROLE_" + r)).toList()
+                : List.of();
+        UsernamePasswordAuthenticationToken authentication =
+                new UsernamePasswordAuthenticationToken(userId, null, authorities);
+        SecurityContextHolder.getContext().setAuthentication(authentication);
     }
 
     @Override

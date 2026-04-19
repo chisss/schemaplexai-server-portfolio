@@ -1,6 +1,9 @@
 package com.schemaplexai.service.tool.registry;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.constant.ToolConfigConstant;
 import com.schemaplexai.common.enums.CustomToolTypeEnum;
+import com.schemaplexai.common.enums.HttpMethodEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
@@ -14,9 +17,12 @@ import com.schemaplexai.service.tool.security.ToolSecurityValidator;
 import com.schemaplexai.spi.CustomToolExecutor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.*;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -35,6 +41,8 @@ public class CustomToolRegistry {
     private final ToolConfigInjector configInjector;
     private final ToolSecurityValidator securityValidator;
     private final AgentToolBindingMapper agentToolBindingMapper;
+    private final OkHttpClient okHttpClient;
+    private final ObjectMapper objectMapper;
 
     /** 本地注册表 */
     private final Map<String, CustomToolExecutor> localRegistry = new ConcurrentHashMap<>();
@@ -124,17 +132,88 @@ public class CustomToolRegistry {
     public ToolResult executeHttp(String tenantId, String agentId, AgentToolBinding binding,
                                   ToolCall toolCall, String url, Map<String, Object> headers, Map<String, Object> args) {
         try {
-            // 校验 URL（SSRF 防护）
+            // 1. SSRF 防护校验
             securityValidator.validateUrl(url);
 
-            // TODO: 实现 HTTP 调用逻辑
-            // 这里可以调用 RestTemplate 或 WebClient
+            // 2. 确定 HTTP 方法
+            HttpMethodEnum method = HttpMethodEnum.fromCode(
+                    args != null ? (String) args.get(ToolConfigConstant.HTTP_METHOD_KEY) : null);
 
-            return success(toolCall, Map.of("status", "not_implemented", "message", "HTTP 执行待实现"));
+            // 3. 构建请求
+            Request.Builder requestBuilder = new Request.Builder();
+
+            // 4. 注入请求头（过滤危险头）
+            if (headers != null) {
+                for (Map.Entry<String, Object> entry : headers.entrySet()) {
+                    String headerName = entry.getKey();
+                    if (entry.getValue() != null
+                            && !ToolConfigConstant.HTTP_FORBIDDEN_HEADERS.contains(
+                                    headerName.toLowerCase(Locale.ROOT))) {
+                        requestBuilder.header(headerName, String.valueOf(entry.getValue()));
+                    }
+                }
+            }
+            if (headers == null || !headers.containsKey("Content-Type")) {
+                requestBuilder.header("Content-Type", "application/json");
+            }
+
+            // 5. 构建请求体（移除内部控制参数）
+            Map<String, Object> bodyParams = new LinkedHashMap<>(args != null ? args : Map.of());
+            bodyParams.remove(ToolConfigConstant.HTTP_METHOD_KEY);
+
+            switch (method) {
+                case GET -> {
+                    HttpUrl parsedUrl = HttpUrl.parse(url);
+                    if (parsedUrl == null) {
+                        return failure(toolCall, "URL 格式非法: " + url);
+                    }
+                    HttpUrl.Builder urlBuilder = parsedUrl.newBuilder();
+                    bodyParams.forEach((k, v) ->
+                            urlBuilder.addQueryParameter(k, String.valueOf(v)));
+                    requestBuilder.url(urlBuilder.build()).get();
+                }
+                case DELETE -> requestBuilder.url(url).delete();
+                case PUT -> requestBuilder.url(url).put(buildJsonBody(bodyParams));
+                case PATCH -> requestBuilder.url(url).patch(buildJsonBody(bodyParams));
+                default -> requestBuilder.url(url).post(buildJsonBody(bodyParams));
+            }
+
+            // 6. 执行请求
+            try (Response response = okHttpClient.newCall(requestBuilder.build()).execute()) {
+                int statusCode = response.code();
+                String responseBody = response.body() != null ? response.body().string() : "";
+
+                if (responseBody.length() > ToolConfigConstant.HTTP_RESPONSE_MAX_LENGTH) {
+                    responseBody = responseBody.substring(0, ToolConfigConstant.HTTP_RESPONSE_MAX_LENGTH)
+                            + ToolConfigConstant.HTTP_RESPONSE_TRUNCATED_SUFFIX;
+                }
+
+                Object parsedBody;
+                try {
+                    parsedBody = objectMapper.readValue(responseBody, Object.class);
+                } catch (Exception e) {
+                    parsedBody = responseBody;
+                }
+
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("statusCode", statusCode);
+                result.put("body", parsedBody);
+                result.put("success", statusCode >= 200 && statusCode < 300);
+
+                return success(toolCall, result);
+            }
+        } catch (BusinessException e) {
+            log.warn("HTTP 工具安全校验拒绝: url={}, error={}", url, e.getMessage());
+            return failure(toolCall, "安全校验失败: " + e.getMessage());
         } catch (Exception e) {
-            log.error("HTTP 工具执行异常: {}", e.getMessage());
+            log.error("HTTP 工具执行异常: url={}", url, e);
             return failure(toolCall, "HTTP 执行失败: " + e.getMessage());
         }
+    }
+
+    private RequestBody buildJsonBody(Map<String, Object> params) throws Exception {
+        byte[] json = objectMapper.writeValueAsBytes(params);
+        return RequestBody.create(json, MediaType.parse("application/json"));
     }
 
     /**

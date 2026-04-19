@@ -1,7 +1,11 @@
 package com.schemaplexai.web.controller;
 
+import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.R;
+import com.schemaplexai.common.util.FilenameSanitizer;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.dto.agent.AgentConfigRequest;
 import com.schemaplexai.model.dto.agent.AgentContextBindingDTO;
 import com.schemaplexai.model.dto.agent.AgentCreateRequest;
@@ -25,10 +29,12 @@ import com.schemaplexai.model.vo.agent.AvailableToolVO;
 import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
+import com.schemaplexai.service.storage.DocumentStorageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.apache.tika.Tika;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -39,9 +45,15 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.ByteArrayInputStream;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * Agent管理控制器
@@ -52,8 +64,12 @@ import java.util.List;
 @Tag(name = "Agent管理")
 public class AgentController {
 
+    private static final Tika TIKA = new Tika();
+    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy/MM/dd");
+
     private final AgentService agentService;
     private final ExecutionEventStreamService executionEventStreamService;
+    private final DocumentStorageService documentStorageService;
 
     @GetMapping
     @Operation(summary = "分页查询Agent列表")
@@ -191,6 +207,42 @@ public class AgentController {
     public R<AgentExecuteResultVO> execute(@PathVariable String id,
                                            @Valid @RequestBody AgentExecuteDTO dto) {
         return R.ok(agentService.execute(id, dto));
+    }
+
+    @PostMapping(value = "/chat/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "上传 AI 对话附件")
+    public R<Map<String, String>> uploadChatAttachment(@RequestParam("file") MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "上传文件不能为空");
+        }
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        String fileId = UUID.randomUUID().toString();
+        String fileName = FilenameSanitizer.sanitize(file.getOriginalFilename());
+        String datePath = LocalDate.now().format(DATE_FORMATTER);
+        String objectKey = "tenants/" + tenantId + "/chat/" + datePath + "/" + fileId + "/" + fileName;
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (Exception exception) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "读取上传文件失败");
+        }
+        String contentType = TIKA.detect(bytes, fileName);
+        documentStorageService.putObject(
+                documentStorageService.getDefaultBucket(),
+                objectKey,
+                new ByteArrayInputStream(bytes),
+                bytes.length,
+                contentType
+        );
+        return R.ok(Map.of(
+                "fileId", objectKey,
+                "fileName", fileName,
+                "fileUrl", documentStorageService.getPresignedDownloadUrl(
+                        documentStorageService.getDefaultBucket(),
+                        objectKey,
+                        3600
+                )
+        ));
     }
 
     @GetMapping("/{id}/executions")

@@ -15,6 +15,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.util.LinkedHashSet;
+import java.util.List;
+
 /**
  * 租户运行时策略服务实现
  */
@@ -27,6 +30,9 @@ public class TenantRuntimePolicyServiceImpl implements TenantRuntimePolicyServic
     private static final int DEFAULT_MAX_WORKSPACE_GB = 50;
     private static final int DEFAULT_MAX_EXECUTION_MINUTES = 30;
     private static final String DEFAULT_SANDBOX_PROFILE = "standard";
+    private static final List<String> DEFAULT_SANDBOX_ALLOWED_COMMANDS = List.of(
+            "ls", "cat", "head", "tail", "grep", "find", "wc", "sort", "uniq", "diff", "echo", "pwd", "date", "whoami"
+    );
 
     private final TenantMapper tenantMapper;
     private final TenantRuntimePolicyMapper tenantRuntimePolicyMapper;
@@ -70,6 +76,7 @@ public class TenantRuntimePolicyServiceImpl implements TenantRuntimePolicyServic
         policy.setMaxExecutionMinutes(DEFAULT_MAX_EXECUTION_MINUTES);
         policy.setSandboxProfile(DEFAULT_SANDBOX_PROFILE);
         policy.setAllowLocalImport(Boolean.FALSE);
+        policy.setSandboxAllowedCommands(DEFAULT_SANDBOX_ALLOWED_COMMANDS);
         return policy;
     }
 
@@ -92,5 +99,22 @@ public class TenantRuntimePolicyServiceImpl implements TenantRuntimePolicyServic
         if (request.getAllowLocalImport() != null) {
             policy.setAllowLocalImport(request.getAllowLocalImport());
         }
+        if (request.getSandboxAllowedCommands() != null) {
+            policy.setSandboxAllowedCommands(normalizeAllowedCommands(request.getSandboxAllowedCommands()));
+        }
+    }
+
+    /**
+     * 统一规范命令白名单，避免大小写和重复项导致的绕过
+     */
+    private List<String> normalizeAllowedCommands(List<String> allowedCommands) {
+        return allowedCommands.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .map(String::toLowerCase)
+                .collect(java.util.stream.Collectors.collectingAndThen(
+                        java.util.stream.Collectors.toCollection(LinkedHashSet::new),
+                        List::copyOf
+                ));
     }
 }

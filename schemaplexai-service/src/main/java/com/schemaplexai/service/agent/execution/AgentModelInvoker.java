@@ -1,6 +1,10 @@
 package com.schemaplexai.service.agent.execution;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.schemaplexai.common.enums.AgentLoopLogTypeEnum;
+import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.service.ai.LangChain4jResolution;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
@@ -14,9 +18,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * AI 模型调用器
@@ -27,10 +31,17 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class AgentModelInvoker {
 
+    private static final int MAX_CONCURRENT_MODEL_CALLS = 50;
     private static final ExecutorService MODEL_CALL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+    private static final Semaphore MODEL_CALL_SEMAPHORE = new Semaphore(MAX_CONCURRENT_MODEL_CALLS);
     private static final long TEMP_UNAVAILABLE_ON_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(2);
     private static final long TEMP_UNAVAILABLE_ON_FATAL_MILLIS = TimeUnit.MINUTES.toMillis(10);
-    private static final Map<String, Long> TEMP_UNAVAILABLE_UNTIL = new ConcurrentHashMap<>();
+    /** 降级链中的前置候选只做快速探测，避免真实工作流被长超时拖住。 */
+    private static final long FALLBACK_CANDIDATE_TIMEOUT_CAP_MILLIS = TimeUnit.SECONDS.toMillis(30);
+    private static final Cache<String, Long> TEMP_UNAVAILABLE_UNTIL = Caffeine.newBuilder()
+            .expireAfterWrite(java.time.Duration.ofMinutes(10))
+            .maximumSize(200)
+            .build();
 
     // =========================================================================
     //  模型链调用（含降级切换）
@@ -47,13 +58,30 @@ public class AgentModelInvoker {
                                                  String executionId, String agentId, String tenantId,
                                                  int round, long startMs,
                                                  AgentLogService agentLogService) throws Exception {
+        if (!MODEL_CALL_SEMAPHORE.tryAcquire(30, TimeUnit.SECONDS)) {
+            throw new BusinessException(ResultCode.AGENT_BUSY, "模型调用并发已达上限，请稍后重试");
+        }
+        try {
+            return doInvokeChainWithRetry(modelChain, request, params, executionId, agentId, tenantId, round, startMs, agentLogService);
+        } finally {
+            MODEL_CALL_SEMAPHORE.release();
+        }
+    }
+
+    private ModelCallResult doInvokeChainWithRetry(List<LangChain4jResolution> modelChain,
+                                                   ChatRequest request,
+                                                   AgentEngineParams params,
+                                                   String executionId, String agentId, String tenantId,
+                                                   int round, long startMs,
+                                                   AgentLogService agentLogService) throws Exception {
         Exception lastError = null;
         boolean attempted = false;
         for (int i = 0; i < modelChain.size(); i++) {
             LangChain4jResolution resolution = modelChain.get(i);
+            boolean isLastCandidate = i == modelChain.size() - 1;
             long remainingUnavailableMillis = remainingUnavailableMillis(resolution);
             if (remainingUnavailableMillis > 0) {
-                if (i < modelChain.size() - 1) {
+                if (!isLastCandidate) {
                     appendFallbackLog(executionId, agentId, tenantId, round, startMs, agentLogService,
                             "模型当前处于冷却期，跳过并切换至下一个降级模型: provider=" + providerOf(resolution)
                                     + ", modelId=" + modelIdOf(resolution)
@@ -63,14 +91,17 @@ public class AgentModelInvoker {
             }
             attempted = true;
             try {
+                int maxRetries = isLastCandidate ? resolveMaxRetries(resolution, params) : 0;
+                long timeoutMillis = resolveChainTimeoutMillis(resolution, params, isLastCandidate);
                 ChatResponse response = invokeWithRetry(resolution, request, params,
-                        executionId, agentId, tenantId, round, startMs, agentLogService);
+                        executionId, agentId, tenantId, round, startMs, agentLogService,
+                        maxRetries, timeoutMillis);
                 clearTemporaryUnavailable(resolution);
                 return new ModelCallResult(response, resolution);
             } catch (Exception e) {
                 lastError = e;
                 markTemporaryUnavailable(resolution, e);
-                if (i < modelChain.size() - 1) {
+                if (!isLastCandidate) {
                     appendFallbackLog(executionId, agentId, tenantId, round, startMs, agentLogService,
                             "模型调用失败，切换至下一个降级模型: provider=" + resolution.config().getProvider()
                                     + ", modelId=" + resolution.config().getModelId()
@@ -99,10 +130,22 @@ public class AgentModelInvoker {
                                          String executionId, String agentId, String tenantId,
                                          int round, long startMs,
                                          AgentLogService agentLogService) throws Exception {
+        return invokeWithRetry(resolution, request, params,
+                executionId, agentId, tenantId, round, startMs, agentLogService,
+                resolveMaxRetries(resolution, params),
+                resolveTimeoutMillis(resolution, params.getModelCallTimeoutMillis()));
+    }
+
+    private ChatResponse invokeWithRetry(LangChain4jResolution resolution,
+                                         ChatRequest request,
+                                         AgentEngineParams params,
+                                         String executionId, String agentId, String tenantId,
+                                         int round, long startMs,
+                                         AgentLogService agentLogService,
+                                         int maxRetries,
+                                         long timeoutMillis) throws Exception {
         Exception lastError = null;
-        int maxRetries = resolveMaxRetries(resolution, params);
         int maxAttempts = maxRetries + 1;
-        long timeoutMillis = resolveTimeoutMillis(resolution, params.getModelCallTimeoutMillis());
         long retryIntervalMillis = resolveRetryIntervalMillis(resolution);
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
@@ -169,6 +212,16 @@ public class AgentModelInvoker {
         return TimeUnit.SECONDS.toMillis(timeoutSeconds.longValue());
     }
 
+    private long resolveChainTimeoutMillis(LangChain4jResolution resolution,
+                                           AgentEngineParams params,
+                                           boolean isLastCandidate) {
+        long timeoutMillis = resolveTimeoutMillis(resolution, params.getModelCallTimeoutMillis());
+        if (isLastCandidate) {
+            return timeoutMillis;
+        }
+        return Math.min(timeoutMillis, FALLBACK_CANDIDATE_TIMEOUT_CAP_MILLIS);
+    }
+
     // =========================================================================
     //  辅助方法
     // =========================================================================
@@ -196,7 +249,7 @@ public class AgentModelInvoker {
     }
 
     void clearTemporaryUnavailableModels() {
-        TEMP_UNAVAILABLE_UNTIL.clear();
+        TEMP_UNAVAILABLE_UNTIL.invalidateAll();
     }
 
     private void appendFallbackLog(String executionId,
@@ -229,7 +282,7 @@ public class AgentModelInvoker {
     private void clearTemporaryUnavailable(LangChain4jResolution resolution) {
         String modelKey = buildModelKey(resolution);
         if (StringUtils.hasText(modelKey)) {
-            TEMP_UNAVAILABLE_UNTIL.remove(modelKey);
+            TEMP_UNAVAILABLE_UNTIL.invalidate(modelKey);
         }
     }
 
@@ -238,13 +291,13 @@ public class AgentModelInvoker {
         if (!StringUtils.hasText(modelKey)) {
             return 0L;
         }
-        Long unavailableUntil = TEMP_UNAVAILABLE_UNTIL.get(modelKey);
+        Long unavailableUntil = TEMP_UNAVAILABLE_UNTIL.getIfPresent(modelKey);
         if (unavailableUntil == null) {
             return 0L;
         }
         long remaining = unavailableUntil - System.currentTimeMillis();
         if (remaining <= 0) {
-            TEMP_UNAVAILABLE_UNTIL.remove(modelKey, unavailableUntil);
+            TEMP_UNAVAILABLE_UNTIL.invalidate(modelKey);
             return 0L;
         }
         return remaining;

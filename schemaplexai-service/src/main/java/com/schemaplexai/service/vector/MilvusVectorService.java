@@ -30,6 +30,7 @@ import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
@@ -191,6 +192,24 @@ public class MilvusVectorService {
      * @return 相关上下文摘要列表（已过滤低相似度结果）
      */
     public List<String> searchSimilarContext(String tenantId, String agentId, String query, int topK) {
+        return searchSimilarContext(tenantId, agentId, List.of(), query, topK);
+    }
+
+    /**
+     * 按上下文范围语义检索最相关的上下文摘要列表。
+     *
+     * <p>当调用方已知绑定的上下文 ID 时，应优先使用该方法，
+     * 避免上下文模块向量未写入 {@code agent_id} 时被错误过滤掉。
+     */
+    public List<String> searchSimilarContext(String tenantId, Collection<String> contextIds, String query, int topK) {
+        return searchSimilarContext(tenantId, null, contextIds, query, topK);
+    }
+
+    private List<String> searchSimilarContext(String tenantId,
+                                              String agentId,
+                                              Collection<String> contextIds,
+                                              String query,
+                                              int topK) {
         List<String> results = new ArrayList<>();
         try {
             if (!StringUtils.hasText(tenantId) || !StringUtils.hasText(query)) return results;
@@ -207,8 +226,8 @@ public class MilvusVectorService {
             embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, EmbeddingTokenEstimator.estimate(query));
             float[] queryVector = embeddingService.embed(tenantId, query);
 
-            // 构建过滤条件：租户隔离 + (agent 匹配 OR 全局条目)
-            String filter = buildFilterExpression(collectionLayout, tenantId, agentId);
+            // 构建过滤条件：优先按绑定上下文收敛；否则沿用 agent/global 检索。
+            String filter = buildFilterExpression(collectionLayout, tenantId, agentId, contextIds);
 
             float similarityThreshold = (float) settings.getRetrievalMinScore();
 
@@ -295,7 +314,23 @@ public class MilvusVectorService {
         return new CollectionLayout(FIELD_ITEM_ID, FIELD_CONTENT_SUMMARY, null, false);
     }
 
-    private String buildFilterExpression(CollectionLayout collectionLayout, String tenantId, String agentId) {
+    private String buildFilterExpression(CollectionLayout collectionLayout,
+                                         String tenantId,
+                                         String agentId,
+                                         Collection<String> contextIds) {
+        List<String> scopedContextIds = contextIds == null ? List.of()
+                : contextIds.stream().filter(StringUtils::hasText).distinct().toList();
+        if (!scopedContextIds.isEmpty()) {
+            String joinedContextIds = scopedContextIds.stream()
+                    .map(id -> "\"" + id + "\"")
+                    .reduce((left, right) -> left + "," + right)
+                    .orElse("\"\"");
+            if (collectionLayout.legacySchema() && StringUtils.hasText(collectionLayout.metadataFieldName())) {
+                return String.format("metadata[\"tenant_id\"] == \"%s\" && metadata[\"context_id\"] in [%s]",
+                        tenantId, joinedContextIds);
+            }
+            return String.format("tenant_id == \"%s\" && context_id in [%s]", tenantId, joinedContextIds);
+        }
         String effectiveAgentId = agentId != null ? agentId : "";
         if (collectionLayout.legacySchema() && StringUtils.hasText(collectionLayout.metadataFieldName())) {
             return String.format("metadata[\"tenant_id\"] == \"%s\" && (metadata[\"agent_id\"] == \"%s\" || metadata[\"agent_id\"] == \"\")",

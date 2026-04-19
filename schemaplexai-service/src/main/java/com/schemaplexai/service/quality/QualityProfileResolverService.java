@@ -11,5 +11,12 @@ public interface QualityProfileResolverService {
 
     QualityProfile resolveProfile(String specId, String workflowTemplateId, String agentId, String issueType, String sourceType);
 
+    /**
+     * 根据 profileId 直接查询
+     */
+    default QualityProfile resolveProfileById(String profileId) {
+        return null;
+    }
+
     List<String> listModelIds(String profileId);
 }

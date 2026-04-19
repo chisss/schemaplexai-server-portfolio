@@ -1,13 +1,12 @@
 package com.schemaplexai.service.ai;
 
 import com.schemaplexai.model.entity.AiModel;
+import com.schemaplexai.common.util.AesEncryptUtil;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
 import org.springframework.util.StringUtils;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.Map;
 
 /**
@@ -76,9 +75,7 @@ public class AiModelConfig {
         );
 
         String rawKey = model.getApiKeyEncrypted();
-        String apiKey = StringUtils.hasText(rawKey)
-                ? new String(Base64.getDecoder().decode(rawKey), StandardCharsets.UTF_8)
-                : "";
+        String apiKey = StringUtils.hasText(rawKey) ? AesEncryptUtil.decrypt(rawKey) : "";
 
         return AiModelConfig.builder()
                 .apiKey(apiKey)

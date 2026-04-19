@@ -55,7 +55,7 @@ public class RagMilvusStoreFactory {
                 .collectionName(settings.getCollectionName())
                 .dimension(settings.getEmbeddingDimension())
                 .consistencyLevel(ConsistencyLevelEnum.STRONG)
-                .autoFlushOnInsert(false)
+                .autoFlushOnInsert(true)
                 .retrieveEmbeddingsOnSearch(false)
                 .build();
     }

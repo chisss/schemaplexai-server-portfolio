@@ -137,6 +137,44 @@ class WorkflowArtifactServiceTest {
     }
 
     @Test
+    void shouldInferImplementationArtifactPathFromDocType() throws Exception {
+        SpecMapper specMapper = mock(SpecMapper.class);
+        SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);
+        GitOperationService gitOperationService = mock(GitOperationService.class);
+        ArtifactService artifactService = mockArtifactService();
+
+        WorkflowArtifactService service = newService(specMapper, specVersionHandler, gitOperationService, artifactService);
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setSpecId("spec-impl");
+        Map<String, Object> variables = new HashMap<>();
+        variables.put("specName", "实现阶段回归");
+        variables.put("jiraTicket", "AIP-202");
+        variables.put("workspacePath", tempDir.toString());
+        instance.setVariables(variables);
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setNodeId("code_development");
+        nodeExecution.setNodeLabel("代码开发");
+
+        service.persistAgentArtifactIfNecessary(
+                instance,
+                nodeExecution,
+                Map.of("artifactDocType", "implementation"),
+                "# 实现报告\n\n- 已完成控制器修复\n"
+        );
+
+        assertThat(Files.readString(tempDir.resolve("docs/AIP-202-implementation.md")))
+                .startsWith("# 实现报告");
+        verify(specVersionHandler).saveDocument(
+                eq("spec-impl"),
+                eq("implementation"),
+                eq("code_development"),
+                any(SpecDocumentRequest.class)
+        );
+    }
+
+    @Test
     void shouldPersistMarketingBundleWithPrimaryVariantAsArtifactContent() throws Exception {
         SpecMapper specMapper = mock(SpecMapper.class);
         SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);

@@ -6,6 +6,7 @@ import com.schemaplexai.model.dto.workflow.*;
 import com.schemaplexai.model.vo.workflow.WorkflowAiArrangeVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
 import com.schemaplexai.model.vo.workflow.WorkflowNodeExecutionVO;
+import com.schemaplexai.model.vo.workflow.WorkflowTemplateNodeExecutionVO;
 import com.schemaplexai.model.vo.workflow.WorkflowTemplateStatsVO;
 import com.schemaplexai.model.vo.workflow.WorkflowTemplateVO;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
@@ -81,6 +82,14 @@ public class WorkflowController {
     @Operation(summary = "切换模板启用/停用状态")
     public R<WorkflowTemplateVO> toggleTemplateStatus(@PathVariable String id) {
         return R.ok(templateService.toggleStatus(id));
+    }
+
+    @GetMapping("/templates/{id}/nodes/{nodeId}/executions")
+    @Operation(summary = "获取模板节点最近执行日志")
+    public R<List<WorkflowTemplateNodeExecutionVO>> listTemplateNodeExecutions(@PathVariable String id,
+                                                                               @PathVariable String nodeId,
+                                                                               @RequestParam(defaultValue = "10") Integer size) {
+        return R.ok(instanceService.listTemplateNodeExecutions(id, nodeId, size));
     }
 
     // ===== 实例管理 =====

@@ -13,6 +13,7 @@ import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import org.junit.jupiter.api.Test;
 
+import javax.sql.DataSource;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -159,7 +160,8 @@ class TeamAgentRuntimeStrategyTest {
                 mock(AgentLogService.class),
                 mock(AgentLoopQualityChecker.class),
                 mock(ExecutionEventStreamService.class),
-                mock(AgentContextPublisher.class)
+                mock(AgentContextPublisher.class),
+                mock(DataSource.class)
         );
     }
 }

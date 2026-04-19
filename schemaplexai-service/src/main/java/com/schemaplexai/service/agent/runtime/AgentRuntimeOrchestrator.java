@@ -4,6 +4,8 @@ import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.common.enums.AgentTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.model.dto.agent.AgentExecuteDTO;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
@@ -22,6 +24,9 @@ import org.springframework.util.StringUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.UUID;
 
 /**
  * Agent 运行时统一编排入口
@@ -78,6 +83,54 @@ public class AgentRuntimeOrchestrator {
         update.setSandboxPolicySnapshot(sandboxPolicyResolver.toSnapshot(sandboxPolicy));
         agentExecutionMapper.updateById(update);
         return strategyFactory.getStrategy(agent.getAgentType()).resume(agent, execution, input);
+    }
+
+    /**
+     * 同步执行 Agent，供工作流 AI 编排等嵌入式场景复用
+     */
+    public AgentExecutionResult executeSynchronously(Agent agent, AgentExecuteDTO dto) {
+        if (agent == null || !StringUtils.hasText(agent.getId())) {
+            throw new BusinessException(ResultCode.AGENT_NOT_FOUND);
+        }
+        AgentExecution execution = new AgentExecution();
+        execution.setTenantId(StringUtils.hasText(agent.getTenantId()) ? agent.getTenantId() : SecurityUtil.getCurrentTenantId());
+        execution.setAgentId(agent.getId());
+        execution.setInputPrompt(dto.getPrompt());
+        execution.setInputContext(dto.getContext());
+        execution.setAiModel(StringUtils.hasText(dto.getModel()) ? dto.getModel() : agent.getAiModel());
+        execution.setConversationId(StringUtils.hasText(dto.getConversationId())
+                ? dto.getConversationId()
+                : UUID.randomUUID().toString().replace("-", ""));
+        execution.setStatus("queued");
+        agentExecutionMapper.insert(execution);
+
+        try {
+            return execute(AgentExecutionContext.builder()
+                    .executionId(execution.getId())
+                    .agentId(agent.getId())
+                    .tenantId(execution.getTenantId())
+                    .inputPrompt(dto.getPrompt())
+                    .model(execution.getAiModel())
+                    .agentModelType(agent.getAiModelType())
+                    .agentModelGroupId(agent.getAiModelGroupId())
+                    .inputContext(dto.getContext())
+                    .conversationId(execution.getConversationId())
+                    .attachmentIds(dto.getAttachmentIds())
+                    .reasoningStrength(dto.getReasoningStrength())
+                    .skillCode(dto.getSkillCode())
+                    .outputFormat(dto.getOutputFormat())
+                    .stream(Boolean.TRUE.equals(dto.getStream()))
+                    .build()).get(90, TimeUnit.SECONDS);
+        } catch (TimeoutException exception) {
+            AgentExecution update = new AgentExecution();
+            update.setId(execution.getId());
+            update.setStatus("failed");
+            update.setErrorMessage("工作流编排 Agent 执行超时");
+            agentExecutionMapper.updateById(update);
+            throw new BusinessException(ResultCode.AI_MODEL_TIMEOUT, "工作流编排 Agent 执行超时");
+        } catch (Exception exception) {
+            throw new BusinessException(ResultCode.FAIL, "工作流编排 Agent 执行失败: " + exception.getMessage());
+        }
     }
 
     private AgentRuntimeEngineEnum resolveRuntimeEngine(Agent agent) {

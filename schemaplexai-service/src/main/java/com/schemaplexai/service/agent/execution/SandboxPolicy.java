@@ -24,7 +24,10 @@ public class SandboxPolicy {
     private SandboxProfileEnum sandboxProfile;
     private AgentRuntimeEngineEnum runtimeEngine;
     private Set<String> allowedToolCodes;
+    private Set<String> allowedCommands;
     private Set<Path> allowedPathPrefixes;
+    private Path defaultWorkingDirectory;
+    private Set<Path> workspacePathAliases;
     private int maxExecutionMinutes;
     private long maxTokenBudget;
     private boolean networkEgressEnabled;

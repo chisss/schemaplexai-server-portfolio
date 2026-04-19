@@ -5,15 +5,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
+import com.schemaplexai.dao.mapper.ApiGatewayMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.McpServerMapper;
 import com.schemaplexai.dao.mapper.SkillMapper;
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.model.entity.ApiGateway;
 import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.entity.Skill;
 import com.schemaplexai.service.ai.LangChain4jToolSpecProvider;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
+import com.schemaplexai.service.agent.tool.executor.ApiGatewayToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.SkillToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
@@ -77,8 +80,10 @@ public class AgentToolSessionFactory {
     private final BuiltinToolMapper builtinToolMapper;
     private final SkillMapper skillMapper;
     private final McpServerMapper mcpServerMapper;
+    private final ApiGatewayMapper apiGatewayMapper;
     private final BuiltinToolExecutor builtinToolExecutor;
     private final SkillToolExecutor skillToolExecutor;
+    private final ApiGatewayToolExecutor apiGatewayToolExecutor;
     private final LangChain4jToolSpecProvider toolSpecProvider;
     private final LangChain4jMcpClientFactory mcpClientFactory;
 
@@ -259,8 +264,14 @@ public class AgentToolSessionFactory {
             ToolSpecification specification = toolSpecProvider.toToolSpecification(definition, searchBehavior);
             availableTools.putIfAbsent(specification.name(), specification);
 
-            com.schemaplexai.service.agent.tool.executor.ToolExecutor delegate =
-                    SourceTypeEnum.BUILTIN.getCode().equals(sourceType) ? builtinToolExecutor : skillToolExecutor;
+            com.schemaplexai.service.agent.tool.executor.ToolExecutor delegate;
+            if (SourceTypeEnum.API_GATEWAY.getCode().equals(sourceType)) {
+                delegate = apiGatewayToolExecutor;
+            } else if (SourceTypeEnum.BUILTIN.getCode().equals(sourceType)) {
+                delegate = builtinToolExecutor;
+            } else {
+                delegate = skillToolExecutor;
+            }
             executors.putIfAbsent(specification.name(),
                     new LangChain4jBindingToolExecutor(
                             objectMapper,
@@ -303,6 +314,25 @@ public class AgentToolSessionFactory {
                     .name(StringUtils.hasText(skill.getDisplayName()) ? skill.getDisplayName() : binding.getToolCode())
                     .description(resolveSkillDescription(skill))
                     .inputSchema(buildSkillSchema(skill.getParameters()))
+                    .sourceType(sourceType)
+                    .userVisible(true)
+                    .build();
+        }
+        if (SourceTypeEnum.API_GATEWAY.getCode().equals(sourceType) && StringUtils.hasText(binding.getSourceRefId())) {
+            ApiGateway gateway = apiGatewayMapper.selectById(binding.getSourceRefId());
+            if (gateway == null || !"active".equals(gateway.getStatus())) {
+                return null;
+            }
+            var schemaNode = objectMapper.createObjectNode();
+            schemaNode.put("type", "object");
+            var propsNode = schemaNode.putObject("properties");
+            propsNode.putObject("body").put("type", "string").put("description", "请求体内容(JSON字符串)");
+            return ToolDefinition.builder()
+                    .code(binding.getToolCode())
+                    .name(gateway.getName())
+                    .description("API网关: " + gateway.getMethod() + " " + gateway.getUrl()
+                            + (StringUtils.hasText(gateway.getDescription()) ? " - " + gateway.getDescription() : ""))
+                    .inputSchema(schemaNode)
                     .sourceType(sourceType)
                     .userVisible(true)
                     .build();

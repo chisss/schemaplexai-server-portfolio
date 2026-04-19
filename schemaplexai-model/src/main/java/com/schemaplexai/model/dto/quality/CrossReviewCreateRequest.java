@@ -16,6 +16,8 @@ public class CrossReviewCreateRequest {
     private String issueType = "both";
     private String artifactId;
     private String targetContent;
+    /** 参照基线内容（可选，不传则自动从 Spec 解析） */
+    private String referenceContent;
     @Size(min = 1, max = 2, message = "模型数量必须为1到2个")
     private List<String> modelIds = new ArrayList<>();
 }

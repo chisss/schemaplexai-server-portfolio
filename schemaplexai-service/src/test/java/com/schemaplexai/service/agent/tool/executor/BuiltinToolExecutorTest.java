@@ -1,26 +1,36 @@
 package com.schemaplexai.service.agent.tool.executor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.service.agent.execution.SandboxGuard;
 import com.schemaplexai.service.agent.tool.audit.ToolExecutionLogService;
 import com.schemaplexai.service.agent.tool.executor.os.CommandValidator;
+import com.schemaplexai.service.agent.tool.executor.os.LinuxCommandAdapter;
 import com.schemaplexai.service.agent.tool.executor.os.MacCommandAdapter;
+import com.schemaplexai.service.agent.tool.executor.os.ShellCommandAdapter;
+import com.schemaplexai.service.agent.tool.executor.os.WindowsCommandAdapter;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
+import com.schemaplexai.service.agent.tool.sandbox.WasmSandboxService;
 import com.schemaplexai.service.tool.security.ToolSecurityValidator;
 import com.schemaplexai.service.workspace.WorkspacePathResolver;
 import com.sun.net.httpserver.HttpServer;
 import okhttp3.OkHttpClient;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class BuiltinToolExecutorTest {
 
@@ -34,7 +44,8 @@ class BuiltinToolExecutorTest {
                 mock(WorkspacePathResolver.class),
                 mock(SandboxGuard.class),
                 new OkHttpClient(),
-                mock(ToolSecurityValidator.class)
+                mock(ToolSecurityValidator.class),
+                mock(WasmSandboxService.class)
         );
         Method method = BuiltinToolExecutor.class.getDeclaredMethod("truncateCommandOutput", String.class);
         method.setAccessible(true);
@@ -77,13 +88,14 @@ class BuiltinToolExecutorTest {
             ObjectMapper objectMapper = new ObjectMapper();
             BuiltinToolExecutor executor = new BuiltinToolExecutor(
                     objectMapper,
-                    List.of(new MacCommandAdapter()),
+                    adapters(),
                     new CommandValidator(),
                     mock(ToolExecutionLogService.class),
                     mock(WorkspacePathResolver.class),
                     mock(SandboxGuard.class),
                     new OkHttpClient(),
-                    mock(ToolSecurityValidator.class)
+                    mock(ToolSecurityValidator.class),
+                    mock(WasmSandboxService.class)
             );
             ToolCall toolCall = ToolCall.builder()
                     .callId("call-web-fetch")
@@ -111,5 +123,166 @@ class BuiltinToolExecutorTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void shouldRejectFilesystemToolWithoutWorkdir() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        BuiltinToolExecutor executor = new BuiltinToolExecutor(
+                objectMapper,
+                adapters(),
+                new CommandValidator(),
+                mock(ToolExecutionLogService.class),
+                mock(WorkspacePathResolver.class),
+                mock(SandboxGuard.class),
+                new OkHttpClient(),
+                mock(ToolSecurityValidator.class),
+                mock(WasmSandboxService.class)
+        );
+        ToolCall toolCall = ToolCall.builder()
+                .callId("call-sys-read")
+                .toolCode("sys.read")
+                .arguments(objectMapper.valueToTree(Map.of("path", "README.md")))
+                .build();
+        AgentToolBinding binding = new AgentToolBinding();
+        binding.setToolCode("sys.read");
+        binding.setSourceType("builtin");
+
+        var result = executor.execute("tenant-test", "agent-test", binding, toolCall);
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.getErrorMessage()).contains("缺少 workdir");
+    }
+
+    @Test
+    void shouldUseDefaultWorkingDirectoryWhenWorkdirMissing(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("README.md"), "schema-plex");
+        ObjectMapper objectMapper = new ObjectMapper();
+        WorkspacePathResolver workspacePathResolver = mock(WorkspacePathResolver.class);
+        when(workspacePathResolver.validateWithinWorkspaceRoot(any(Path.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        BuiltinToolExecutor executor = new BuiltinToolExecutor(
+                objectMapper,
+                adapters(),
+                new CommandValidator(),
+                mock(ToolExecutionLogService.class),
+                workspacePathResolver,
+                mock(SandboxGuard.class),
+                new OkHttpClient(),
+                mock(ToolSecurityValidator.class),
+                mock(WasmSandboxService.class)
+        );
+        ToolCall toolCall = ToolCall.builder()
+                .callId("call-default-workdir")
+                .toolCode("sys.read")
+                .arguments(objectMapper.valueToTree(Map.of("path", "README.md")))
+                .build();
+        AgentToolBinding binding = new AgentToolBinding();
+        binding.setToolCode("sys.read");
+        binding.setSourceType("builtin");
+
+        var result = executor.execute(
+                "tenant-test",
+                "agent-test",
+                binding,
+                toolCall,
+                com.schemaplexai.service.agent.execution.SandboxPolicy.builder()
+                        .defaultWorkingDirectory(tempDir)
+                        .build()
+        );
+
+        assertThat(result.isSuccess()).isTrue();
+        assertThat(result.getResult().get("output").asText()).contains("schema-plex");
+    }
+
+    @Test
+    void shouldTranslateLocalWorkspaceAliasToManagedSnapshot(@TempDir Path tempDir) throws Exception {
+        Path snapshotRoot = tempDir.resolve("snapshot-root");
+        Path moduleDir = snapshotRoot.resolve("schemaplexai-server");
+        Files.createDirectories(moduleDir);
+        Files.writeString(moduleDir.resolve("pom.xml"), "<project>schema-plex</project>");
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        WorkspacePathResolver workspacePathResolver = mock(WorkspacePathResolver.class);
+        when(workspacePathResolver.validateWithinWorkspaceRoot(any(Path.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        BuiltinToolExecutor executor = new BuiltinToolExecutor(
+                objectMapper,
+                adapters(),
+                new CommandValidator(),
+                mock(ToolExecutionLogService.class),
+                workspacePathResolver,
+                mock(SandboxGuard.class),
+                new OkHttpClient(),
+                mock(ToolSecurityValidator.class),
+                mock(WasmSandboxService.class)
+        );
+        ToolCall toolCall = ToolCall.builder()
+                .callId("call-workdir-alias")
+                .toolCode("sys.read")
+                .arguments(objectMapper.valueToTree(Map.of(
+                        "path", "pom.xml",
+                        "workdir", "/Users/demo/projects/AiWorkPlatform/schemaplexai-server"
+                )))
+                .build();
+        AgentToolBinding binding = new AgentToolBinding();
+        binding.setToolCode("sys.read");
+        binding.setSourceType("builtin");
+
+        var result = executor.execute(
+                "tenant-test",
+                "agent-test",
+                binding,
+                toolCall,
+                com.schemaplexai.service.agent.execution.SandboxPolicy.builder()
+                        .defaultWorkingDirectory(snapshotRoot)
+                        .workspacePathAliases(java.util.Set.of(Path.of("/Users/demo/projects/AiWorkPlatform")))
+                        .build()
+        );
+
+        assertThat(result.isSuccess()).isTrue();
+        assertThat(result.getResult().get("output").asText()).contains("schema-plex");
+    }
+
+    @Test
+    void shouldRejectProjectRootWorkdirOutsideWorkspace() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        WorkspacePathResolver workspacePathResolver = mock(WorkspacePathResolver.class);
+        when(workspacePathResolver.validateWithinWorkspaceRoot(any(Path.class)))
+                .thenThrow(new com.schemaplexai.common.exception.BusinessException(
+                        ResultCode.WORKSPACE_PATH_CONFLICT,
+                        "工作空间路径必须位于工作空间根目录内"
+                ));
+        BuiltinToolExecutor executor = new BuiltinToolExecutor(
+                objectMapper,
+                adapters(),
+                new CommandValidator(),
+                mock(ToolExecutionLogService.class),
+                workspacePathResolver,
+                mock(SandboxGuard.class),
+                new OkHttpClient(),
+                mock(ToolSecurityValidator.class),
+                mock(WasmSandboxService.class)
+        );
+        ToolCall toolCall = ToolCall.builder()
+                .callId("call-project-root")
+                .toolCode("sys.read")
+                .arguments(objectMapper.valueToTree(Map.of(
+                        "path", "pom.xml",
+                        "workdir", Path.of("").toAbsolutePath().normalize().toString()
+                )))
+                .build();
+        AgentToolBinding binding = new AgentToolBinding();
+        binding.setToolCode("sys.read");
+        binding.setSourceType("builtin");
+
+        var result = executor.execute("tenant-test", "agent-test", binding, toolCall);
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.getErrorMessage()).contains("工作空间路径必须位于工作空间根目录内");
+    }
+
+    private List<ShellCommandAdapter> adapters() {
+        return List.of(new MacCommandAdapter(), new LinuxCommandAdapter(), new WindowsCommandAdapter());
     }
 }

@@ -52,6 +52,12 @@ public class WorkflowTemplate implements Serializable {
     /** 模板状态: draft/published/archived */
     private String status;
 
+    /** 触发类型: trigger_manual/trigger_cron/trigger_event */
+    private String triggerType;
+
+    /** Flowable 流程定义ID */
+    private String processDefinitionId;
+
     /** 创建人 */
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;

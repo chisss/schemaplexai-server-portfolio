@@ -43,7 +43,7 @@ public class ReviewSession implements Serializable {
     /** Spec Owner */
     private String owner;
 
-    /** 评审人列表[{userId, role, status, submittedAt}] */
+    /** 评审人列表[{userId, reviewerName, role, status, submittedAt}] */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private List<Object> reviewers;
 

@@ -13,11 +13,13 @@ import com.schemaplexai.service.rag.EmbeddingQuotaGuard;
 import com.schemaplexai.service.rag.RagConfigService;
 import com.schemaplexai.service.rag.RagRuntimeSettings;
 import com.schemaplexai.service.vector.EmbeddingTokenEstimator;
+import com.schemaplexai.service.vector.ScoringService;
 import dev.langchain4j.rag.content.Content;
 import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
 import dev.langchain4j.store.embedding.filter.logical.And;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -43,6 +45,8 @@ public class RagContentRetrieverFactory {
     private final EmbeddingModelProvider embeddingModelProvider;
     private final RagConfigService ragConfigService;
     private final EmbeddingQuotaGuard embeddingQuotaGuard;
+    @Nullable
+    private final ScoringService scoringService;
 
     /**
      * 为指定租户构建 ContentRetriever
@@ -89,6 +93,11 @@ public class RagContentRetrieverFactory {
                 ? List.of()
                 : contextIds.stream().filter(StringUtils::hasText).distinct().toList();
 
+        // Reranker 启用时，扩大一阶段召回量
+        boolean rerankerEnabled = settings.isRerankerEnabled() && scoringService != null && scoringService.isAvailable();
+        int actualMaxResults = rerankerEnabled ? Math.max(maxResults * 3, 20) : maxResults;
+        int rerankerTopN = rerankerEnabled ? settings.getRerankerTopN() : maxResults;
+
         return query -> {
             long startMs = System.currentTimeMillis();
             RagOperationLog operationLog = new RagOperationLog();
@@ -106,8 +115,12 @@ public class RagContentRetrieverFactory {
             operationLog.setRequestChars(query.text() != null ? query.text().length() : 0);
             operationLog.setRequestTokens(EmbeddingTokenEstimator.estimate(query.text()));
             Map<String, Object> metadata = new LinkedHashMap<>();
-            metadata.put("maxResults", maxResults);
+            metadata.put("maxResults", actualMaxResults);
             metadata.put("minScore", minScore);
+            metadata.put("rerankerEnabled", rerankerEnabled);
+            if (rerankerEnabled) {
+                metadata.put("rerankerTopN", rerankerTopN);
+            }
             if (!scopedContextIds.isEmpty()) {
                 metadata.put("contextIds", scopedContextIds);
             }
@@ -121,7 +134,7 @@ public class RagContentRetrieverFactory {
                 }
                 EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(EmbeddingSearchRequest.builder()
                         .queryEmbedding(embeddingModel.embed(query.text()).content())
-                        .maxResults(maxResults)
+                        .maxResults(actualMaxResults)
                         .minScore(minScore)
                         .filter(filter)
                         .build());
@@ -138,10 +151,28 @@ public class RagContentRetrieverFactory {
                         operationLog.setContextId(matchedContextIds.iterator().next());
                     }
                 }
-                List<Content> contents = searchResult.matches().stream()
-                        .map(EmbeddingMatch::embedded)
-                        .map(Content::from)
-                        .toList();
+
+                List<Content> contents;
+                if (rerankerEnabled && !searchResult.matches().isEmpty()) {
+                    // 二阶段精排：Reranker 对召回结果重新评分排序
+                    List<String> passages = searchResult.matches().stream()
+                            .map(EmbeddingMatch::embedded)
+                            .map(TextSegment::text)
+                            .toList();
+                    List<ScoringService.ScoredPassage> reranked = scoringService.rerank(
+                            query.text(), passages, rerankerTopN);
+                    contents = reranked.stream()
+                            .map(sp -> Content.from(sp.text()))
+                            .toList();
+                    operationLog.getMetadata().put("rerankedCount", reranked.size());
+                    log.debug("Reranker 精排: 输入 {} 条 → 输出 {} 条", passages.size(), reranked.size());
+                } else {
+                    contents = searchResult.matches().stream()
+                            .map(EmbeddingMatch::embedded)
+                            .map(Content::from)
+                            .toList();
+                }
+
                 operationLog.setStatus("success");
                 operationLog.setRetrievedCount(contents.size());
                 operationLog.setDurationMs(System.currentTimeMillis() - startMs);

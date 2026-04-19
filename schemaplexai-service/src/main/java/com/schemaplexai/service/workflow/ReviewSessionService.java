@@ -23,6 +23,8 @@ public interface ReviewSessionService {
 
     List<ReviewSessionVO> getMyPending();
 
+    void updateActionUrl(String sessionId, String actionUrl);
+
     ReviewSessionVO approve(String sessionId, ReviewDecisionRequest request);
 
     ReviewSessionVO reject(String sessionId, ReviewDecisionRequest request);

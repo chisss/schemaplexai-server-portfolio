@@ -15,10 +15,15 @@ import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.Quali
 import com.schemaplexai.service.agent.execution.AgentLoopToolHandler.ToolExecutionOutcome;
 import com.schemaplexai.service.agent.execution.AgentModelInvoker.ModelCallResult;
 import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
+import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.ai.AIModelRouter;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jResolution;
 import com.schemaplexai.service.memory.CompositeChatMemoryStore;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
+import com.schemaplexai.service.storage.DocumentStorageService;
+import com.schemaplexai.service.util.FileContentExtractor;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -30,10 +35,12 @@ import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -90,6 +97,9 @@ public class AgentExecutionEngine {
     private final AgentLoopCompletionHandler   completionHandler;
     private final AgentLoopQualityChecker      qualityChecker;
     private final AgentLoopShadowReviewService shadowReviewService;
+    private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
+    private final DocumentStorageService       documentStorageService;
+    private final FileContentExtractor         fileContentExtractor;
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
     private final AgentChatMemoryCompactor     chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport);
 
@@ -153,13 +163,14 @@ public class AgentExecutionEngine {
 
         // 加载执行参数（数据库配置优先，ctx 中的值次之，最后回退默认值）
         AgentEngineParams params = engineConfigLoader.load(agentId, ctx);
+        applyRuntimeInstructions(ctx);
 
         // 解析模型链
         List<LangChain4jResolution> modelChain = resolveModelChain(ctx);
         LangChain4jResolution first = modelChain.getFirst();
 
         // 构建 System Prompt
-        String extraContext  = buildExtraContext(ctx.getInputPrompt(), ctx.getInputContext());
+        String extraContext  = buildExtraContext(ctx);
         ContextInjector.PromptBuildResult promptBuildResult = contextInjector.buildSystemPromptDetail(
                 agentId, extraContext, tenantId, ctx.getTeamAgentId(), ctx.getAdditionalSystemContexts(), first.config());
         String systemPrompt  = promptBuildResult.prompt();
@@ -173,7 +184,7 @@ public class AgentExecutionEngine {
 
         // 添加用户消息（首次执行或恢复执行）
         if (resumeInput == null) {
-            chatMemory.add(UserMessage.from(buildUserMessage(ctx.getInputPrompt(), ctx.getInputContext())));
+            chatMemory.add(UserMessage.from(buildUserMessage(ctx)));
         } else {
             addResumeMessage(executionId, agentId, tenantId, chatMemory, resumeInput, startMs);
         }
@@ -233,9 +244,12 @@ public class AgentExecutionEngine {
                     AiModelConfig activeModelConfig = modelChain.getFirst().config();
                     AgentChatMemoryCompactor.CompactionResult compactionResult =
                             chatMemoryCompactor.compactIfNeeded(chatMemory, params, activeModelConfig);
+                    AgentChatMemoryCompactor.NormalizationResult normalizationResult =
+                            chatMemoryCompactor.normalizeForRequest(chatMemory);
                     List<ChatMessage> messages = buildMessages(effectiveSystemPrompt, chatMemory);
                     logContextBudget(executionId, agentId, tenantId, round,
-                            effectiveSystemPrompt, chatMemory, messages, activeModelConfig, compactionResult, startMs);
+                            effectiveSystemPrompt, chatMemory, messages, activeModelConfig,
+                            compactionResult, normalizationResult, startMs);
                     ChatRequest request = ChatRequest.builder().messages(messages).toolSpecifications(effectiveTools).build();
                     callResult = modelInvoker.invokeChainWithRetry(modelChain, request, params,
                             executionId, agentId, tenantId, round, startMs, agentLogService);
@@ -621,6 +635,54 @@ public class AgentExecutionEngine {
                                                        AgentLoopState state, long startMs, String conversationId) {
         String sanitized = qualityChecker.sanitize(state.getLastContent());
         state.setLastContent(sanitized);
+
+        // 输出安全合规检查（PII、敏感信息、有害内容、合规风险）
+        SecurityCheckDecisionVO securityDecision = evaluateOutputSecurity(agentId, executionId, tenantId, sanitized);
+        if (securityDecision != null) {
+            String decision = securityDecision.getDecision();
+            String message = StringUtils.hasText(securityDecision.getMessage())
+                    ? securityDecision.getMessage() : "输出内容命中安全策略";
+            if (SecurityComplianceConstant.DECISION_BLOCK.equals(decision)) {
+                agentLogService.updateExecutionStatus(executionId, STATUS_FAILED, message,
+                        state.getTotalTokenInput(), state.getTotalTokenOutput(), null);
+                agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
+                        AgentLoopLogTypeEnum.SECURITY_BLOCKED.getCode(), state.getLastRound(), null,
+                        "输出安全检查阻断: " + message, null, elapsed(startMs));
+                executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.FAILED.getCode(),
+                        state.getLastRound(), "输出安全检查阻断: " + message, startMs);
+                return AgentExecutionResult.builder()
+                        .status(STATUS_FAILED)
+                        .errorMessage("输出安全检查阻断: " + message)
+                        .tokenInput(state.getTotalTokenInput())
+                        .tokenOutput(state.getTotalTokenOutput())
+                        .rounds(state.getLastRound())
+                        .build();
+            }
+            if (SecurityComplianceConstant.DECISION_PAUSE.equals(decision)) {
+                agentLogService.updateExecutionStatus(executionId, STATUS_PAUSED, message,
+                        state.getTotalTokenInput(), state.getTotalTokenOutput(), sanitized);
+                agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                        AgentLoopLogTypeEnum.SECURITY_PAUSED.getCode(), state.getLastRound(), null,
+                        "输出安全检查暂停: " + message, null, elapsed(startMs));
+                executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.REQUIRE_INPUT.getCode(),
+                        state.getLastRound(), "输出安全检查暂停: " + message, startMs);
+                return AgentExecutionResult.builder()
+                        .status(STATUS_PAUSED)
+                        .outputResult(sanitized)
+                        .errorMessage("输出安全检查暂停: " + message)
+                        .conversationId(conversationId)
+                        .tokenInput(state.getTotalTokenInput())
+                        .tokenOutput(state.getTotalTokenOutput())
+                        .rounds(state.getLastRound())
+                        .build();
+            }
+            if (SecurityComplianceConstant.DECISION_WARN.equals(decision)) {
+                agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                        AgentLoopLogTypeEnum.SECURITY_PAUSED.getCode(), state.getLastRound(), null,
+                        "输出安全检查警告: " + message, null, elapsed(startMs));
+            }
+        }
+
         agentLogService.updateExecutionStatus(executionId, STATUS_COMPLETED, null,
                 state.getTotalTokenInput(), state.getTotalTokenOutput(), sanitized);
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
@@ -776,20 +838,88 @@ public class AgentExecutionEngine {
         return chain;
     }
 
-    /** 构建额外上下文字符串（inputPrompt + inputContext 合并） */
-    private String buildExtraContext(String inputPrompt, Map<String, Object> inputContext) {
-        if (inputContext == null || inputContext.isEmpty()) return inputPrompt;
+    private void applyRuntimeInstructions(AgentExecutionContext ctx) {
+        List<String> additionalContexts = new ArrayList<>(
+                ctx.getAdditionalSystemContexts() == null ? List.of() : ctx.getAdditionalSystemContexts()
+        );
+        if (StringUtils.hasText(ctx.getReasoningStrength())) {
+            switch (ctx.getReasoningStrength().trim().toLowerCase()) {
+                case "high" -> additionalContexts.add("推理强度要求：请进行深度分析和推理，覆盖边界情况、风险与替代方案。");
+                case "low" -> additionalContexts.add("推理强度要求：请直接给出简洁结论，不需要展开冗长推理。");
+                default -> {
+                    // medium 保持默认行为，不额外追加约束。
+                }
+            }
+        }
+        if (StringUtils.hasText(ctx.getOutputFormat())) {
+            switch (ctx.getOutputFormat().trim().toLowerCase()) {
+                case "markdown" -> additionalContexts.add("输出格式要求：请使用 Markdown 输出，适当使用标题、列表、表格和代码块。");
+                case "plain_text" -> additionalContexts.add("输出格式要求：请使用纯文本输出，不要添加 Markdown 标记。");
+                case "structured_json" ->
+                        additionalContexts.add("输出格式要求：请仅输出单个 JSON 对象，不要输出代码块围栏或额外解释。");
+                default -> {
+                    // 未识别的格式保持兼容忽略。
+                }
+            }
+        }
+        if (StringUtils.hasText(ctx.getSkillCode())) {
+            additionalContexts.add("技能偏好：用户指定本轮优先调用技能 `" + ctx.getSkillCode().trim() + "`，请优先选择与之匹配的工具。");
+        }
+        ctx.setAdditionalSystemContexts(additionalContexts);
+    }
+
+    /** 构建额外上下文字符串（inputPrompt + inputContext + 附件内容 合并） */
+    private String buildExtraContext(AgentExecutionContext ctx) {
+        String inputPrompt = ctx.getInputPrompt();
+        Map<String, Object> inputContext = ctx.getInputContext();
         StringBuilder sb = new StringBuilder();
         if (StringUtils.hasText(inputPrompt)) sb.append(inputPrompt).append("\n\n");
-        inputContext.forEach((k, v) -> {
-            if (v != null) sb.append(k).append(": ").append(v).append("\n");
-        });
+        if (inputContext != null && !inputContext.isEmpty()) {
+            inputContext.forEach((k, v) -> {
+                if (v != null) sb.append(k).append(": ").append(v).append("\n");
+            });
+            sb.append("\n");
+        }
+        String attachmentContext = buildAttachmentContext(ctx.getAttachmentIds());
+        if (StringUtils.hasText(attachmentContext)) {
+            sb.append("附件内容摘要：\n").append(attachmentContext).append("\n");
+        }
         return sb.toString().trim();
     }
 
     /** 构建用户消息内容 */
-    private String buildUserMessage(String inputPrompt, Map<String, Object> inputContext) {
-        return buildExtraContext(inputPrompt, inputContext);
+    private String buildUserMessage(AgentExecutionContext ctx) {
+        return buildExtraContext(ctx);
+    }
+
+    private String buildAttachmentContext(List<String> attachmentIds) {
+        if (attachmentIds == null || attachmentIds.isEmpty()) {
+            return "";
+        }
+        List<String> contents = new ArrayList<>();
+        for (String attachmentId : attachmentIds) {
+            if (!StringUtils.hasText(attachmentId)) {
+                continue;
+            }
+            String fileName = resolveAttachmentFileName(attachmentId);
+            try (InputStream inputStream = documentStorageService.getObject(
+                    documentStorageService.getDefaultBucket(), attachmentId)) {
+                String content = fileContentExtractor.extract(fileName, inputStream);
+                if (StringUtils.hasText(content)) {
+                    contents.add("### " + fileName + "\n" + content);
+                }
+            } catch (Exception exception) {
+                log.warn("读取附件内容失败: attachmentId={}, error={}", attachmentId, exception.getMessage());
+            }
+        }
+        return String.join("\n\n", contents);
+    }
+
+    private String resolveAttachmentFileName(String attachmentId) {
+        int index = attachmentId.lastIndexOf('/');
+        return index >= 0 && index < attachmentId.length() - 1
+                ? attachmentId.substring(index + 1)
+                : attachmentId;
     }
 
     // =========================================================================
@@ -864,7 +994,9 @@ public class AgentExecutionEngine {
     private void logContextBudget(String executionId, String agentId, String tenantId,
                                   int round, String systemPrompt, ChatMemory chatMemory,
                                   List<ChatMessage> requestMessages, AiModelConfig modelConfig,
-                                  AgentChatMemoryCompactor.CompactionResult compactionResult, long startMs) {
+                                  AgentChatMemoryCompactor.CompactionResult compactionResult,
+                                  AgentChatMemoryCompactor.NormalizationResult normalizationResult,
+                                  long startMs) {
         int systemPromptTokens = tokenEstimatorSupport.estimateText(modelConfig, systemPrompt);
         int chatMemoryTokens = tokenEstimatorSupport.estimateMessages(modelConfig, chatMemory.messages());
         int requestTokens = tokenEstimatorSupport.estimateMessages(modelConfig, requestMessages);
@@ -878,7 +1010,10 @@ public class AgentExecutionEngine {
                         + ", compactionApplied=" + compactionResult.compacted()
                         + ", compactionBeforeTokens=" + compactionResult.beforeTokens()
                         + ", compactionAfterTokens=" + compactionResult.afterTokens()
-                        + ", summaryChars=" + compactionResult.summaryChars(),
+                        + ", summaryChars=" + compactionResult.summaryChars()
+                        + ", normalizationApplied=" + normalizationResult.normalized()
+                        + ", normalizedSegments=" + normalizationResult.convertedSegments()
+                        + ", droppedInvalidMessages=" + normalizationResult.droppedMessages(),
                 null, elapsed(startMs));
     }
 
@@ -886,6 +1021,33 @@ public class AgentExecutionEngine {
     private String resolveExMsg(Exception e) {
         return e != null && StringUtils.hasText(e.getMessage()) ? e.getMessage()
                 : e != null ? e.getClass().getSimpleName() : "unknown";
+    }
+
+    /** 评估 Agent 输出内容的安全合规性（PII、敏感信息、有害内容、合规风险） */
+    private SecurityCheckDecisionVO evaluateOutputSecurity(String agentId, String executionId,
+                                                           String tenantId, String content) {
+        try {
+            SecurityRuntimeGuardService guard = securityRuntimeGuardServiceProvider.getIfAvailable();
+            if (guard == null || !StringUtils.hasText(content)) {
+                return null;
+            }
+            SecurityRuntimeCheckRequest request = new SecurityRuntimeCheckRequest();
+            request.setTenantId(tenantId);
+            request.setScene(SecurityComplianceConstant.CHECK_SCENE_OUTPUT);
+            request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+            request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION);
+            request.setResourceId(executionId);
+            request.setAgentId(agentId);
+            request.setContent(content);
+            SecurityCheckDecisionVO decision = guard.evaluate(request, null);
+            if (decision == null || SecurityComplianceConstant.DECISION_ALLOW.equals(decision.getDecision())) {
+                return null;
+            }
+            return decision;
+        } catch (Exception e) {
+            log.warn("输出安全检查异常，默认放行: executionId={}", executionId, e);
+            return null;
+        }
     }
 
     private void scheduleShadowReviewIfNeeded(AgentExecutionContext ctx,

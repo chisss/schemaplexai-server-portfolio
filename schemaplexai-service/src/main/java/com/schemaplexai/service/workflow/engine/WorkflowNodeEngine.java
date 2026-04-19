@@ -8,6 +8,9 @@ import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.common.enums.NodeTypeEnum;
 import com.schemaplexai.common.enums.SpecLifecycleModeEnum;
 import com.schemaplexai.common.enums.SpecStatusEnum;
+import com.schemaplexai.common.enums.ExecutionStrategyEnum;
+import com.schemaplexai.common.enums.QualityIssueTypeEnum;
+import com.schemaplexai.common.enums.TaskStatusEnum;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
@@ -18,6 +21,7 @@ import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.model.entity.QualityIssue;
 import com.schemaplexai.model.entity.Role;
 import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.entity.UserRole;
@@ -31,13 +35,19 @@ import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.mq.AgentContextPublisher;
+import com.schemaplexai.service.quality.gate.QualityGateDecision;
 import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import com.schemaplexai.service.notification.InAppMessageService;
+import com.schemaplexai.service.quality.feedback.QualityIssueFeedbackService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
+import com.schemaplexai.service.quality.pipeline.QualityCheckRequest;
+import com.schemaplexai.service.quality.pipeline.QualityCheckResult;
+import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategy;
 import com.schemaplexai.service.workflow.ReviewSessionService;
 import com.schemaplexai.service.workflow.engine.assembler.WorkflowNodeContextAssembler;
 import com.schemaplexai.service.workflow.engine.handler.DeviationAnalysisHandler;
 import com.schemaplexai.service.workflow.engine.handler.QualityReportHandler;
+import com.schemaplexai.service.workflow.flowable.FlowableWorkflowBridge;
 import com.schemaplexai.service.workflow.runtime.WorkflowArtifactService;
 import com.schemaplexai.service.workflow.runtime.WorkflowNotificationService;
 import lombok.RequiredArgsConstructor;
@@ -106,7 +116,9 @@ public class WorkflowNodeEngine {
     private final ObjectProvider<ReviewSessionService> reviewSessionServiceProvider;
     private final InAppMessageService inAppMessageService;
     private final BuiltinQualityAssuranceService builtinQualityAssuranceService;
+    private final QualityIssueFeedbackService qualityIssueFeedbackService;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
+    private final FlowableWorkflowBridge flowableBridge;
 
     /**
      * 自注入自身代理，用于让 @Async 注解在同类方法调用时生效（绕过 Spring AOP 自调用限制）
@@ -153,6 +165,195 @@ public class WorkflowNodeEngine {
     }
 
     /**
+     * 仅初始化节点执行记录（不驱动首节点），供 Flowable 模式使用。
+     * <p>Flowable 启动流程后会自动驱动首节点，因此只需初始化 sf_workflow_node_execution 记录。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void initNodeExecutionRecords(WorkflowInstance instance) {
+        Map<String, Object> definition = instance.getDefinition();
+        if (definition == null) {
+            return;
+        }
+        List<Map<String, Object>> nodes = getNodes(definition);
+        if (!nodes.isEmpty()) {
+            initNodeExecutions(instance, nodes);
+        }
+    }
+
+    /**
+     * 同步执行单个节点（供 Flowable ServiceTask delegate 调用）
+     * <p>注意：此方法在 Flowable 的事务中同步执行，不使用 @Async。
+     * 执行完成后 Flowable 会自动流转到下一节点。
+     */
+    public void executeNodeSync(WorkflowInstance instance, String nodeId, Map<String, Object> previousOutput) {
+        Map<String, Object> definition = instance.getDefinition();
+        List<Map<String, Object>> nodes = getNodes(definition);
+        List<Map<String, Object>> edges = getEdges(definition);
+        Map<String, Object> nodeDef = findNodeDef(nodeId, nodes);
+        if (nodeDef == null) {
+            log.warn("节点定义不存在: instanceId={}, nodeId={}", instance.getId(), nodeId);
+            return;
+        }
+
+        String nodeType = str(nodeDef, "type");
+        WorkflowNodeExecution nodeExec = findNodeExecution(instance.getId(), nodeId);
+        if (nodeExec == null) {
+            log.warn("节点执行记录不存在: instanceId={}, nodeId={}", instance.getId(), nodeId);
+            return;
+        }
+
+        nodeExec.setInputData(contextAssembler.buildInputData(instance, previousOutput));
+        nodeExec.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+        nodeExec.setStartedAt(LocalDateTime.now());
+        nodeExec.setCompletedAt(null);
+        nodeExec.setErrorMessage(null);
+        clearNullableNodeExecutionColumns(nodeExec.getId(), false, true, true);
+        nodeExecutionMapper.updateById(nodeExec);
+        updateCurrentNode(instance, nodeId, nodeType, str(nodeDef, "label"));
+
+        log.info("同步执行节点: instanceId={}, nodeId={}, nodeType={}", instance.getId(), nodeId, nodeType);
+
+        try {
+            switch (nodeType) {
+                case "trigger_manual", "trigger_cron", "trigger_event" ->
+                        handleTriggerNodeSync(nodeExec);
+                case "notification" ->
+                        handleNotificationNodeSync(instance, nodeExec, nodeDef);
+                case "deviation_analysis" ->
+                        handleDeviationAnalysisNodeSync(instance, nodeExec);
+                case "quality_report" ->
+                        handleQualityReportNodeSync(instance, nodeExec);
+                case "end" ->
+                        handleEndNode(instance, nodeExec);
+                default -> {
+                    log.info("同步模式 - 未特殊处理的节点类型，自动完成: nodeType={}", nodeType);
+                    completeNodeExecution(nodeExec, Map.of("auto", true));
+                    saveNodeOutput(instance, nodeId, Map.of("auto", true));
+                }
+            }
+        } catch (Exception e) {
+            log.error("同步节点执行异常: instanceId={}, nodeId={}", instance.getId(), nodeId, e);
+            handleNodeFailure(instance, nodeExec, nodeDef,
+                    StringUtils.hasText(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName(),
+                    new LinkedHashMap<>(), null);
+        }
+    }
+
+    /**
+     * 异步执行单个节点（供 Flowable ReceiveTask/UserTask listener 调用）
+     * <p>ReceiveTask 到达时 Flowable 停住，本方法异步执行节点逻辑，
+     * 完成后通过 FlowableWorkflowBridge.triggerReceiveTask() 通知 Flowable 继续。
+     */
+    public void executeNodeAsync(WorkflowInstance instance, String nodeId, Map<String, Object> previousOutput) {
+        Map<String, Object> definition = instance.getDefinition();
+        List<Map<String, Object>> nodes = getNodes(definition);
+        List<Map<String, Object>> edges = getEdges(definition);
+        // 复用原有的 driveNode 异步方法
+        self.driveNodeForFlowable(instance, nodeId, nodes, edges, previousOutput);
+    }
+
+    /**
+     * Flowable 模式下的异步节点驱动（不调用 advanceWorkflow，由 Flowable 引擎流转）
+     */
+    @Async("agentExecutorPool")
+    public void driveNodeForFlowable(WorkflowInstance instance, String nodeId,
+                                      List<Map<String, Object>> nodes, List<Map<String, Object>> edges,
+                                      Map<String, Object> previousOutput) {
+        Map<String, Object> nodeDef = findNodeDef(nodeId, nodes);
+        if (nodeDef == null) {
+            log.warn("节点定义不存在: instanceId={}, nodeId={}", instance.getId(), nodeId);
+            return;
+        }
+
+        String nodeType = str(nodeDef, "type");
+        WorkflowNodeExecution nodeExec = findNodeExecution(instance.getId(), nodeId);
+        if (nodeExec == null) {
+            log.warn("节点执行记录不存在: instanceId={}, nodeId={}", instance.getId(), nodeId);
+            return;
+        }
+
+        nodeExec.setInputData(contextAssembler.buildInputData(instance, previousOutput));
+        nodeExec.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+        nodeExec.setStartedAt(LocalDateTime.now());
+        nodeExec.setCompletedAt(null);
+        nodeExec.setErrorMessage(null);
+        clearNullableNodeExecutionColumns(nodeExec.getId(), false, true, true);
+        nodeExecutionMapper.updateById(nodeExec);
+        updateCurrentNode(instance, nodeId, nodeType, str(nodeDef, "label"));
+
+        log.info("Flowable 模式异步执行节点: instanceId={}, nodeId={}, nodeType={}", instance.getId(), nodeId, nodeType);
+
+        try {
+            switch (nodeType) {
+                case "agent" ->
+                        handleAgentNode(instance, nodeExec, nodeDef);
+                case "document" ->
+                        handleDocumentNode(instance, nodeExec, nodeDef);
+                case "human_review" ->
+                        handleHumanReviewNode(instance, nodeExec, nodeDef);
+                default -> {
+                    log.info("Flowable 异步模式 - 非预期的节点类型: nodeType={}", nodeType);
+                    completeNodeExecution(nodeExec, Map.of("auto", true));
+                    saveNodeOutput(instance, nodeId, Map.of("auto", true));
+                    // 对于非预期节点，trigger Flowable 继续
+                    boolean flowableTriggered = triggerFlowableContinue(instance, nodeId);
+                    if (!flowableTriggered) {
+                        log.warn("Flowable 节点续转失败，降级为本地推进: instanceId={}, nodeId={}",
+                                instance.getId(), nodeId);
+                        advanceWorkflow(instance.getId(), nodeId, Map.of("auto", true));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("Flowable 异步节点执行异常: instanceId={}, nodeId={}", instance.getId(), nodeId, e);
+            handleNodeFailure(instance, nodeExec, nodeDef,
+                    StringUtils.hasText(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName(),
+                    new LinkedHashMap<>(), null);
+        }
+    }
+
+    /**
+     * 通知 Flowable 异步节点完成，继续流转（ReceiveTask trigger）
+     */
+    public boolean triggerFlowableContinue(WorkflowInstance instance, String nodeId) {
+        if (instance != null && StringUtils.hasText(instance.getProcessInstanceId())) {
+            return flowableBridge.triggerReceiveTask(instance.getProcessInstanceId(), nodeId);
+        }
+        return false;
+    }
+
+    // ---- 同步模式的节点处理器（不调用 advanceWorkflow） ----
+
+    private void handleTriggerNodeSync(WorkflowNodeExecution nodeExec) {
+        Map<String, Object> output = Map.of("triggered", true, "triggeredAt", LocalDateTime.now().toString());
+        completeNodeExecution(nodeExec, output);
+        saveNodeOutput(instanceMapper.selectById(nodeExec.getInstanceId()), nodeExec.getNodeId(), output);
+    }
+
+    private void handleNotificationNodeSync(WorkflowInstance instance, WorkflowNodeExecution nodeExec,
+                                             Map<String, Object> nodeDef) {
+        Map<String, Object> config = getConfig(nodeDef);
+        Map<String, Object> output = workflowNotificationService.sendWorkflowCompletedNotification(instance, nodeExec, config);
+        completeNodeExecution(nodeExec, output);
+        saveNodeOutput(instance, nodeExec.getNodeId(), output);
+    }
+
+    private void handleDeviationAnalysisNodeSync(WorkflowInstance instance, WorkflowNodeExecution nodeExec) {
+        Map<String, Object> output = deviationAnalysisHandler.analyze(instance);
+        completeNodeExecution(nodeExec, output);
+        saveNodeOutput(instance, nodeExec.getNodeId(), output);
+    }
+
+    private void handleQualityReportNodeSync(WorkflowInstance instance, WorkflowNodeExecution nodeExec) {
+        Map<String, Object> report = qualityReportHandler.generateReport(instance);
+        Map<String, Object> output = new HashMap<>();
+        output.put("qualityReport", report);
+        output.put("reportGeneratedAt", LocalDateTime.now().toString());
+        completeNodeExecution(nodeExec, output);
+        saveNodeOutput(instance, nodeExec.getNodeId(), output);
+    }
+
+    /**
      * 某节点完成后，推进到下一个节点（approve 操作调用此方法）
      */
     @Transactional(rollbackFor = Exception.class)
@@ -186,6 +387,41 @@ public class WorkflowNodeEngine {
             updateCurrentNode(instance, nextNodeId, str(nextNodeDef, "type"), str(nextNodeDef, "label"));
             driveNodeAfterCommit(instance, nextNodeId, nodes, edges, handoffOutput);
         }
+    }
+
+    /**
+     * 从暂停节点恢复工作流。
+     * 质量问题恢复场景下，需要先把实例与节点状态恢复为可推进状态，再沿既有边推进到后继节点。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void resumePausedWorkflow(String instanceId, String pausedNodeId, Map<String, Object> overrideData) {
+        WorkflowInstance instance = instanceMapper.selectById(instanceId);
+        if (instance == null) {
+            throw new IllegalStateException("工作流实例不存在: " + instanceId);
+        }
+        WorkflowNodeExecution nodeExec = findNodeExecution(instanceId, pausedNodeId);
+        if (nodeExec == null) {
+            throw new IllegalStateException("工作流节点不存在: " + pausedNodeId);
+        }
+        Map<String, Object> resumedOutput = mergeNodeOutputData(nodeExec.getOutputData(), overrideData);
+        nodeExec.setStatus(WorkflowInstanceStatusEnum.COMPLETED.getCode());
+        nodeExec.setErrorMessage(null);
+        if (nodeExec.getCompletedAt() == null) {
+            nodeExec.setCompletedAt(LocalDateTime.now());
+        }
+        nodeExec.setOutputData(prepareStructuredOutputData(nodeExec, resumedOutput));
+        nodeExecutionMapper.updateById(nodeExec);
+
+        instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+        instance.setUpdatedAt(LocalDateTime.now());
+        instanceMapper.updateById(instance);
+        syncSpecLifecycle(instance.getSpecId(), nodeExec.getNodeId(), nodeExec.getNodeType(),
+                nodeExec.getNodeLabel(), WorkflowInstanceStatusEnum.RUNNING.getCode(), null);
+
+        if (resumePausedFlowableNode(instance, pausedNodeId, resumedOutput)) {
+            return;
+        }
+        advanceWorkflow(instanceId, pausedNodeId, resumedOutput);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -267,7 +503,40 @@ public class WorkflowNodeEngine {
                     instanceMapper.updateById(instance);
                 }
                 Map<String, Object> nodeConfig = getConfig(nodeDef);
-                Map<String, Object> qualityOutput = builtinQualityAssuranceService.analyzeAgentNode(instance, nodeExec, result);
+
+                // 输出安全合规检查（安全检查优先于质量检查，避免不安全内容传递给下游）
+                SecurityCheckDecisionVO outputSecurityDecision = evaluateOutputSecurityForNode(instance, nodeExec, result);
+                if (outputSecurityDecision != null) {
+                    String secDecision = outputSecurityDecision.getDecision();
+                    String secMessage = StringUtils.hasText(outputSecurityDecision.getMessage())
+                            ? outputSecurityDecision.getMessage() : "节点输出命中安全策略";
+                    outputData.put("outputSecurityDecision", secDecision);
+                    outputData.put("outputSecurityMessage", secMessage);
+                    if (SecurityComplianceConstant.DECISION_BLOCK.equals(secDecision)) {
+                        nodeExec.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
+                        nodeExec.setErrorMessage("输出安全检查阻断: " + secMessage);
+                        nodeExec.setCompletedAt(LocalDateTime.now());
+                        nodeExec.setOutputData(prepareStructuredOutputData(nodeExec, outputData));
+                        nodeExecutionMapper.updateById(nodeExec);
+                        failWorkflowInstance(instanceId, nodeId, "输出安全检查阻断: " + secMessage);
+                        log.error("节点输出安全检查阻断: instanceId={}, nodeId={}, message={}", instanceId, nodeId, secMessage);
+                        return;
+                    }
+                    if (SecurityComplianceConstant.DECISION_PAUSE.equals(secDecision)) {
+                        nodeExec.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+                        nodeExec.setErrorMessage("输出安全检查暂停: " + secMessage);
+                        nodeExec.setOutputData(prepareStructuredOutputData(nodeExec, outputData));
+                        nodeExecutionMapper.updateById(nodeExec);
+                        pauseWorkflowInstance(instance, nodeExec, "输出安全检查暂停: " + secMessage);
+                        log.warn("节点输出安全检查暂停: instanceId={}, nodeId={}, message={}", instanceId, nodeId, secMessage);
+                        return;
+                    }
+                    if (SecurityComplianceConstant.DECISION_WARN.equals(secDecision)) {
+                        log.warn("节点输出安全检查警告: instanceId={}, nodeId={}, message={}", instanceId, nodeId, secMessage);
+                    }
+                }
+
+                Map<String, Object> qualityOutput = builtinQualityAssuranceService.analyzeAgentNode(instance, nodeExec, nodeConfig, result);
                 if (qualityOutput != null && !qualityOutput.isEmpty()) {
                     outputData.putAll(qualityOutput);
                 }
@@ -281,39 +550,53 @@ public class WorkflowNodeEngine {
                     outputData.putAll(artifactData);
                 }
                 syncArtifactVariables(instance, nodeConfig, artifactData);
-                BuiltinQualityAssuranceService.WorkflowNodeQualityGateDecision qualityGateDecision =
+                QualityGateDecision qualityGateDecision =
                         builtinQualityAssuranceService.evaluateWorkflowNodeGate(
                                 qualityOutput != null ? qualityOutput : Map.of(), nodeConfig);
                 if (qualityGateDecision == null) {
-                    qualityGateDecision = BuiltinQualityAssuranceService.WorkflowNodeQualityGateDecision.pass("未命中质量闸门");
+                    qualityGateDecision = QualityGateDecision.pass("未命中质量闸门");
                 }
                 outputData.putAll(qualityGateDecision.toOutputData());
                 if (qualityGateDecision.pauseWorkflow()) {
+                    QualityIssue qualityIssue = createWorkflowQualityIssue(instance, nodeExec, nodeConfig, qualityOutput, qualityGateDecision);
+                    bindWorkflowQualityIssue(outputData, qualityIssue);
                     nodeExec.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
                     nodeExec.setErrorMessage(qualityGateDecision.message());
                     nodeExec.setOutputData(prepareStructuredOutputData(nodeExec, outputData));
                     nodeExecutionMapper.updateById(nodeExec);
                     pauseWorkflowInstance(instance, nodeExec, qualityGateDecision.message());
-                    notifyWorkflowQualityGate(instance, nodeExec, qualityGateDecision);
+                    notifyWorkflowQualityGate(instance, nodeExec, qualityGateDecision, qualityIssue);
                     log.warn("Agent节点命中质量闸门暂停: instanceId={}, nodeId={}, reason={}",
                             instanceId, nodeId, qualityGateDecision.message());
                     return;
                 }
                 if (qualityGateDecision.failWorkflow()) {
+                    QualityIssue qualityIssue = createWorkflowQualityIssue(instance, nodeExec, nodeConfig, qualityOutput, qualityGateDecision);
+                    bindWorkflowQualityIssue(outputData, qualityIssue);
                     nodeExec.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
                     nodeExec.setErrorMessage(qualityGateDecision.message());
                     nodeExec.setCompletedAt(LocalDateTime.now());
                     nodeExec.setOutputData(prepareStructuredOutputData(nodeExec, outputData));
                     nodeExecutionMapper.updateById(nodeExec);
                     failWorkflowInstance(instanceId, nodeId, qualityGateDecision.message());
-                    notifyWorkflowQualityGate(instance, nodeExec, qualityGateDecision);
+                    notifyWorkflowQualityGate(instance, nodeExec, qualityGateDecision, qualityIssue);
                     log.error("Agent节点命中质量闸门失败: instanceId={}, nodeId={}, reason={}",
                             instanceId, nodeId, qualityGateDecision.message());
                     return;
                 }
             }
             completeNodeExecution(nodeExec, outputData);
-            advanceWorkflow(instanceId, nodeId, outputData);
+            // Flowable 模式：触发 ReceiveTask 继续流转；降级模式：手动推进
+            if (instance != null && StringUtils.hasText(instance.getProcessInstanceId())) {
+                saveNodeOutput(instance, nodeId, outputData);
+                boolean flowableTriggered = triggerFlowableContinue(instance, nodeId);
+                if (!flowableTriggered) {
+                    log.warn("Flowable 续转失败，降级为本地推进: instanceId={}, nodeId={}", instanceId, nodeId);
+                    advanceWorkflow(instanceId, nodeId, outputData);
+                }
+            } else {
+                advanceWorkflow(instanceId, nodeId, outputData);
+            }
         } else {
             String failureMessage = StringUtils.hasText(result) ? result : "Agent执行失败: " + agentExecutionStatus;
             handleNodeFailure(instance, nodeExec, nodeDef, failureMessage, outputData, agentExecutionStatus);
@@ -548,15 +831,41 @@ public class WorkflowNodeEngine {
         instance.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
         instance.setUpdatedAt(LocalDateTime.now());
         instanceMapper.updateById(instance);
+        if (StringUtils.hasText(instance.getProcessInstanceId())) {
+            flowableBridge.suspendProcess(instance.getProcessInstanceId());
+        }
         syncSpecLifecycle(instance.getSpecId(), nodeExec.getNodeId(), nodeExec.getNodeType(),
                 nodeExec.getNodeLabel(), WorkflowInstanceStatusEnum.PAUSED.getCode(), null);
         log.warn("工作流因 Agent 节点暂停而进入暂停状态: instanceId={}, nodeId={}, reason={}",
                 instance.getId(), nodeExec.getNodeId(), reason);
     }
 
+    private boolean resumePausedFlowableNode(WorkflowInstance instance, String pausedNodeId, Map<String, Object> resumedOutput) {
+        if (instance == null || !StringUtils.hasText(instance.getProcessInstanceId())) {
+            return false;
+        }
+        saveNodeOutput(instance, pausedNodeId, resumedOutput);
+
+        boolean flowableTriggered = triggerFlowableContinue(instance, pausedNodeId);
+        if (!flowableTriggered) {
+            flowableBridge.activateProcess(instance.getProcessInstanceId());
+            flowableTriggered = triggerFlowableContinue(instance, pausedNodeId);
+        }
+        if (flowableTriggered) {
+            log.info("暂停工作流已恢复并同步 Flowable 续转: instanceId={}, nodeId={}, processInstanceId={}",
+                    instance.getId(), pausedNodeId, instance.getProcessInstanceId());
+            return true;
+        }
+
+        log.warn("恢复暂停工作流时 Flowable 续转失败，降级为本地推进: instanceId={}, nodeId={}",
+                instance.getId(), pausedNodeId);
+        return false;
+    }
+
     private void notifyWorkflowQualityGate(WorkflowInstance instance,
                                            WorkflowNodeExecution nodeExec,
-                                           BuiltinQualityAssuranceService.WorkflowNodeQualityGateDecision qualityGateDecision) {
+                                           QualityGateDecision qualityGateDecision,
+                                           QualityIssue qualityIssue) {
         if (instance == null || nodeExec == null || qualityGateDecision == null) {
             return;
         }
@@ -575,6 +884,10 @@ public class WorkflowNodeEngine {
         payload.put("workflowInstanceId", instance.getId());
         payload.put("workflowNodeId", nodeExec.getNodeId());
         payload.put("specId", instance.getSpecId());
+        if (qualityIssue != null && StringUtils.hasText(qualityIssue.getId())) {
+            payload.put("qualityIssueId", qualityIssue.getId());
+            payload.put("qualityIssueStatus", qualityIssue.getStatus());
+        }
         inAppMessageService.createMessage(
                 instance.getTenantId(),
                 title,
@@ -583,10 +896,156 @@ public class WorkflowNodeEngine {
                 qualityGateDecision.pauseWorkflow() ? "workflow_quality_gate_paused" : "workflow_quality_gate_failed",
                 "workflow_quality_gate",
                 nodeExec.getId(),
-                "/workflow/" + instance.getId(),
+                resolveWorkflowQualityGateActionUrl(instance, qualityIssue),
                 payload,
                 List.of(owner)
         );
+    }
+
+    private String resolveWorkflowQualityGateActionUrl(WorkflowInstance instance, QualityIssue qualityIssue) {
+        if (qualityIssue != null && StringUtils.hasText(qualityIssue.getId())) {
+            return "/approval-center?type=quality_issue&id=" + qualityIssue.getId();
+        }
+        return "/workflow/" + (instance != null ? instance.getId() : "");
+    }
+
+    private void bindWorkflowQualityIssue(Map<String, Object> outputData, QualityIssue qualityIssue) {
+        if (outputData == null || qualityIssue == null || !StringUtils.hasText(qualityIssue.getId())) {
+            return;
+        }
+        outputData.put("qualityIssueId", qualityIssue.getId());
+        outputData.put("qualityIssueStatus", qualityIssue.getStatus());
+    }
+
+    private QualityIssue createWorkflowQualityIssue(WorkflowInstance instance,
+                                                    WorkflowNodeExecution nodeExec,
+                                                    Map<String, Object> nodeConfig,
+                                                    Map<String, Object> qualityOutput,
+                                                    QualityGateDecision qualityGateDecision) {
+        if (instance == null || nodeExec == null || qualityGateDecision == null
+                || (!qualityGateDecision.pauseWorkflow() && !qualityGateDecision.failWorkflow())) {
+            return null;
+        }
+        try {
+            QualityCheckRequest request = buildWorkflowQualityIssueRequest(instance, nodeExec, nodeConfig, qualityOutput);
+            QualityCheckResult result = buildWorkflowQualityIssueResult(qualityOutput, qualityGateDecision);
+            return qualityIssueFeedbackService.createIssue(result, request, instance.getId(), nodeExec.getNodeId());
+        } catch (Exception ex) {
+            log.error("创建工作流质量问题失败: instanceId={}, nodeId={}, error={}",
+                    instance.getId(), nodeExec.getNodeId(), ex.getMessage(), ex);
+            return null;
+        }
+    }
+
+    private QualityCheckRequest buildWorkflowQualityIssueRequest(WorkflowInstance instance,
+                                                                 WorkflowNodeExecution nodeExec,
+                                                                 Map<String, Object> nodeConfig,
+                                                                 Map<String, Object> qualityOutput) {
+        Map<String, Object> safeNodeConfig = nodeConfig == null ? Map.of() : nodeConfig;
+        String executionStrategy = readString(qualityOutput, "qualityExecutionStrategy");
+        if (!StringUtils.hasText(executionStrategy)) {
+            executionStrategy = readString(safeNodeConfig, "executionStrategy");
+        }
+        if (!StringUtils.hasText(executionStrategy)) {
+            executionStrategy = ExecutionStrategyEnum.SHORT_WAIT.getCode();
+        }
+        String artifactDocType = readString(safeNodeConfig, "artifactDocType");
+        String targetContent = readString(qualityOutput, "artifactContent");
+        if (!StringUtils.hasText(targetContent)) {
+            targetContent = readString(qualityOutput, "summary");
+        }
+        if (!StringUtils.hasText(targetContent)) {
+            targetContent = readString(qualityOutput, "qualitySummary");
+        }
+        return new QualityCheckRequest(
+                instance.getSpecId(),
+                targetContent,
+                null,
+                QualityIssueTypeEnum.DEVIATION.getCode(),
+                "workflow",
+                executionStrategy,
+                readString(safeNodeConfig, "qualityProfileId"),
+                safeNodeConfig,
+                instance.getTemplateId(),
+                nodeExec.getAgentExecutionId(),
+                nodeExec.getNodeId(),
+                nodeExec.getNodeLabel(),
+                artifactDocType,
+                instance.getTenantId(),
+                0
+        );
+    }
+
+    private QualityCheckResult buildWorkflowQualityIssueResult(Map<String, Object> qualityOutput,
+                                                               QualityGateDecision qualityGateDecision) {
+        List<QualityEvaluationStrategy.Finding> findings = buildWorkflowQualityFindings(qualityOutput, qualityGateDecision);
+        return new QualityCheckResult(
+                readString(qualityOutput, "qualityTaskId"),
+                qualityGateDecision.decision(),
+                findings,
+                readInteger(qualityOutput != null ? qualityOutput.get("qualityScore") : null, 0),
+                resolveWorkflowQualitySummary(qualityOutput, qualityGateDecision),
+                readString(qualityOutput, "crossReviewId"),
+                0L,
+                readString(qualityOutput, "qualityExecutionStrategy"),
+                resolveWorkflowQualityTaskStatus(qualityOutput),
+                readInteger(qualityOutput != null ? qualityOutput.get("qualityDeviationCount") : null, findings.size()),
+                readInteger(qualityOutput != null ? qualityOutput.get("qualityWarningCount") : null, 0)
+        );
+    }
+
+    private List<QualityEvaluationStrategy.Finding> buildWorkflowQualityFindings(Map<String, Object> qualityOutput,
+                                                                                  QualityGateDecision qualityGateDecision) {
+        List<QualityEvaluationStrategy.Finding> findings = new ArrayList<>();
+        String implementationEvidenceMessage = readString(qualityOutput, "implementationEvidenceMessage");
+        if (StringUtils.hasText(implementationEvidenceMessage)
+                && "false".equalsIgnoreCase(readString(qualityOutput, "implementationEvidencePassed"))) {
+            findings.add(new QualityEvaluationStrategy.Finding(
+                    "implementation_evidence",
+                    qualityGateDecision.failWorkflow() ? "critical" : "warning",
+                    100,
+                    "IMPLEMENTATION_EVIDENCE_GUARD",
+                    "实现证据校验未通过",
+                    implementationEvidenceMessage,
+                    readString(qualityOutput, "nodeId"),
+                    "请在真实工作区补充实现类改动后重新执行节点"
+            ));
+        }
+        if (!findings.isEmpty()) {
+            return findings;
+        }
+        String summary = resolveWorkflowQualitySummary(qualityOutput, qualityGateDecision);
+        if (!StringUtils.hasText(summary)) {
+            return List.of();
+        }
+        findings.add(new QualityEvaluationStrategy.Finding(
+                "workflow_quality_gate",
+                qualityGateDecision.failWorkflow() ? "critical" : "warning",
+                80,
+                "WORKFLOW_QUALITY_GATE",
+                "工作流质量闸门阻断",
+                summary,
+                readString(qualityOutput, "nodeId"),
+                "请处理质量问题后再恢复工作流"
+        ));
+        return findings;
+    }
+
+    private String resolveWorkflowQualitySummary(Map<String, Object> qualityOutput,
+                                                 QualityGateDecision qualityGateDecision) {
+        String summary = readString(qualityOutput, "qualitySummary");
+        if (StringUtils.hasText(summary)) {
+            return summary;
+        }
+        return qualityGateDecision != null ? qualityGateDecision.message() : null;
+    }
+
+    private String resolveWorkflowQualityTaskStatus(Map<String, Object> qualityOutput) {
+        String taskStatus = readString(qualityOutput, "qualityTaskStatus");
+        if (StringUtils.hasText(taskStatus)) {
+            return taskStatus;
+        }
+        return TaskStatusEnum.SUCCEEDED.getCode();
     }
 
     static int resolveWorkflowAgentMaxMessages(int maxRounds, int maxToolCallsPerRound) {
@@ -610,6 +1069,7 @@ public class WorkflowNodeEngine {
                                                                       String agentId,
                                                                       String content) {
         var request = new SecurityRuntimeCheckRequest();
+        request.setTenantId(instance.getTenantId());
         request.setScene(SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_NODE);
         request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
         request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_NODE);
@@ -628,15 +1088,11 @@ public class WorkflowNodeEngine {
                                         Map<String, Object> nodeDef) {
         nodeExec.setStatus(WorkflowInstanceStatusEnum.PENDING.getCode());
         Map<String, Object> config = getConfig(nodeDef);
-        List<Map<String, String>> reviewers = resolveReviewers(instance.getTenantId(), config);
+        List<Map<String, String>> reviewers = resolveReviewers(instance, config);
         if (reviewers.isEmpty()) {
             throw new IllegalStateException("人工审核节点未解析到有效审核人: " + nodeExec.getNodeId());
         }
 
-        String reviewPath = workflowNotificationService.buildSpecReviewActionPath(
-                instance.getSpecId(), instance.getId(), nodeExec.getNodeId(), null);
-        String reviewUrl = workflowNotificationService.buildSpecReviewActionUrl(
-                instance.getSpecId(), instance.getId(), nodeExec.getNodeId(), null);
         ReviewSessionCreateRequest request = new ReviewSessionCreateRequest();
         request.setSpecId(instance.getSpecId());
         request.setTenantId(instance.getTenantId());
@@ -649,9 +1105,13 @@ public class WorkflowNodeEngine {
         if (StringUtils.hasText(str(config, "timeoutStrategy"))) {
             request.setTimeoutStrategy(str(config, "timeoutStrategy"));
         }
-        request.setReviewActionUrl(reviewPath);
         request.setMessageTemplateId(str(config, "messageTemplateId"));
         ReviewSessionVO session = reviewSessionService().create(request);
+        String reviewPath = workflowNotificationService.buildSpecReviewActionPath(
+                instance.getSpecId(), instance.getId(), nodeExec.getNodeId(), session.getId());
+        String reviewUrl = workflowNotificationService.buildSpecReviewActionUrl(
+                instance.getSpecId(), instance.getId(), nodeExec.getNodeId(), session.getId());
+        reviewSessionService().updateActionUrl(session.getId(), reviewPath);
 
         WorkflowNotificationService.ResolvedNotificationMessage resolvedMessage =
                 workflowNotificationService.resolveHumanReviewMessage(instance, nodeExec, config, reviewUrl);
@@ -944,6 +1404,23 @@ public class WorkflowNodeEngine {
                 instance.getId(), nodeId, estimateChars(handoffPayload), estimateChars(variables));
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> mergeNodeOutputData(Map<String, Object> currentOutputData, Map<String, Object> overrideData) {
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (currentOutputData instanceof Map<?, ?> currentMap) {
+            Object tracePayload = currentMap.get("tracePayload");
+            if (tracePayload instanceof Map<?, ?> traceMap) {
+                merged.putAll((Map<String, Object>) traceMap);
+            } else {
+                merged.putAll((Map<String, Object>) currentMap);
+            }
+        }
+        if (overrideData != null && !overrideData.isEmpty()) {
+            merged.putAll(overrideData);
+        }
+        return merged;
+    }
+
     private String findStartNodeId(List<Map<String, Object>> nodes) {
         return nodes.stream()
                 .filter(n -> {
@@ -1196,6 +1673,8 @@ public class WorkflowNodeEngine {
         copyIfPresent(tracePayload, handoff, "qualityScore");
         copyIfPresent(tracePayload, handoff, "qualityCheckedAt");
         copyIfPresent(tracePayload, handoff, "qualityTaskId");
+        copyIfPresent(tracePayload, handoff, "qualityIssueId");
+        copyIfPresent(tracePayload, handoff, "qualityIssueStatus");
         copyIfPresent(tracePayload, handoff, "agentExecutionId");
         copyIfPresent(tracePayload, handoff, "agentModel");
         copyIfPresent(tracePayload, handoff, "runtimeEngine");
@@ -1460,7 +1939,7 @@ public class WorkflowNodeEngine {
         return Math.max(min, Math.min(max, value));
     }
 
-    private List<Map<String, String>> resolveReviewers(String tenantId, Map<String, Object> config) {
+    private List<Map<String, String>> resolveReviewers(WorkflowInstance instance, Map<String, Object> config) {
         Map<String, Set<String>> reviewerRoleMap = new LinkedHashMap<>();
         for (String reviewerId : stringList(config.get("reviewerIds"))) {
             reviewerRoleMap.computeIfAbsent(reviewerId, key -> new java.util.LinkedHashSet<>()).add("指定审核人");
@@ -1489,6 +1968,13 @@ public class WorkflowNodeEngine {
             }
         }
 
+        if (reviewerRoleMap.isEmpty()) {
+            String fallbackReviewerId = resolveFallbackReviewerId(instance);
+            if (StringUtils.hasText(fallbackReviewerId)) {
+                reviewerRoleMap.computeIfAbsent(fallbackReviewerId, key -> new java.util.LinkedHashSet<>()).add("Spec负责人");
+            }
+        }
+
         return reviewerRoleMap.entrySet().stream()
                 .map(entry -> {
                     Map<String, String> item = new LinkedHashMap<>();
@@ -1497,6 +1983,23 @@ public class WorkflowNodeEngine {
                     return item;
                 })
                 .toList();
+    }
+
+    private String resolveFallbackReviewerId(WorkflowInstance instance) {
+        if (instance != null && StringUtils.hasText(instance.getSpecId())) {
+            Spec spec = specMapper.selectById(instance.getSpecId());
+            if (spec != null) {
+                if (StringUtils.hasText(spec.getOwner())) {
+                    return spec.getOwner();
+                }
+                if (StringUtils.hasText(spec.getCreatedBy())) {
+                    return spec.getCreatedBy();
+                }
+            }
+        }
+        return instance != null && StringUtils.hasText(instance.getCreatedBy())
+                ? instance.getCreatedBy()
+                : null;
     }
 
     private String resolveSpecOwner(String specId) {
@@ -1516,5 +2019,35 @@ public class WorkflowNodeEngine {
                 .filter(item -> item != null && StringUtils.hasText(String.valueOf(item)))
                 .map(item -> String.valueOf(item).trim())
                 .toList();
+    }
+
+    /** 评估工作流节点输出内容的安全合规性（PII、敏感信息、有害内容、合规风险） */
+    private SecurityCheckDecisionVO evaluateOutputSecurityForNode(
+            WorkflowInstance instance, WorkflowNodeExecution nodeExec, String outputContent) {
+        try {
+            SecurityRuntimeGuardService guard = securityRuntimeGuardServiceProvider.getIfAvailable();
+            if (guard == null || !StringUtils.hasText(outputContent)) {
+                return null;
+            }
+            SecurityRuntimeCheckRequest request = new SecurityRuntimeCheckRequest();
+            request.setTenantId(instance.getTenantId());
+            request.setScene(SecurityComplianceConstant.CHECK_SCENE_OUTPUT);
+            request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+            request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_NODE);
+            request.setResourceId(nodeExec.getId());
+            request.setResourceName(nodeExec.getNodeLabel());
+            request.setWorkflowInstanceId(instance.getId());
+            request.setWorkflowNodeId(nodeExec.getNodeId());
+            request.setContent(outputContent);
+            SecurityCheckDecisionVO decision = guard.evaluate(request, null);
+            if (decision == null || SecurityComplianceConstant.DECISION_ALLOW.equals(decision.getDecision())) {
+                return null;
+            }
+            return decision;
+        } catch (Exception e) {
+            log.warn("节点输出安全检查异常，默认放行: instanceId={}, nodeId={}",
+                    instance.getId(), nodeExec.getNodeId(), e);
+            return null;
+        }
     }
 }

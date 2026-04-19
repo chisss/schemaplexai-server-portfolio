@@ -11,6 +11,7 @@ import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.model.entity.QualityIssue;
 import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.entity.WorkflowNodeExecution;
@@ -18,6 +19,8 @@ import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import com.schemaplexai.service.notification.InAppMessageService;
+import com.schemaplexai.service.quality.feedback.QualityIssueFeedbackService;
+import com.schemaplexai.service.quality.gate.QualityGateDecision;
 import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import com.schemaplexai.service.workflow.ReviewSessionService;
@@ -27,6 +30,7 @@ import com.schemaplexai.service.workflow.engine.handler.QualityReportHandler;
 import com.schemaplexai.service.workflow.runtime.WorkflowNotificationService.ResolvedNotificationMessage;
 import com.schemaplexai.service.workflow.runtime.WorkflowArtifactService;
 import com.schemaplexai.service.workflow.runtime.WorkflowNotificationService;
+import com.schemaplexai.service.workflow.flowable.FlowableWorkflowBridge;
 import com.schemaplexai.service.integration.notification.model.NotificationMessage;
 import com.schemaplexai.model.vo.workflow.ReviewSessionVO;
 import org.junit.jupiter.api.Test;
@@ -80,7 +84,9 @@ class WorkflowNodeEngineTest {
                 mock(ObjectProvider.class),
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         );
 
         Method method = WorkflowNodeEngine.class.getDeclaredMethod(
@@ -113,7 +119,9 @@ class WorkflowNodeEngineTest {
                 mock(ObjectProvider.class),
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         );
 
         Method method = WorkflowNodeEngine.class.getDeclaredMethod(
@@ -177,7 +185,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                securityProvider
+                mock(QualityIssueFeedbackService.class),
+                securityProvider,
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -241,7 +251,9 @@ class WorkflowNodeEngineTest {
                 mock(ObjectProvider.class),
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -328,7 +340,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                securityProvider
+                mock(QualityIssueFeedbackService.class),
+                securityProvider,
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -417,7 +431,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                securityProvider
+                mock(QualityIssueFeedbackService.class),
+                securityProvider,
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -478,7 +494,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -512,7 +530,8 @@ class WorkflowNodeEngineTest {
         BuiltinQualityAssuranceService builtinQualityAssuranceService = mock(BuiltinQualityAssuranceService.class);
         when(workflowArtifactService.persistAgentArtifactIfNecessary(any(), any(), any(), eq("已恢复完成"), anyMap()))
                 .thenReturn(java.util.Map.of());
-        when(builtinQualityAssuranceService.analyzeAgentNode(any(), any(), eq("已恢复完成"))).thenReturn(java.util.Map.of());
+        when(builtinQualityAssuranceService.analyzeAgentNode(any(), any(), anyMap(), eq("已恢复完成")))
+                .thenReturn(java.util.Map.of());
         @SuppressWarnings("unchecked")
         ObjectProvider<ReviewSessionService> reviewSessionProvider = mock(ObjectProvider.class);
 
@@ -535,7 +554,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 builtinQualityAssuranceService,
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         ));
         doNothing().when(engine).advanceWorkflow(eq("wf-1"), eq("node-agent"), anyMap());
 
@@ -556,6 +577,243 @@ class WorkflowNodeEngineTest {
         verify(instanceMapper).updateById(instanceCaptor.capture());
         assertThat(instanceCaptor.getValue().getStatus()).isEqualTo(WorkflowInstanceStatusEnum.RUNNING.getCode());
         verify(engine).advanceWorkflow(eq("wf-1"), eq("node-agent"), anyMap());
+    }
+
+    @Test
+    void shouldFallbackToAdvanceWorkflowWhenFlowableReceiveTaskCannotBeTriggered() {
+        WorkflowInstanceMapper instanceMapper = mock(WorkflowInstanceMapper.class);
+        WorkflowNodeExecutionMapper nodeExecutionMapper = mock(WorkflowNodeExecutionMapper.class);
+        FlowableWorkflowBridge flowableWorkflowBridge = mock(FlowableWorkflowBridge.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ReviewSessionService> reviewSessionProvider = mock(ObjectProvider.class);
+
+        when(flowableWorkflowBridge.triggerReceiveTask("process-1", "test_planning")).thenReturn(false);
+
+        WorkflowNodeEngine engine = spy(new WorkflowNodeEngine(
+                instanceMapper,
+                nodeExecutionMapper,
+                mock(AgentExecutionMapper.class),
+                mock(AgentMapper.class),
+                mock(SpecMapper.class),
+                mock(RoleMapper.class),
+                mock(UserRoleMapper.class),
+                mock(ObjectProvider.class),
+                mock(AgentContextPublisher.class),
+                mock(RabbitTemplate.class),
+                mock(DeviationAnalysisHandler.class),
+                mock(QualityReportHandler.class),
+                mock(WorkflowNodeContextAssembler.class),
+                mock(WorkflowArtifactService.class),
+                mock(WorkflowNotificationService.class),
+                reviewSessionProvider,
+                mock(InAppMessageService.class),
+                mock(BuiltinQualityAssuranceService.class),
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                flowableWorkflowBridge
+        ));
+        doNothing().when(engine).advanceWorkflow(eq("wf-1"), eq("test_planning"), anyMap());
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-1");
+        instance.setTenantId("tenant-1");
+        instance.setSpecId("spec-1");
+        instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+        instance.setProcessInstanceId("process-1");
+        instance.setDefinition(Map.of(
+                "nodes", List.of(Map.of(
+                        "id", "test_planning",
+                        "type", "agent",
+                        "label", "测试计划",
+                        "config", Map.of("agentId", "agent-1")
+                )),
+                "edges", List.of()
+        ));
+        when(instanceMapper.selectById("wf-1")).thenReturn(instance);
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setId("node-exec-flowable-1");
+        nodeExecution.setInstanceId("wf-1");
+        nodeExecution.setNodeId("test_planning");
+        nodeExecution.setNodeType("agent");
+        nodeExecution.setNodeLabel("测试计划");
+        when(nodeExecutionMapper.selectList(any())).thenReturn(List.of(nodeExecution));
+
+        engine.onAgentNodeCompleted("wf-1", "test_planning",
+                AgentExecutionStatusEnum.COMPLETED.getCode(), "测试计划已完成");
+
+        verify(flowableWorkflowBridge).triggerReceiveTask("process-1", "test_planning");
+        ArgumentCaptor<Map<String, Object>> outputCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(engine).advanceWorkflow(eq("wf-1"), eq("test_planning"), outputCaptor.capture());
+        assertThat(outputCaptor.getValue())
+                .containsEntry("agentStatus", AgentExecutionStatusEnum.COMPLETED.getCode())
+                .containsEntry("result", "测试计划已完成");
+
+        ArgumentCaptor<WorkflowInstance> instanceCaptor = ArgumentCaptor.forClass(WorkflowInstance.class);
+        verify(instanceMapper, atLeastOnce()).updateById(instanceCaptor.capture());
+        assertThat(instanceCaptor.getAllValues().stream()
+                .filter(update -> "wf-1".equals(update.getId()) && update.getVariables() != null)
+                .findFirst())
+                .isPresent();
+    }
+
+    @Test
+    void shouldResumePausedWorkflowFromQualityOverrideBeforeAdvancing() {
+        WorkflowInstanceMapper instanceMapper = mock(WorkflowInstanceMapper.class);
+        WorkflowNodeExecutionMapper nodeExecutionMapper = mock(WorkflowNodeExecutionMapper.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ReviewSessionService> reviewSessionProvider = mock(ObjectProvider.class);
+
+        WorkflowNodeEngine engine = spy(new WorkflowNodeEngine(
+                instanceMapper,
+                nodeExecutionMapper,
+                mock(AgentExecutionMapper.class),
+                mock(AgentMapper.class),
+                mock(SpecMapper.class),
+                mock(RoleMapper.class),
+                mock(UserRoleMapper.class),
+                mock(ObjectProvider.class),
+                mock(AgentContextPublisher.class),
+                mock(RabbitTemplate.class),
+                mock(DeviationAnalysisHandler.class),
+                mock(QualityReportHandler.class),
+                mock(WorkflowNodeContextAssembler.class),
+                mock(WorkflowArtifactService.class),
+                mock(WorkflowNotificationService.class),
+                reviewSessionProvider,
+                mock(InAppMessageService.class),
+                mock(BuiltinQualityAssuranceService.class),
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
+        ));
+        doNothing().when(engine).advanceWorkflow(eq("wf-1"), eq("code_development"), anyMap());
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-1");
+        instance.setSpecId("spec-1");
+        instance.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+        when(instanceMapper.selectById("wf-1")).thenReturn(instance);
+
+        Map<String, Object> tracePayload = new HashMap<>();
+        tracePayload.put("qualityIssueId", "issue-1");
+        tracePayload.put("qualityScore", 25);
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setId("node-exec-quality-1");
+        nodeExecution.setInstanceId("wf-1");
+        nodeExecution.setNodeId("code_development");
+        nodeExecution.setNodeType("agent");
+        nodeExecution.setNodeLabel("代码开发");
+        nodeExecution.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+        nodeExecution.setOutputData(Map.of(
+                "tracePayload", tracePayload,
+                "handoffPayload", Map.of("qualityIssueId", "issue-1")
+        ));
+        when(nodeExecutionMapper.selectList(any())).thenReturn(List.of(nodeExecution));
+
+        engine.resumePausedWorkflow("wf-1", "code_development", Map.of(
+                "qualityOverride", true,
+                "overrideBy", "user-1"
+        ));
+
+        ArgumentCaptor<WorkflowNodeExecution> nodeCaptor = ArgumentCaptor.forClass(WorkflowNodeExecution.class);
+        verify(nodeExecutionMapper).updateById(nodeCaptor.capture());
+        WorkflowNodeExecution resumedNode = nodeCaptor.getValue();
+        assertThat(resumedNode.getStatus()).isEqualTo(WorkflowInstanceStatusEnum.COMPLETED.getCode());
+        assertThat(resumedNode.getErrorMessage()).isNull();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> resumedTracePayload = (Map<String, Object>) resumedNode.getOutputData().get("tracePayload");
+        assertThat(resumedTracePayload).containsEntry("qualityIssueId", "issue-1");
+        assertThat(resumedTracePayload).containsEntry("qualityOverride", true);
+
+        ArgumentCaptor<WorkflowInstance> instanceCaptor = ArgumentCaptor.forClass(WorkflowInstance.class);
+        verify(instanceMapper).updateById(instanceCaptor.capture());
+        assertThat(instanceCaptor.getValue().getStatus()).isEqualTo(WorkflowInstanceStatusEnum.RUNNING.getCode());
+
+        ArgumentCaptor<Map<String, Object>> outputCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(engine).advanceWorkflow(eq("wf-1"), eq("code_development"), outputCaptor.capture());
+        assertThat(outputCaptor.getValue()).containsEntry("qualityOverride", true);
+        assertThat(outputCaptor.getValue()).containsEntry("qualityIssueId", "issue-1");
+        assertThat(outputCaptor.getValue()).containsEntry("qualityScore", 25);
+    }
+
+    @Test
+    void shouldResumePausedFlowableWorkflowFromPausedReceiveTaskBeforeLocalAdvance() {
+        WorkflowInstanceMapper instanceMapper = mock(WorkflowInstanceMapper.class);
+        WorkflowNodeExecutionMapper nodeExecutionMapper = mock(WorkflowNodeExecutionMapper.class);
+        FlowableWorkflowBridge flowableWorkflowBridge = mock(FlowableWorkflowBridge.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ReviewSessionService> reviewSessionProvider = mock(ObjectProvider.class);
+
+        when(flowableWorkflowBridge.triggerReceiveTask("process-1", "code_development")).thenReturn(true);
+
+        WorkflowNodeEngine engine = spy(new WorkflowNodeEngine(
+                instanceMapper,
+                nodeExecutionMapper,
+                mock(AgentExecutionMapper.class),
+                mock(AgentMapper.class),
+                mock(SpecMapper.class),
+                mock(RoleMapper.class),
+                mock(UserRoleMapper.class),
+                mock(ObjectProvider.class),
+                mock(AgentContextPublisher.class),
+                mock(RabbitTemplate.class),
+                mock(DeviationAnalysisHandler.class),
+                mock(QualityReportHandler.class),
+                mock(WorkflowNodeContextAssembler.class),
+                mock(WorkflowArtifactService.class),
+                mock(WorkflowNotificationService.class),
+                reviewSessionProvider,
+                mock(InAppMessageService.class),
+                mock(BuiltinQualityAssuranceService.class),
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                flowableWorkflowBridge
+        ));
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-1");
+        instance.setSpecId("spec-1");
+        instance.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+        instance.setProcessInstanceId("process-1");
+        when(instanceMapper.selectById("wf-1")).thenReturn(instance);
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setId("node-exec-quality-flowable-1");
+        nodeExecution.setInstanceId("wf-1");
+        nodeExecution.setNodeId("code_development");
+        nodeExecution.setNodeType("agent");
+        nodeExecution.setNodeLabel("代码开发");
+        nodeExecution.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
+        nodeExecution.setOutputData(Map.of(
+                "tracePayload", Map.of("qualityIssueId", "issue-1"),
+                "handoffPayload", Map.of("qualityIssueId", "issue-1")
+        ));
+        when(nodeExecutionMapper.selectList(any())).thenReturn(List.of(nodeExecution));
+
+        engine.resumePausedWorkflow("wf-1", "code_development", Map.of(
+                "qualityOverride", true,
+                "overrideBy", "user-1"
+        ));
+
+        verify(flowableWorkflowBridge).triggerReceiveTask("process-1", "code_development");
+        verify(flowableWorkflowBridge, never()).activateProcess(anyString());
+        verify(engine, never()).advanceWorkflow(anyString(), anyString(), anyMap());
+
+        ArgumentCaptor<WorkflowInstance> instanceCaptor = ArgumentCaptor.forClass(WorkflowInstance.class);
+        verify(instanceMapper, atLeastOnce()).updateById(instanceCaptor.capture());
+        assertThat(instanceCaptor.getAllValues().stream()
+                .anyMatch(update -> "wf-1".equals(update.getId())
+                        && WorkflowInstanceStatusEnum.RUNNING.getCode().equals(update.getStatus())))
+                .isTrue();
+        assertThat(instance.getVariables())
+                .isNotNull()
+                .containsKey("code_development_output");
+        assertThat(instance.getVariables().get("code_development_output"))
+                .isInstanceOf(Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> resumedOutput = (Map<String, Object>) instance.getVariables().get("code_development_output");
+        assertThat(resumedOutput).containsEntry("qualityIssueId", "issue-1");
     }
 
     @Test
@@ -584,7 +842,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         ));
         doNothing().when(engine).advanceWorkflow(eq("wf-skip"), eq("doc_generation"), anyMap());
 
@@ -660,7 +920,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -715,18 +977,18 @@ class WorkflowNodeEngineTest {
 
         ReviewSessionVO reviewSession = new ReviewSessionVO();
         reviewSession.setId("session-1");
-        reviewSession.setReviewActionUrl("/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review");
+        reviewSession.setReviewActionUrl("/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review");
         when(reviewSessionService.create(any())).thenReturn(reviewSession);
-        when(workflowNotificationService.buildSpecReviewActionPath("spec-1", "wf-1", "requirements_review", null))
-                .thenReturn("/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review");
-        when(workflowNotificationService.buildSpecReviewActionUrl("spec-1", "wf-1", "requirements_review", null))
-                .thenReturn("https://frontend.example/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review");
+        when(workflowNotificationService.buildSpecReviewActionPath("spec-1", "wf-1", "requirements_review", "session-1"))
+                .thenReturn("/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review");
+        when(workflowNotificationService.buildSpecReviewActionUrl("spec-1", "wf-1", "requirements_review", "session-1"))
+                .thenReturn("https://frontend.example/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review");
         when(workflowNotificationService.resolveHumanReviewMessage(any(), any(), anyMap(), anyString()))
                 .thenReturn(new ResolvedNotificationMessage(
                         NotificationMessage.builder()
                                 .title("待审核")
                                 .content("请完成审核")
-                                .previewUrl("https://frontend.example/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review")
+                                .previewUrl("https://frontend.example/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review")
                                 .build(),
                         null,
                         null,
@@ -754,7 +1016,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 inAppMessageService,
                 mock(BuiltinQualityAssuranceService.class),
-                mock(ObjectProvider.class)
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -795,11 +1059,11 @@ class WorkflowNodeEngineTest {
         verify(nodeExecutionMapper, org.mockito.Mockito.atLeastOnce()).updateById(nodeCaptor.capture());
         WorkflowNodeExecution finalNodeState = nodeCaptor.getAllValues().getLast();
         assertThat(finalNodeState.getActionUrl())
-                .isEqualTo("/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review");
+                .isEqualTo("/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review");
         assertThat(finalNodeState.getReviewSessionId()).isEqualTo("session-1");
 
         verify(workflowNotificationService).sendHumanReviewNotifications(any(), any(), anyMap(),
-                eq("https://frontend.example/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review"));
+                eq("https://frontend.example/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review"));
         verify(inAppMessageService).archivePendingReviewMessages(
                 eq("tenant-1"),
                 eq("spec-1"),
@@ -814,7 +1078,7 @@ class WorkflowNodeEngineTest {
                 eq("human_review_pending"),
                 eq("workflow_human_review"),
                 eq("node-exec-1"),
-                eq("/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review"),
+                eq("/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review"),
                 anyMap(),
                 eq(List.of("reviewer-1"))
         );
@@ -830,11 +1094,117 @@ class WorkflowNodeEngineTest {
                         eq("human_review_pending"),
                         eq("workflow_human_review"),
                         eq("node-exec-1"),
-                        eq("/spec/spec-1/edit?instanceId=wf-1&nodeId=requirements_review&mode=review"),
+                        eq("/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=wf-1&nodeId=requirements_review"),
                         anyMap(),
                         eq(List.of("reviewer-1"))
                 );
         verify(instanceMapper, never()).selectById(anyString());
+    }
+
+    @Test
+    void shouldFallbackToSpecOwnerWhenHumanReviewNodeHasNoExplicitReviewers() {
+        WorkflowInstanceMapper instanceMapper = mock(WorkflowInstanceMapper.class);
+        WorkflowNodeExecutionMapper nodeExecutionMapper = mock(WorkflowNodeExecutionMapper.class);
+        SpecMapper specMapper = mock(SpecMapper.class);
+        WorkflowNotificationService workflowNotificationService = mock(WorkflowNotificationService.class);
+        InAppMessageService inAppMessageService = mock(InAppMessageService.class);
+        ReviewSessionService reviewSessionService = mock(ReviewSessionService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ReviewSessionService> reviewSessionProvider = mock(ObjectProvider.class);
+        when(reviewSessionProvider.getObject()).thenReturn(reviewSessionService);
+
+        ReviewSessionVO reviewSession = new ReviewSessionVO();
+        reviewSession.setId("session-owner");
+        when(reviewSessionService.create(any())).thenReturn(reviewSession);
+        when(workflowNotificationService.buildSpecReviewActionPath("spec-owner", "wf-owner", "review_node", "session-owner"))
+                .thenReturn("/approval-center?type=workflow_review&id=session-owner&specId=spec-owner&instanceId=wf-owner&nodeId=review_node");
+        when(workflowNotificationService.buildSpecReviewActionUrl("spec-owner", "wf-owner", "review_node", "session-owner"))
+                .thenReturn("https://frontend.example/approval-center?type=workflow_review&id=session-owner&specId=spec-owner&instanceId=wf-owner&nodeId=review_node");
+        when(workflowNotificationService.resolveHumanReviewMessage(any(), any(), anyMap(), anyString()))
+                .thenReturn(new ResolvedNotificationMessage(
+                        NotificationMessage.builder()
+                                .title("待审核")
+                                .content("请完成审核")
+                                .build(),
+                        null,
+                        null,
+                        null
+                ));
+        when(workflowNotificationService.sendHumanReviewNotifications(any(), any(), anyMap(), anyString()))
+                .thenReturn(List.of());
+
+        Spec spec = new Spec();
+        spec.setId("spec-owner");
+        spec.setOwner("owner-1");
+        when(specMapper.selectById("spec-owner")).thenReturn(spec);
+
+        WorkflowNodeEngine engine = new WorkflowNodeEngine(
+                instanceMapper,
+                nodeExecutionMapper,
+                mock(AgentExecutionMapper.class),
+                mock(AgentMapper.class),
+                specMapper,
+                mock(RoleMapper.class),
+                mock(UserRoleMapper.class),
+                mock(ObjectProvider.class),
+                mock(AgentContextPublisher.class),
+                mock(RabbitTemplate.class),
+                mock(DeviationAnalysisHandler.class),
+                mock(QualityReportHandler.class),
+                mock(WorkflowNodeContextAssembler.class),
+                mock(WorkflowArtifactService.class),
+                workflowNotificationService,
+                reviewSessionProvider,
+                inAppMessageService,
+                mock(BuiltinQualityAssuranceService.class),
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
+        );
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-owner");
+        instance.setSpecId("spec-owner");
+        instance.setTenantId("tenant-owner");
+        instance.setCreatedBy("creator-1");
+        instance.setStatus(WorkflowInstanceStatusEnum.RUNNING.getCode());
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setId("node-exec-owner");
+        nodeExecution.setInstanceId("wf-owner");
+        nodeExecution.setNodeId("review_node");
+        nodeExecution.setNodeType("human_review");
+        nodeExecution.setNodeLabel("质量复核");
+        when(nodeExecutionMapper.selectList(any())).thenReturn(List.of(nodeExecution));
+
+        List<Map<String, Object>> nodes = List.of(Map.of(
+                "id", "review_node",
+                "type", "human_review",
+                "label", "质量复核",
+                "config", Map.of("documentKey", "requirements")
+        ));
+
+        engine.driveNode(instance, "review_node", nodes, List.of(), Map.of());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<com.schemaplexai.model.dto.workflow.ReviewSessionCreateRequest> requestCaptor =
+                ArgumentCaptor.forClass(com.schemaplexai.model.dto.workflow.ReviewSessionCreateRequest.class);
+        verify(reviewSessionService).create(requestCaptor.capture());
+        assertThat(requestCaptor.getValue().getReviewers())
+                .containsExactly(Map.of("userId", "owner-1", "role", "Spec负责人"));
+
+        verify(inAppMessageService).createMessage(
+                eq("tenant-owner"),
+                eq("待审核"),
+                eq("请完成审核"),
+                eq("todo"),
+                eq("human_review_pending"),
+                eq("workflow_human_review"),
+                eq("node-exec-owner"),
+                eq("/approval-center?type=workflow_review&id=session-owner&specId=spec-owner&instanceId=wf-owner&nodeId=review_node"),
+                anyMap(),
+                eq(List.of("owner-1"))
+        );
     }
 
     @Test
@@ -845,6 +1215,7 @@ class WorkflowNodeEngineTest {
         SpecMapper specMapper = mock(SpecMapper.class);
         InAppMessageService inAppMessageService = mock(InAppMessageService.class);
         BuiltinQualityAssuranceService builtinQualityAssuranceService = mock(BuiltinQualityAssuranceService.class);
+        QualityIssueFeedbackService qualityIssueFeedbackService = mock(QualityIssueFeedbackService.class);
         WorkflowArtifactService workflowArtifactService = mock(WorkflowArtifactService.class);
 
         WorkflowNodeEngine engine = new WorkflowNodeEngine(
@@ -866,7 +1237,9 @@ class WorkflowNodeEngineTest {
                 mock(ObjectProvider.class),
                 inAppMessageService,
                 builtinQualityAssuranceService,
-                mock(ObjectProvider.class)
+                qualityIssueFeedbackService,
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -896,15 +1269,34 @@ class WorkflowNodeEngineTest {
         spec.setId("spec-1");
         spec.setOwner("owner-1");
         when(specMapper.selectById("spec-1")).thenReturn(spec);
-        when(builtinQualityAssuranceService.analyzeAgentNode(instance, nodeExecution, "最终交付文案"))
-                .thenReturn(Map.of("criticalCount", 1, "qualityScore", 52));
+        when(builtinQualityAssuranceService.analyzeAgentNode(instance, nodeExecution, Map.of("agentId", "agent-1"), "最终交付文案"))
+                .thenReturn(Map.of(
+                        "qualityTaskId", "quality-task-1",
+                        "qualitySummary", "检测到阻断级偏离",
+                        "qualityScore", 52,
+                        "qualityDeviationCount", 1,
+                        "qualityWarningCount", 0
+                ));
         when(builtinQualityAssuranceService.evaluateWorkflowNodeGate(anyMap(), anyMap()))
-                .thenReturn(BuiltinQualityAssuranceService.WorkflowNodeQualityGateDecision.pause("检测到阻断级偏离，需人工处理"));
+                .thenReturn(QualityGateDecision.pause("检测到阻断级偏离，需人工处理"));
         when(workflowArtifactService.persistAgentArtifactIfNecessary(any(), any(), anyMap(), anyString(), anyMap()))
                 .thenReturn(Map.of());
+        QualityIssue qualityIssue = new QualityIssue();
+        qualityIssue.setId("issue-1");
+        qualityIssue.setStatus("open");
+        when(qualityIssueFeedbackService.createIssue(any(), any(), eq("wf-1"), eq("copy_generation")))
+                .thenReturn(qualityIssue);
 
         engine.onAgentNodeCompleted("wf-1", "copy_generation", AgentExecutionStatusEnum.COMPLETED.getCode(), "最终交付文案");
 
+        ArgumentCaptor<WorkflowNodeExecution> nodeCaptor = ArgumentCaptor.forClass(WorkflowNodeExecution.class);
+        verify(nodeExecutionMapper, atLeastOnce()).updateById(nodeCaptor.capture());
+        WorkflowNodeExecution pausedNode = nodeCaptor.getAllValues().getLast();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> tracePayload = (Map<String, Object>) pausedNode.getOutputData().get("tracePayload");
+        assertThat(tracePayload.get("qualityIssueId")).isEqualTo("issue-1");
+        assertThat(tracePayload.get("qualityScore")).isEqualTo(52);
+        verify(qualityIssueFeedbackService).createIssue(any(), any(), eq("wf-1"), eq("copy_generation"));
         verify(inAppMessageService).createMessage(
                 eq("tenant-1"),
                 eq("工作流已暂停，待处理质量阻断"),
@@ -913,7 +1305,7 @@ class WorkflowNodeEngineTest {
                 eq("workflow_quality_gate_paused"),
                 eq("workflow_quality_gate"),
                 eq("node-exec-1"),
-                eq("/workflow/wf-1"),
+                eq("/approval-center?type=quality_issue&id=issue-1"),
                 anyMap(),
                 eq(List.of("owner-1"))
         );
@@ -971,7 +1363,9 @@ class WorkflowNodeEngineTest {
                 reviewSessionProvider,
                 mock(InAppMessageService.class),
                 mock(BuiltinQualityAssuranceService.class),
-                securityProvider
+                mock(QualityIssueFeedbackService.class),
+                securityProvider,
+                mock(FlowableWorkflowBridge.class)
         );
 
         WorkflowInstance instance = new WorkflowInstance();

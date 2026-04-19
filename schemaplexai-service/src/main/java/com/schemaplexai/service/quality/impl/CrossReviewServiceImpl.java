@@ -2,6 +2,7 @@ package com.schemaplexai.service.quality.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.enums.TriggerModeEnum;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.ArtifactMapper;
@@ -65,9 +66,10 @@ public class CrossReviewServiceImpl implements CrossReviewService {
                 request.getProfileId(),
                 request.getIssueType(),
                 modelIds,
-                "manual",
+                TriggerModeEnum.MANUAL.getCode(),
                 null,
                 targetContent,
+                request.getReferenceContent(),
                 spec != null ? spec.getTenantId() : SecurityUtil.getCurrentTenantId()
         );
         if (entity == null) {

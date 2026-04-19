@@ -90,7 +90,7 @@ class QualityCrossReviewExecutionServiceImplTest {
 
         CrossReview review = service.createAndExecute(
                 "spec-1", "task-1", "profile-1", "deviation",
-                List.of("model-a", "model-b"), "manual", null, "待审查内容", "tenant-1"
+                List.of("model-a", "model-b"), "manual", null, "待审查内容", null, "tenant-1"
         );
 
         assertThat(review).isNotNull();
@@ -137,7 +137,7 @@ class QualityCrossReviewExecutionServiceImplTest {
 
         CrossReview review = service.createAndExecute(
                 "spec-1", "task-2", "profile-2", "intent_defect",
-                List.of("model-a"), "manual", null, "待审查内容", null
+                List.of("model-a"), "manual", null, "待审查内容", null, null
         );
 
         assertThat(review).isNotNull();
@@ -181,7 +181,7 @@ class QualityCrossReviewExecutionServiceImplTest {
         CrossReview review = service.createAndExecute(
                 "spec-1", "task-3", "profile-3", "deviation",
                 List.of("model-a", "model-b", "model-c", "model-a"),
-                "manual", null, "待审查内容", "tenant-1"
+                "manual", null, "待审查内容", null, "tenant-1"
         );
 
         assertThat(review).isNotNull();
@@ -224,7 +224,7 @@ class QualityCrossReviewExecutionServiceImplTest {
         String largeContent = "头部约束\n" + "A".repeat(8_000) + "\n结尾验收\n" + "B".repeat(4_000);
         service.createAndExecute(
                 "spec-1", "task-4", "profile-4", "intent_defect",
-                List.of("model-a"), "manual", null, largeContent, "tenant-1"
+                List.of("model-a"), "manual", null, largeContent, null, "tenant-1"
         );
 
         assertThat(capturedUserPrompt.get()).contains("中间内容已截断");
@@ -271,7 +271,7 @@ class QualityCrossReviewExecutionServiceImplTest {
 
         service.createAndExecute(
                 "spec-marketing", "task-marketing", null, "deviation",
-                List.of("model-a"), "manual", null, "营销终稿内容", "tenant-1"
+                List.of("model-a"), "manual", null, "营销终稿内容", null, "tenant-1"
         );
 
         assertThat(capturedUserPrompt.get()).contains("营销交付物 / 最终文案");
@@ -312,7 +312,7 @@ class QualityCrossReviewExecutionServiceImplTest {
 
         CrossReview review = service.createAndExecute(
                 "spec-1", "task-5", "profile-5", "intent_defect",
-                List.of("model-a"), "manual", null, "待审查内容", "tenant-1"
+                List.of("model-a"), "manual", null, "待审查内容", null, "tenant-1"
         );
 
         assertThat(review).isNotNull();
@@ -355,7 +355,7 @@ class QualityCrossReviewExecutionServiceImplTest {
 
         CrossReview review = service.createAndExecute(
                 "spec-1", "task-6", "profile-6", "deviation",
-                List.of("model-a", "model-b"), "manual", null, "待审查内容", "tenant-1"
+                List.of("model-a", "model-b"), "manual", null, "待审查内容", null, "tenant-1"
         );
 
         assertThat(review).isNotNull();

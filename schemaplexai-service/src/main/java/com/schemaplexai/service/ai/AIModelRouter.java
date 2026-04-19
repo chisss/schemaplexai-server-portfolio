@@ -18,6 +18,7 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 
@@ -82,9 +83,14 @@ public class AIModelRouter {
             }
         }
 
-        List<LangChain4jResolution> chain = new ArrayList<>();
+        List<AiModel> orderedModels = new ArrayList<>();
         for (String modelId : modelIds) {
-            AiModel model = requireActiveModelById(modelId);
+            orderedModels.add(requireActiveModelById(modelId));
+        }
+        orderedModels = reorderRouteCandidates(orderedModels);
+
+        List<LangChain4jResolution> chain = new ArrayList<>();
+        for (AiModel model : orderedModels) {
             chain.add(buildResolution(model));
         }
         return chain;
@@ -229,10 +235,60 @@ public class AIModelRouter {
         return aiModel;
     }
 
+    private List<AiModel> reorderRouteCandidates(List<AiModel> candidates) {
+        if (CollectionUtils.isEmpty(candidates) || candidates.size() <= 1) {
+            return candidates;
+        }
+        AiModel primary = candidates.getFirst();
+        if (isConnectivityHealthy(primary) || candidates.stream().skip(1).noneMatch(this::isConnectivityHealthy)) {
+            return candidates;
+        }
+
+        List<IndexedModel> indexedModels = new ArrayList<>();
+        for (int i = 0; i < candidates.size(); i++) {
+            indexedModels.add(new IndexedModel(i, candidates.get(i)));
+        }
+        indexedModels.sort(Comparator
+                .comparingInt((IndexedModel item) -> connectivityPriority(item.model()))
+                .thenComparingInt(item -> latencyPriority(item.model()))
+                .thenComparingInt(IndexedModel::index));
+
+        List<AiModel> reordered = indexedModels.stream()
+                .map(IndexedModel::model)
+                .toList();
+        log.info("AI 模型路由根据最近连通性结果重排候选顺序: before={}, after={}",
+                candidates.stream().map(AiModel::getName).toList(),
+                reordered.stream().map(AiModel::getName).toList());
+        return reordered;
+    }
+
+    private boolean isConnectivityHealthy(AiModel model) {
+        return model != null && "success".equalsIgnoreCase(model.getLastTestStatus());
+    }
+
+    private int connectivityPriority(AiModel model) {
+        if (isConnectivityHealthy(model)) {
+            return 0;
+        }
+        if (model == null || !StringUtils.hasText(model.getLastTestStatus())) {
+            return 1;
+        }
+        return 2;
+    }
+
+    private int latencyPriority(AiModel model) {
+        if (!isConnectivityHealthy(model) || model == null || model.getLastTestLatency() == null || model.getLastTestLatency() <= 0) {
+            return Integer.MAX_VALUE;
+        }
+        return model.getLastTestLatency();
+    }
+
     private LangChain4jResolution buildResolution(AiModel aiModel) {
         AiModelConfig config = AiModelConfig.from(aiModel);
         log.info("AI 模型解析成功: modelName={}, provider={}, modelId={}",
                 aiModel.getName(), config.getProvider(), config.getModelId());
         return new LangChain4jResolution(modelFactory.getOrCreate(config), config);
     }
+
+    private record IndexedModel(int index, AiModel model) {}
 }

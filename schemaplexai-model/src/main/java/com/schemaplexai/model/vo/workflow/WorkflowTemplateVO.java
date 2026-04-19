@@ -28,6 +28,9 @@ public class WorkflowTemplateVO {
 
     private String status;
 
+    /** 触发类型 */
+    private String triggerType;
+
     private String createdBy;
 
     private LocalDateTime createdAt;

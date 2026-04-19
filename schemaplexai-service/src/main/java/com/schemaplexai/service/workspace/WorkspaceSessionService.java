@@ -31,6 +31,20 @@ public class WorkspaceSessionService {
                                         String branchName,
                                         String worktreePath,
                                         int ttlMinutes) {
+        return openSession(tenantId, workspaceId, userId, executionId, branchName, worktreePath, ttlMinutes, SessionMode.GIT_WORKTREE);
+    }
+
+    /**
+     * 开启工作空间会话
+     */
+    public WorkspaceSession openSession(String tenantId,
+                                        String workspaceId,
+                                        String userId,
+                                        String executionId,
+                                        String branchName,
+                                        String worktreePath,
+                                        int ttlMinutes,
+                                        SessionMode sessionMode) {
         WorkspaceSession session = WorkspaceSession.builder()
                 .sessionId(UUID.randomUUID().toString().replace("-", ""))
                 .tenantId(tenantId)
@@ -42,6 +56,7 @@ public class WorkspaceSessionService {
                 .createdAt(LocalDateTime.now())
                 .lastHeartbeatAt(LocalDateTime.now())
                 .expireAt(LocalDateTime.now().plusMinutes(Math.max(ttlMinutes, 5)))
+                .sessionMode(sessionMode != null ? sessionMode : SessionMode.GIT_WORKTREE)
                 .status(SessionStatus.ACTIVE)
                 .build();
         sessions.put(session.getSessionId(), session);
@@ -174,7 +189,13 @@ public class WorkspaceSessionService {
         private LocalDateTime createdAt;
         private LocalDateTime lastHeartbeatAt;
         private LocalDateTime expireAt;
+        private SessionMode sessionMode;
         private SessionStatus status;
+    }
+
+    public enum SessionMode {
+        GIT_WORKTREE,
+        SNAPSHOT_COPY
     }
 
     public enum SessionStatus {

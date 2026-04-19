@@ -22,4 +22,10 @@ public class ConnectionTestVO {
 
     /** 权限范围列表 */
     private List<String> scopes;
+
+    /** 认证用户名 */
+    private String username;
+
+    /** 失败原因 */
+    private String errorMessage;
 }

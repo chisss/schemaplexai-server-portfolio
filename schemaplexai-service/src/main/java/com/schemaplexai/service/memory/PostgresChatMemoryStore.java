@@ -5,10 +5,9 @@ import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.ChatMessageMapper;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.ChatMessageEntity;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
-import dev.langchain4j.data.message.ChatMessageDeserializer;
-import dev.langchain4j.data.message.ChatMessageSerializer;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -17,9 +16,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 基于 PostgreSQL 的 ChatMemoryStore 实现
@@ -118,17 +120,13 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
             case "SYSTEM" -> SystemMessage.from(content != null ? content : "");
             case "USER" -> UserMessage.from(content != null ? content : "");
             case "AI" -> {
-                // AI 消息可能包含工具调用请求，使用 JSON 反序列化恢复完整结构
-                if (entity.getToolCalls() != null && !entity.getToolCalls().isEmpty()) {
-                    // 有工具调用的 AI 消息，通过 JSON 反序列化还原
-                    try {
-                        String json = ChatMessageSerializer.messageToJson(
-                                AiMessage.from(content != null ? content : ""));
-                        // 简化处理：仅恢复文本内容，工具调用在 Agentic Loop 中不需要跨执行恢复
-                        yield AiMessage.from(content != null ? content : "");
-                    } catch (Exception e) {
-                        yield AiMessage.from(content != null ? content : "");
+                List<ToolExecutionRequest> toolRequests = restoreToolExecutionRequests(entity.getToolCalls());
+                if (!toolRequests.isEmpty()) {
+                    // 恢复工具调用请求，避免空 AI 消息在下一轮请求中变成非法 messages。
+                    if (StringUtils.hasText(content)) {
+                        yield AiMessage.from(content, toolRequests);
                     }
+                    yield AiMessage.from(toolRequests);
                 }
                 yield AiMessage.from(content != null ? content : "");
             }
@@ -190,6 +188,28 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
         }
 
         return entity;
+    }
+
+    private List<ToolExecutionRequest> restoreToolExecutionRequests(List<Map<String, Object>> toolCalls) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return List.of();
+        }
+        List<ToolExecutionRequest> requests = new ArrayList<>();
+        for (Map<String, Object> toolCall : toolCalls) {
+            if (toolCall == null || toolCall.isEmpty()) {
+                continue;
+            }
+            String name = toolCall.get("name") != null ? String.valueOf(toolCall.get("name")) : null;
+            if (!StringUtils.hasText(name)) {
+                continue;
+            }
+            requests.add(ToolExecutionRequest.builder()
+                    .id(toolCall.get("id") != null ? String.valueOf(toolCall.get("id")) : null)
+                    .name(name)
+                    .arguments(toolCall.get("arguments") != null ? String.valueOf(toolCall.get("arguments")) : null)
+                    .build());
+        }
+        return requests;
     }
 
     private AgentExecution resolveMessageOwner(String conversationId) {

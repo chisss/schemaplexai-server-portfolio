@@ -1,6 +1,7 @@
 package com.schemaplexai.service.workflow.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.ReviewNotificationConstant;
 import com.schemaplexai.common.enums.ReviewDecisionStatusEnum;
 import com.schemaplexai.common.enums.ReviewCommentLevelEnum;
 import com.schemaplexai.common.enums.ReviewSessionStatusEnum;
@@ -9,8 +10,10 @@ import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.ReviewCommentMapper;
 import com.schemaplexai.dao.mapper.ReviewSessionMapper;
+import com.schemaplexai.dao.mapper.RoleMapper;
 import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.dao.mapper.UserMapper;
+import com.schemaplexai.dao.mapper.UserRoleMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.model.converter.ReviewCommentConverter;
 import com.schemaplexai.model.converter.ReviewSessionConverter;
@@ -19,8 +22,10 @@ import com.schemaplexai.model.dto.workflow.ReviewDecisionRequest;
 import com.schemaplexai.model.dto.workflow.ReviewSessionCreateRequest;
 import com.schemaplexai.model.entity.ReviewComment;
 import com.schemaplexai.model.entity.ReviewSession;
+import com.schemaplexai.model.entity.Role;
 import com.schemaplexai.model.entity.Spec;
 import com.schemaplexai.model.entity.User;
+import com.schemaplexai.model.entity.UserRole;
 import com.schemaplexai.model.entity.WorkflowNodeExecution;
 import com.schemaplexai.model.vo.workflow.ReviewCommentVO;
 import com.schemaplexai.model.vo.workflow.ReviewSessionVO;
@@ -28,18 +33,23 @@ import com.schemaplexai.model.vo.workflow.ReviewSummaryVO;
 import com.schemaplexai.service.notification.InAppMessageService;
 import com.schemaplexai.service.workflow.WorkflowInstanceService;
 import com.schemaplexai.service.workflow.ReviewSessionService;
+import com.schemaplexai.service.workflow.runtime.ReviewNotificationHelper;
 import com.schemaplexai.service.workflow.validator.ReviewValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.net.URI;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 评审会话服务实现
@@ -59,6 +69,10 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
     private final SpecMapper specMapper;
     private final UserMapper userMapper;
     private final WorkflowNodeExecutionMapper workflowNodeExecutionMapper;
+    private final ReviewNotificationHelper reviewNotificationHelper;
+    private final RabbitTemplate rabbitTemplate;
+    private final RoleMapper roleMapper;
+    private final UserRoleMapper userRoleMapper;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -71,11 +85,28 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         session.setDocumentType(request.getDocumentType());
         session.setOwner(request.getOwner() != null ? request.getOwner() : SecurityUtil.getCurrentUserId());
 
+        // 创建会话时固化审批人姓名快照，避免历史审批只能依赖实时用户表回查
+        Set<String> reviewerIds = request.getReviewers().stream()
+                .map(item -> item.get("userId"))
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toSet());
+        Map<String, User> reviewerUserMap = reviewerIds.isEmpty()
+                ? Map.of()
+                : userMapper.selectBatchIds(reviewerIds).stream()
+                .collect(Collectors.toMap(User::getId, item -> item, (left, right) -> left));
+
         // 构建评审人列表，每人初始状态为 pending
         List<Object> reviewers = request.getReviewers().stream()
                 .map(r -> {
                     Map<String, Object> reviewer = new HashMap<>();
-                    reviewer.put("userId", r.get("userId"));
+                    String reviewerId = r.get("userId");
+                    reviewer.put("userId", reviewerId);
+                    String reviewerName = StringUtils.hasText(r.get("reviewerName"))
+                            ? r.get("reviewerName")
+                            : resolveUserDisplayName(reviewerId, reviewerUserMap);
+                    if (StringUtils.hasText(reviewerName)) {
+                        reviewer.put("reviewerName", reviewerName);
+                    }
                     reviewer.put("role", r.get("role"));
                     reviewer.put("status", ReviewSessionStatusEnum.PENDING.getCode());
                     reviewer.put("submittedAt", null);
@@ -178,6 +209,15 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public void updateActionUrl(String sessionId, String actionUrl) {
+        ReviewSession session = requireExists(sessionId);
+        session.setReviewActionUrl(normalizeReviewActionUrl(actionUrl));
+        session.setUpdatedAt(LocalDateTime.now());
+        sessionMapper.updateById(session);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public ReviewSessionVO approve(String sessionId, ReviewDecisionRequest request) {
         ReviewSession session = requirePendingSession(sessionId);
         reviewValidator.validateIsReviewer(session);
@@ -245,7 +285,27 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
             sessionMapper.updateById(session);
             log.info("评审会话已完成: sessionId={}", sessionId);
 
-            // TODO: 对接事件通知 — 发送评审完成事件（RabbitMQ）
+            String decision = aggregateDecision(session);
+
+            // 发送评审完成事件到 MQ（供工作流引擎消费）
+            rabbitTemplate.convertAndSend(ReviewNotificationConstant.MQ_EXCHANGE, Map.of(
+                    "eventType", ReviewNotificationConstant.EVENT_TYPE_REVIEW_COMPLETED,
+                    "sessionId", sessionId,
+                    "specId", session.getSpecId(),
+                    "workflowInstanceId", session.getWorkflowInstanceId(),
+                    "workflowNodeId", session.getWorkflowNodeId(),
+                    "decision", decision));
+
+            // 发送站内信通知给会话创建者
+            reviewNotificationHelper.sendReviewNotification(
+                    session.getTenantId(),
+                    ReviewNotificationConstant.BUSINESS_TYPE_COMPLETED,
+                    ReviewNotificationConstant.DEFAULT_COMPLETED_TITLE,
+                    ReviewNotificationConstant.DEFAULT_COMPLETED_CONTENT,
+                    Map.of("sessionTitle", session.getId() != null ? session.getId() : sessionId,
+                            "decision", decision),
+                    sessionId,
+                    List.of(session.getOwner()));
         }
     }
 
@@ -271,8 +331,17 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
 
                 case "remind":
                     // 提醒未提交的评审人
-                    // TODO: 对接通知服务 — 向未提交的评审人发送提醒
-                    log.info("评审会话超时提醒: sessionId={}", session.getId());
+                    List<String> pendingReviewerIds = findPendingReviewerIds(session);
+                    reviewNotificationHelper.sendReviewNotification(
+                            session.getTenantId(),
+                            ReviewNotificationConstant.BUSINESS_TYPE_REMIND,
+                            ReviewNotificationConstant.DEFAULT_REMIND_TITLE,
+                            ReviewNotificationConstant.DEFAULT_REMIND_CONTENT,
+                            Map.of("sessionTitle", session.getId() != null ? session.getId() : session.getId(),
+                                    "deadline", session.getDeadline() != null ? session.getDeadline().toString() : ""),
+                            session.getId(),
+                            pendingReviewerIds);
+                    log.info("评审会话超时提醒: sessionId={}, pendingReviewers={}", session.getId(), pendingReviewerIds.size());
                     break;
 
                 case "escalate":
@@ -281,7 +350,17 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                     session.setStatus(ReviewSessionStatusEnum.TIMEOUT.getCode());
                     sessionMapper.updateById(session);
                     log.info("评审会话超时升级: sessionId={}", session.getId());
-                    // TODO: 对接通知服务 — 通知会话 owner 和管理员
+
+                    // 通知会话 owner 和管理员
+                    List<String> escalateRecipients = resolveEscalateRecipients(session);
+                    reviewNotificationHelper.sendReviewNotification(
+                            session.getTenantId(),
+                            ReviewNotificationConstant.BUSINESS_TYPE_ESCALATE,
+                            ReviewNotificationConstant.DEFAULT_ESCALATE_TITLE,
+                            ReviewNotificationConstant.DEFAULT_ESCALATE_CONTENT,
+                            Map.of("sessionTitle", session.getId() != null ? session.getId() : session.getId()),
+                            session.getId(),
+                            escalateRecipients);
                     break;
             }
         }
@@ -315,7 +394,9 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
     private ReviewSessionVO enrichWithSummary(ReviewSession session) {
         var vo = sessionConverter.toVO(session);
         vo.setReviewActionUrl(normalizeReviewActionUrl(vo.getReviewActionUrl()));
+        vo.setReviewers(enrichReviewerSnapshots(session.getReviewers()));
         enrichMetadata(session, vo);
+        enrichApproverSnapshot(vo);
 
         // 查询评审意见
         var comments = commentMapper.selectList(
@@ -330,6 +411,36 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         vo.setSummary(summary);
 
         return vo;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> enrichReviewerSnapshots(List<Object> reviewers) {
+        if (reviewers == null || reviewers.isEmpty()) {
+            return List.of();
+        }
+        Set<String> userIds = reviewers.stream()
+                .filter(Map.class::isInstance)
+                .map(item -> (Map<String, Object>) item)
+                .map(item -> stringValue(item.get("userId")))
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toSet());
+        Map<String, User> userMap = userIds.isEmpty()
+                ? Map.of()
+                : userMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(User::getId, item -> item, (left, right) -> left));
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : reviewers) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            Map<String, Object> reviewer = new HashMap<>((Map<String, Object>) rawMap);
+            if (!StringUtils.hasText(stringValue(reviewer.get("reviewerName")))) {
+                reviewer.put("reviewerName", resolveUserDisplayName(stringValue(reviewer.get("userId")), userMap));
+            }
+            result.add(reviewer);
+        }
+        return result;
     }
 
     private String normalizeReviewActionUrl(String reviewActionUrl) {
@@ -421,6 +532,33 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         }
     }
 
+    private void enrichApproverSnapshot(ReviewSessionVO vo) {
+        if (vo == null || vo.getReviewers() == null || vo.getReviewers().isEmpty()) {
+            return;
+        }
+        vo.getReviewers().stream()
+                .filter(item -> Set.of("approved", "rejected", "request_modify").contains(stringValue(item.get("status"))))
+                .max((left, right) -> {
+                    LocalDateTime leftAt = parseDateTime(left.get("submittedAt"));
+                    LocalDateTime rightAt = parseDateTime(right.get("submittedAt"));
+                    if (leftAt == null && rightAt == null) {
+                        return 0;
+                    }
+                    if (leftAt == null) {
+                        return -1;
+                    }
+                    if (rightAt == null) {
+                        return 1;
+                    }
+                    return leftAt.compareTo(rightAt);
+                })
+                .ifPresent(item -> {
+                    vo.setApproverId(stringValue(item.get("userId")));
+                    vo.setApproverName(stringValue(item.get("reviewerName")));
+                    vo.setApproverAt(parseDateTime(item.get("submittedAt")));
+                });
+    }
+
     private WorkflowNodeExecution findWorkflowNodeExecution(ReviewSession session) {
         if (session == null || !StringUtils.hasText(session.getWorkflowInstanceId())
                 || !StringUtils.hasText(session.getWorkflowNodeId())) {
@@ -436,10 +574,14 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
     }
 
     private String resolveUserDisplayName(String userId) {
+        return resolveUserDisplayName(userId, null);
+    }
+
+    private String resolveUserDisplayName(String userId, Map<String, User> cache) {
         if (!StringUtils.hasText(userId)) {
             return null;
         }
-        User user = userMapper.selectById(userId);
+        User user = cache != null ? cache.get(userId) : userMapper.selectById(userId);
         if (user == null) {
             return userId;
         }
@@ -466,6 +608,9 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
                     if (r instanceof Map<?, ?> rawMap) {
                         Map<String, Object> reviewer = new HashMap<>((Map<String, Object>) rawMap);
                         if (userId.equals(reviewer.get("userId"))) {
+                            if (!StringUtils.hasText(stringValue(reviewer.get("reviewerName")))) {
+                                reviewer.put("reviewerName", resolveUserDisplayName(userId));
+                            }
                             reviewer.put("status", status);
                             reviewer.put("submittedAt", LocalDateTime.now().toString());
                         }
@@ -511,5 +656,85 @@ public class ReviewSessionServiceImpl implements ReviewSessionService {
         return StringUtils.hasText(status)
                 && !ReviewSessionStatusEnum.PENDING.getCode().equals(status)
                 && !"pending".equals(status);
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private LocalDateTime parseDateTime(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof LocalDateTime localDateTime) {
+            return localDateTime;
+        }
+        try {
+            return LocalDateTime.parse(String.valueOf(value));
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    /**
+     * 聚合评审决策（多数决）
+     */
+    @SuppressWarnings("unchecked")
+    private String aggregateDecision(ReviewSession session) {
+        if (session.getReviewers() == null || session.getReviewers().isEmpty()) {
+            return "approved";
+        }
+        long approveCount = session.getReviewers().stream()
+                .filter(Map.class::isInstance)
+                .map(r -> (Map<String, Object>) r)
+                .filter(r -> "approved".equals(r.get("status")) || "submitted".equals(r.get("status")))
+                .count();
+        return approveCount > session.getReviewers().size() / 2 ? "approved" : "rejected";
+    }
+
+    /**
+     * 查找未提交评审的评审人 ID 列表
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> findPendingReviewerIds(ReviewSession session) {
+        if (session.getReviewers() == null) {
+            return List.of();
+        }
+        return session.getReviewers().stream()
+                .filter(Map.class::isInstance)
+                .map(r -> (Map<String, Object>) r)
+                .filter(r -> !"submitted".equals(r.get("status")))
+                .map(r -> stringValue(r.get("userId")))
+                .filter(StringUtils::hasText)
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 解析超时升级通知的接收人（owner + 租户管理员）
+     */
+    private List<String> resolveEscalateRecipients(ReviewSession session) {
+        List<String> recipients = new ArrayList<>();
+        if (StringUtils.hasText(session.getOwner())) {
+            recipients.add(session.getOwner());
+        }
+
+        // 查找租户管理员：先找 admin 角色 ID，再通过 UserRole 关联查用户
+        Role adminRole = roleMapper.selectOne(
+                new LambdaQueryWrapper<Role>()
+                        .eq(Role::getTenantId, session.getTenantId())
+                        .eq(Role::getCode, ReviewNotificationConstant.ADMIN_ROLE_CODE)
+                        .last("LIMIT 1"));
+        if (adminRole != null) {
+            List<String> adminUserIds = userRoleMapper.selectList(
+                    new LambdaQueryWrapper<UserRole>()
+                            .eq(UserRole::getRoleId, adminRole.getId()))
+                    .stream()
+                    .map(UserRole::getUserId)
+                    .collect(Collectors.toList());
+            recipients.addAll(adminUserIds);
+        }
+
+        return recipients.stream().distinct().collect(Collectors.toList());
     }
 }

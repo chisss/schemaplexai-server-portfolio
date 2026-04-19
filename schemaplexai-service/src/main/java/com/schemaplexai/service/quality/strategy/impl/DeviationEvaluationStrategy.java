@@ -1,5 +1,6 @@
 package com.schemaplexai.service.quality.strategy.impl;
 
+import com.schemaplexai.common.enums.QualityIssueTypeEnum;
 import com.schemaplexai.service.quality.strategy.ModelBasedQualityEvaluator;
 import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategy;
 import com.schemaplexai.service.quality.strategy.QualityReviewPolicyService;
@@ -50,7 +51,7 @@ public class DeviationEvaluationStrategy implements QualityEvaluationStrategy {
 
     @Override
     public String supportedIssueType() {
-        return "deviation";
+        return QualityIssueTypeEnum.DEVIATION.getCode();
     }
 
     @Override

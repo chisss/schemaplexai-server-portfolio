@@ -8,6 +8,8 @@ import com.schemaplexai.model.dto.integration.IntegrationUpdateRequest;
 import com.schemaplexai.model.dto.integration.ProjectImportRequest;
 import com.schemaplexai.model.vo.integration.ConnectionTestVO;
 import com.schemaplexai.model.vo.integration.IntegrationProjectVO;
+import com.schemaplexai.model.vo.integration.IntegrationRepositoryTreeNodeVO;
+import com.schemaplexai.model.vo.integration.IntegrationRepositoryVO;
 import com.schemaplexai.model.vo.integration.IntegrationVO;
 import com.schemaplexai.model.vo.integration.WebhookEventVO;
 import com.schemaplexai.service.integration.IntegrationService;
@@ -102,6 +104,21 @@ public class IntegrationController {
     @Operation(summary = "获取已导入的集成项目列表")
     public R<List<IntegrationProjectVO>> listImportedProjects(@PathVariable String id) {
         return R.ok(integrationService.listImportedProjects(id));
+    }
+
+    @GetMapping("/{id}/repos")
+    @Operation(summary = "获取远端仓库列表")
+    public R<List<IntegrationRepositoryVO>> listRepositories(@PathVariable String id) {
+        return R.ok(integrationService.listRepositories(id));
+    }
+
+    @GetMapping("/{id}/repos/{repoId}/tree")
+    @Operation(summary = "获取远端仓库文件树")
+    public R<List<IntegrationRepositoryTreeNodeVO>> listRepositoryTree(@PathVariable String id,
+                                                                       @PathVariable String repoId,
+                                                                       @RequestParam(required = false) String ref,
+                                                                       @RequestParam(required = false, defaultValue = "/") String path) {
+        return R.ok(integrationService.listRepositoryTree(id, repoId, ref, path));
     }
 
     @GetMapping("/projects/all")

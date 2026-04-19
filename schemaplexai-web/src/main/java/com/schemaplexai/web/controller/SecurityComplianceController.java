@@ -32,6 +32,7 @@ import com.schemaplexai.service.security.SecurityRulePackService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import com.schemaplexai.web.util.RequestContextUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -103,14 +104,14 @@ public class SecurityComplianceController {
     public R<List<SecurityBindingVO>> savePolicyBindings(@PathVariable String id,
                                                          @RequestBody SecurityBindingSaveRequest request,
                                                          HttpServletRequest httpRequest) {
-        return R.ok(securityComplianceService.savePolicyBindings(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityComplianceService.savePolicyBindings(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/policies")
     @Operation(summary = "创建安全策略")
     public R<SecurityPolicyVO> createPolicy(@Valid @RequestBody SecurityPolicySaveRequest request,
                                             HttpServletRequest httpRequest) {
-        return R.ok(securityComplianceService.createPolicy(request, buildAuditContext(httpRequest)));
+        return R.ok(securityComplianceService.createPolicy(request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PutMapping("/policies/{id}")
@@ -118,13 +119,13 @@ public class SecurityComplianceController {
     public R<SecurityPolicyVO> updatePolicy(@PathVariable String id,
                                             @Valid @RequestBody SecurityPolicySaveRequest request,
                                             HttpServletRequest httpRequest) {
-        return R.ok(securityComplianceService.updatePolicy(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityComplianceService.updatePolicy(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/policies/{id}/publish")
     @Operation(summary = "发布安全策略")
     public R<SecurityPolicyVO> publishPolicy(@PathVariable String id, HttpServletRequest httpRequest) {
-        return R.ok(securityComplianceService.publishPolicy(id, buildAuditContext(httpRequest)));
+        return R.ok(securityComplianceService.publishPolicy(id, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/policies/{id}/toggle")
@@ -132,13 +133,13 @@ public class SecurityComplianceController {
     public R<SecurityPolicyVO> togglePolicy(@PathVariable String id,
                                             @Valid @RequestBody SecurityPolicyToggleRequest request,
                                             HttpServletRequest httpRequest) {
-        return R.ok(securityComplianceService.togglePolicy(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityComplianceService.togglePolicy(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @DeleteMapping("/policies/{id}")
     @Operation(summary = "删除安全策略")
     public R<Void> deletePolicy(@PathVariable String id, HttpServletRequest httpRequest) {
-        securityComplianceService.deletePolicy(id, buildAuditContext(httpRequest));
+        securityComplianceService.deletePolicy(id, RequestContextUtils.buildSecurityAuditContext(httpRequest));
         return R.ok();
     }
 
@@ -183,7 +184,7 @@ public class SecurityComplianceController {
     public R<SecurityIncidentVO> assignIncident(@PathVariable String id,
                                                 @Valid @RequestBody SecurityIncidentActionRequest request,
                                                 HttpServletRequest httpRequest) {
-        return R.ok(securityIncidentService.assign(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityIncidentService.assign(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/incidents/{id}/resolve")
@@ -191,7 +192,7 @@ public class SecurityComplianceController {
     public R<SecurityIncidentVO> resolveIncident(@PathVariable String id,
                                                  @Valid @RequestBody SecurityIncidentActionRequest request,
                                                  HttpServletRequest httpRequest) {
-        return R.ok(securityIncidentService.resolve(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityIncidentService.resolve(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/incidents/{id}/ignore")
@@ -199,7 +200,7 @@ public class SecurityComplianceController {
     public R<SecurityIncidentVO> ignoreIncident(@PathVariable String id,
                                                 @Valid @RequestBody SecurityIncidentActionRequest request,
                                                 HttpServletRequest httpRequest) {
-        return R.ok(securityIncidentService.ignore(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityIncidentService.ignore(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/incidents/{id}/escalate")
@@ -207,13 +208,13 @@ public class SecurityComplianceController {
     public R<SecurityIncidentVO> escalateIncident(@PathVariable String id,
                                                   @Valid @RequestBody SecurityIncidentActionRequest request,
                                                   HttpServletRequest httpRequest) {
-        return R.ok(securityIncidentService.escalate(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityIncidentService.escalate(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/incidents/{id}/resume-resource")
     @Operation(summary = "恢复被安全暂停的资源")
     public R<SecurityIncidentVO> resumeIncidentResource(@PathVariable String id, HttpServletRequest httpRequest) {
-        return R.ok(securityIncidentService.resumeResource(id, buildAuditContext(httpRequest)));
+        return R.ok(securityIncidentService.resumeResource(id, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @GetMapping("/rule-packs")
@@ -232,7 +233,7 @@ public class SecurityComplianceController {
     @Operation(summary = "创建安全规则包")
     public R<SecurityRulePackVO> createRulePack(@Valid @RequestBody SecurityRulePackSaveRequest request,
                                                 HttpServletRequest httpRequest) {
-        return R.ok(securityRulePackService.create(request, buildAuditContext(httpRequest)));
+        return R.ok(securityRulePackService.create(request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PutMapping("/rule-packs/{id}")
@@ -240,7 +241,7 @@ public class SecurityComplianceController {
     public R<SecurityRulePackVO> updateRulePack(@PathVariable String id,
                                                 @Valid @RequestBody SecurityRulePackSaveRequest request,
                                                 HttpServletRequest httpRequest) {
-        return R.ok(securityRulePackService.update(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityRulePackService.update(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/rule-packs/{id}/toggle")
@@ -248,7 +249,7 @@ public class SecurityComplianceController {
     public R<SecurityRulePackVO> toggleRulePack(@PathVariable String id,
                                                 @Valid @RequestBody SecurityRulePackToggleRequest request,
                                                 HttpServletRequest httpRequest) {
-        return R.ok(securityRulePackService.toggle(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityRulePackService.toggle(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @GetMapping("/rule-packs/{id}/items")
@@ -268,29 +269,13 @@ public class SecurityComplianceController {
     public R<List<SecurityBindingVO>> bindRulePack(@PathVariable String id,
                                                    @RequestBody SecurityBindingSaveRequest request,
                                                    HttpServletRequest httpRequest) {
-        return R.ok(securityRulePackService.saveBindings(id, request, buildAuditContext(httpRequest)));
+        return R.ok(securityRulePackService.saveBindings(id, request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/checks/runtime")
     @Operation(summary = "执行安全运行时检查")
     public R<SecurityCheckDecisionVO> runtimeCheck(@RequestBody SecurityRuntimeCheckRequest request,
                                                    HttpServletRequest httpRequest) {
-        return R.ok(securityRuntimeGuardService.evaluate(request, buildAuditContext(httpRequest)));
-    }
-
-    private SecurityAuditContext buildAuditContext(HttpServletRequest request) {
-        if (request == null) {
-            return new SecurityAuditContext(null, null);
-        }
-        String clientIp = request.getHeader("X-Forwarded-For");
-        if (clientIp != null && !clientIp.isBlank()) {
-            clientIp = clientIp.split(",")[0].trim();
-        } else {
-            clientIp = request.getHeader("X-Real-IP");
-        }
-        if (clientIp == null || clientIp.isBlank()) {
-            clientIp = request.getRemoteAddr();
-        }
-        return new SecurityAuditContext(clientIp, request.getHeader("User-Agent"));
+        return R.ok(securityRuntimeGuardService.evaluate(request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 }

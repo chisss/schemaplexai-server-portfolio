@@ -12,6 +12,13 @@ public class RagConfigUpdateRequest {
 
     private Boolean enabled;
 
+    /** 向量模型来源: builtin / api */
+    private String embeddingSource;
+
+    /** 内置 ONNX 向量模型标识 */
+    private String builtinEmbeddingModelId;
+
+    /** 外部向量模型 ID */
     private String vectorModelId;
 
     private String collectionName;
@@ -37,4 +44,17 @@ public class RagConfigUpdateRequest {
     private Integer embeddingDimension;
 
     private Boolean textCleaningEnabled;
+
+    private Boolean rerankerEnabled;
+
+    /** Reranker 模型来源: builtin / api */
+    private String rerankerSource;
+
+    @Min(value = 1, message = "Reranker TopN 不能小于 1")
+    @Max(value = 50, message = "Reranker TopN 不能超过 50")
+    private Integer rerankerTopN;
+
+    @Min(value = 0, message = "Reranker 最小评分不能小于 0")
+    @Max(value = 1, message = "Reranker 最小评分不能大于 1")
+    private Double rerankerMinScore;
 }

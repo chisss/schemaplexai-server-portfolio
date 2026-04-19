@@ -101,6 +101,8 @@ class WorkflowNodeContextAssemblerTest {
         assertThat(prompt).doesNotContain("docs/AIP-101-technical-design.md");
         assertThat(prompt).contains("当前仓库已确认现状");
         assertThat(prompt).contains("建议改造/待实现项");
+        assertThat(prompt).contains("工作目录（sys.* 工具 workdir）");
+        assertThat(prompt).contains("所有 sys.read、sys.grep、sys.ls、sys.bash 等 sys.* 工具调用都必须显式传入 workdir");
         assertThat(prompt).contains("sys.read 或 sys.grep");
         assertThat(prompt).contains("仓库中未发现");
         assertThat(prompt).contains("建议首批采证动作");
@@ -138,6 +140,43 @@ class WorkflowNodeContextAssemblerTest {
         assertThat(prompt).contains("系统会在文档落库前回填模型名、执行ID、质量分、文档版本");
     }
 
+    @Test
+    void shouldAddImplementationExecutionHintsForCodeDevelopmentNode() {
+        WorkflowInstance instance = buildInstance();
+        instance.getVariables().put("codeDevelopmentSummary", "已修改 PolicyController.java 并补充 WorkflowController.java");
+        Map<String, Object> config = Map.of(
+                "instructionSource", "manual",
+                "taskInstruction", "请完成真实代码修改并输出实现总结。",
+                "artifactDocType", "implementation",
+                "outputVariableKey", "codeDevelopmentSummary"
+        );
+
+        String prompt = assembler.buildAgentExecutionPrompt(instance, "代码开发", config, Map.of("triggered", true));
+
+        assertThat(prompt).contains("目标产物: docs/AIP-101-implementation.md");
+        assertThat(prompt).contains("代码开发阶段如发现上游文档给出的目录或文件路径不存在");
+        assertThat(prompt).contains("至少完成一次真实编辑动作");
+        assertThat(prompt).contains("mvn test、mvn -pl <module> test、mvn compile、pnpm test、pnpm build");
+        assertThat(prompt).contains("代码开发结果");
+        assertThat(prompt).contains("已修改 PolicyController.java 并补充 WorkflowController.java");
+    }
+
+    @Test
+    void shouldResolveTestPlanArtifactPathForTestPlanningNode() {
+        WorkflowInstance instance = buildInstance();
+        Map<String, Object> config = Map.of(
+                "instructionSource", "manual",
+                "taskInstruction", "请输出测试规划文档",
+                "artifactDocType", "test_plan",
+                "outputVariableKey", "testPlanDoc"
+        );
+
+        String prompt = assembler.buildAgentExecutionPrompt(instance, "测试规划", config, Map.of("triggered", true));
+
+        assertThat(prompt).contains("目标产物: docs/AIP-101-test-plan.md");
+        assertThat(prompt).contains("测试规划必须明确引用代码开发阶段的真实改动文件");
+    }
+
     private WorkflowInstance buildInstance() {
         WorkflowInstance instance = new WorkflowInstance();
         instance.setId("wf-1");
@@ -148,6 +187,8 @@ class WorkflowNodeContextAssemblerTest {
         variables.put("specName", "工作流引擎缺陷修复");
         variables.put("jiraTicket", "AIP-101");
         variables.put("artifactOutputPath", "docs/AIP-101-technical-design.md");
+        variables.put("workspaceName", "SchemaPlexAI 主工程");
+        variables.put("workspacePath", "/tmp/workspace");
         instance.setVariables(variables);
         return instance;
     }

@@ -69,6 +69,18 @@ public class AgentExecutionContext {
     /** 会话标识（前端传入或自动生成，支持多轮对话） */
     private String conversationId;
 
+    /** 附件对象 ID 列表 */
+    private List<String> attachmentIds;
+
+    /** 推理强度：low / medium / high */
+    private String reasoningStrength;
+
+    /** 直接技能编码 */
+    private String skillCode;
+
+    /** 输出格式覆盖 */
+    private String outputFormat;
+
     /** 短期记忆最大消息数（默认100） */
     @Builder.Default
     private int maxMessages = 100;

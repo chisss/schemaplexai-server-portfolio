@@ -21,9 +21,11 @@ import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.postgresql.ds.PGSimpleDataSource;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.util.StringUtils;
 
+import javax.sql.DataSource;
 import java.sql.DriverManager;
 import java.util.List;
 import java.util.Map;
@@ -83,7 +85,8 @@ class TeamAgentRuntimeStrategyCheckpointTest {
                 agentLogService,
                 qualityChecker,
                 executionEventStreamService,
-                agentContextPublisher
+                agentContextPublisher,
+                buildCheckpointDataSource()
         );
         ReflectionTestUtils.setField(strategy, "datasourceUrl", DATASOURCE_URL);
         ReflectionTestUtils.setField(strategy, "datasourceUsername", DATASOURCE_USERNAME);
@@ -290,6 +293,14 @@ class TeamAgentRuntimeStrategyCheckpointTest {
             deleteThread.setString(1, threadName);
             deleteThread.executeUpdate();
         }
+    }
+
+    private DataSource buildCheckpointDataSource() {
+        PGSimpleDataSource dataSource = new PGSimpleDataSource();
+        dataSource.setURL(DATASOURCE_URL);
+        dataSource.setUser(DATASOURCE_USERNAME);
+        dataSource.setPassword(DATASOURCE_PASSWORD);
+        return dataSource;
     }
 
     private record CheckpointState(boolean exists, boolean released, long checkpointCount) {

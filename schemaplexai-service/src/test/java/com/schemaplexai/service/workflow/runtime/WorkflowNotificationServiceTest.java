@@ -41,9 +41,9 @@ class WorkflowNotificationServiceTest {
         ReflectionTestUtils.setField(service, "frontendBaseUrl", "");
 
         assertThat(service.buildSpecReviewActionPath("spec-1", "instance-1", "review-1", "session-1"))
-                .isEqualTo("/spec/spec-1/edit?instanceId=instance-1&nodeId=review-1&mode=review&sessionId=session-1");
+                .isEqualTo("/approval-center?type=workflow_review&id=session-1&specId=spec-1&instanceId=instance-1&nodeId=review-1");
         assertThat(service.buildSpecReviewActionUrl("spec-1", "instance-1", "review-1", null))
-                .isEqualTo("/spec/spec-1/edit?instanceId=instance-1&nodeId=review-1&mode=review");
+                .isEqualTo("/approval-center?type=workflow_review&specId=spec-1&instanceId=instance-1&nodeId=review-1");
     }
 
     @Test

@@ -11,6 +11,8 @@ import java.util.Map;
 @Data
 public class SecurityRuntimeCheckRequest {
 
+    private String tenantId;
+
     private String scene;
 
     private String domainCode;

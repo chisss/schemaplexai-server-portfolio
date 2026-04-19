@@ -9,7 +9,12 @@ import java.util.Map;
 
 /**
  * 质量反馈处理器
+ *
+ * @deprecated 已被 {@link com.schemaplexai.service.quality.feedback.QualityIssueFeedbackService} 替代。
+ *             该类仅保留空壳实现以兼容旧调用，不再承担任何业务逻辑。
+ *             新代码请直接注入 QualityIssueFeedbackService。
  */
+@Deprecated(since = "2.0", forRemoval = true)
 @Slf4j
 @Service
 @RequiredArgsConstructor

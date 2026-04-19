@@ -3,6 +3,7 @@ package com.schemaplexai.service.integration.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -20,10 +21,17 @@ import com.schemaplexai.model.dto.integration.IntegrationUpdateRequest;
 import com.schemaplexai.model.dto.integration.ProjectImportRequest;
 import com.schemaplexai.model.vo.integration.ConnectionTestVO;
 import com.schemaplexai.model.vo.integration.IntegrationProjectVO;
+import com.schemaplexai.model.vo.integration.IntegrationRepositoryTreeNodeVO;
+import com.schemaplexai.model.vo.integration.IntegrationRepositoryVO;
 import com.schemaplexai.model.vo.integration.IntegrationVO;
 import com.schemaplexai.model.vo.integration.WebhookEventVO;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.integration.IntegrationService;
+import com.schemaplexai.service.integration.platform.ConnectionTestResult;
+import com.schemaplexai.service.integration.platform.GitPlatformAdapter;
+import com.schemaplexai.service.integration.platform.GitPlatformAdapterFactory;
+import com.schemaplexai.service.integration.platform.RemoteProject;
+import com.schemaplexai.service.integration.platform.RemoteRepositoryTreeNode;
 import com.schemaplexai.service.integration.validator.IntegrationValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -36,6 +44,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 集成配置服务实现
@@ -52,6 +61,7 @@ public class IntegrationServiceImpl implements IntegrationService {
     private final WebhookEventConverter webhookEventConverter;
     private final IntegrationValidator integrationValidator;
     private final EntityValidator entityValidator;
+    private final GitPlatformAdapterFactory gitPlatformAdapterFactory;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -109,7 +119,7 @@ public class IntegrationServiceImpl implements IntegrationService {
 
     @Override
     public IntegrationVO getById(String id) {
-        var integration = entityValidator.requireExists(integrationMapper, id, ResultCode.INTEGRATION_NOT_FOUND);
+        var integration = requireAccessibleIntegration(id);
         var vo = integrationConverter.toVO(integration);
         vo.setConfig(maskConfig(integration.getConfig()));
         return vo;
@@ -118,7 +128,7 @@ public class IntegrationServiceImpl implements IntegrationService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public IntegrationVO update(String id, IntegrationUpdateRequest request) {
-        var integration = entityValidator.requireExists(integrationMapper, id, ResultCode.INTEGRATION_NOT_FOUND);
+        var integration = requireAccessibleIntegration(id);
 
         // 更新非空字段
         if (StringUtils.hasText(request.getName())) {
@@ -146,29 +156,67 @@ public class IntegrationServiceImpl implements IntegrationService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void delete(String id) {
-        entityValidator.requireExists(integrationMapper, id, ResultCode.INTEGRATION_NOT_FOUND);
+        requireAccessibleIntegration(id);
         integrationMapper.deleteById(id);
         log.info("删除集成配置成功: integrationId={}", id);
     }
 
     @Override
     public ConnectionTestVO testConnection(String id) {
-        entityValidator.requireExists(integrationMapper, id, ResultCode.INTEGRATION_NOT_FOUND);
+        Integration integration = requireAccessibleIntegration(id);
 
-        // TODO: 调用对应平台适配器测试连接
-        var result = new ConnectionTestVO();
-        result.setConnected(false);
-        result.setLatencyMs(0L);
-        result.setScopes(new ArrayList<>());
-        return result;
+        GitPlatformAdapter adapter = gitPlatformAdapterFactory.getAdapter(integration.getPlatform());
+        ConnectionTestResult result = adapter.testConnection(integration.getConfig());
+
+        // 更新集成状态
+        integration.setLastSyncAt(LocalDateTime.now());
+        integration.setErrorMessage(result.isConnected() ? null : result.getErrorMessage());
+        integrationMapper.updateById(integration);
+
+        var vo = new ConnectionTestVO();
+        vo.setConnected(result.isConnected());
+        vo.setLatencyMs(result.getLatencyMs());
+        vo.setScopes(result.getScopes() != null ? result.getScopes() : List.of());
+        vo.setUsername(result.getUsername());
+        vo.setErrorMessage(result.getErrorMessage());
+        return vo;
     }
 
     @Override
     public Map<String, Object> sync(String id) {
-        entityValidator.requireExists(integrationMapper, id, ResultCode.INTEGRATION_NOT_FOUND);
+        Integration integration = requireAccessibleIntegration(id);
 
-        // TODO: 调用对应平台适配器执行同步
-        return new HashMap<>();
+        GitPlatformAdapter adapter = gitPlatformAdapterFactory.getAdapter(integration.getPlatform());
+        List<RemoteProject> remoteProjects = adapter.syncProjects(integration.getConfig());
+
+        int created = 0;
+        int updated = 0;
+        for (RemoteProject rp : remoteProjects) {
+            IntegrationProject existing = integrationProjectMapper.selectOne(
+                    new LambdaQueryWrapper<IntegrationProject>()
+                            .eq(IntegrationProject::getIntegrationId, id)
+                            .eq(IntegrationProject::getExternalProjectId, rp.getRemoteId())
+                            .last("LIMIT 1"));
+            if (existing == null) {
+                IntegrationProject project = new IntegrationProject();
+                project.setIntegrationId(id);
+                project.setTenantId(integration.getTenantId());
+                project.setExternalProjectId(rp.getRemoteId());
+                project.setExternalProjectName(rp.getFullName());
+                integrationProjectMapper.insert(project);
+                created++;
+            } else {
+                existing.setExternalProjectName(rp.getFullName());
+                integrationProjectMapper.updateById(existing);
+                updated++;
+            }
+        }
+
+        integration.setLastSyncAt(LocalDateTime.now());
+        integration.setErrorMessage(null);
+        integrationMapper.updateById(integration);
+
+        return Map.of("total", remoteProjects.size(), "created", created, "updated", updated);
     }
 
     @Override
@@ -196,37 +244,31 @@ public class IntegrationServiceImpl implements IntegrationService {
 
     @Override
     public List<Map<String, Object>> listAvailableProjects(String integrationId) {
-        Integration integration = entityValidator.requireExists(integrationMapper, integrationId, ResultCode.INTEGRATION_NOT_FOUND);
+        Integration integration = requireAccessibleIntegration(integrationId);
 
-        // 模拟平台项目列表（真实场景调用 Git API）
+        GitPlatformAdapter adapter = gitPlatformAdapterFactory.getAdapter(integration.getPlatform());
+        List<RemoteProject> remoteProjects = adapter.syncProjects(integration.getConfig());
+
         List<Map<String, Object>> projects = new ArrayList<>();
-        String platform = integration.getPlatform();
+        for (RemoteProject rp : remoteProjects) {
+            Map<String, Object> item = new HashMap<>();
+            item.put("externalProjectId", rp.getRemoteId());
+            item.put("externalProjectName", rp.getFullName());
+            item.put("description", rp.getDescription());
+            item.put("defaultBranch", rp.getDefaultBranch());
+            item.put("httpUrl", rp.getHttpUrl());
+            projects.add(item);
+        }
 
-        // 返回模拟项目列表
-        Map<String, Object> p1 = new HashMap<>();
-        p1.put("externalProjectId", "risk-system");
-        p1.put("externalProjectName", "风控系统");
-        p1.put("description", "企业级风险控制系统，包含实时风险评估、规则引擎和合规报告");
-        p1.put("language", "Java");
-        p1.put("lastUpdated", "2026-03-18");
-        projects.add(p1);
-
-        Map<String, Object> p2 = new HashMap<>();
-        p2.put("externalProjectId", "payment-gateway");
-        p2.put("externalProjectName", "支付网关");
-        p2.put("description", "统一支付接入网关，支持多渠道支付和对账");
-        p2.put("language", "Java");
-        p2.put("lastUpdated", "2026-03-15");
-        projects.add(p2);
-
-        log.info("获取集成平台项目列表: integrationId={}, platform={}, count={}", integrationId, platform, projects.size());
+        log.info("获取集成平台项目列表: integrationId={}, platform={}, count={}",
+                integrationId, integration.getPlatform(), projects.size());
         return projects;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public IntegrationProjectVO importProject(String integrationId, ProjectImportRequest request) {
-        Integration integration = entityValidator.requireExists(integrationMapper, integrationId, ResultCode.INTEGRATION_NOT_FOUND);
+        Integration integration = requireAccessibleIntegration(integrationId);
 
         // 检查是否已导入
         long existCount = integrationProjectMapper.selectCount(
@@ -265,7 +307,7 @@ public class IntegrationServiceImpl implements IntegrationService {
 
     @Override
     public List<IntegrationProjectVO> listImportedProjects(String integrationId) {
-        entityValidator.requireExists(integrationMapper, integrationId, ResultCode.INTEGRATION_NOT_FOUND);
+        requireAccessibleIntegration(integrationId);
 
         List<IntegrationProject> projects = integrationProjectMapper.selectList(
                 new LambdaQueryWrapper<IntegrationProject>()
@@ -299,7 +341,64 @@ public class IntegrationServiceImpl implements IntegrationService {
         return projects.stream().map(this::toProjectVO).collect(java.util.stream.Collectors.toList());
     }
 
+    @Override
+    public List<IntegrationRepositoryVO> listRepositories(String integrationId) {
+        Integration integration = requireAccessibleIntegration(integrationId);
+
+        GitPlatformAdapter adapter = gitPlatformAdapterFactory.getAdapter(integration.getPlatform());
+        return adapter.listRepositories(integration.getConfig()).stream()
+                .map(this::toRepositoryVO)
+                .toList();
+    }
+
+    @Override
+    public List<IntegrationRepositoryTreeNodeVO> listRepositoryTree(String integrationId, String repositoryId, String ref, String path) {
+        if (!StringUtils.hasText(repositoryId)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "仓库ID不能为空");
+        }
+        Integration integration = requireAccessibleIntegration(integrationId);
+        GitPlatformAdapter adapter = gitPlatformAdapterFactory.getAdapter(integration.getPlatform());
+        String normalizedPath = !StringUtils.hasText(path) ? "/" : path.trim();
+        try {
+            return adapter.getRepositoryTree(integration.getConfig(), repositoryId, ref, normalizedPath).stream()
+                    .map(this::toRepositoryTreeNodeVO)
+                    .toList();
+        } catch (UnsupportedOperationException ex) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, ex.getMessage());
+        }
+    }
+
     // ======================== 私有方法 ========================
+
+    private Integration requireAccessibleIntegration(String id) {
+        Integration integration = entityValidator.requireExists(integrationMapper, id, ResultCode.INTEGRATION_NOT_FOUND);
+        String currentTenantId = SecurityUtil.getCurrentTenantId();
+        if (StringUtils.hasText(currentTenantId) && !Objects.equals(currentTenantId, integration.getTenantId())) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "无权访问该集成配置");
+        }
+        return integration;
+    }
+
+    private IntegrationRepositoryVO toRepositoryVO(RemoteProject project) {
+        IntegrationRepositoryVO vo = new IntegrationRepositoryVO();
+        vo.setId(project.getRemoteId());
+        vo.setName(project.getName());
+        vo.setFullName(project.getFullName());
+        vo.setDescription(project.getDescription());
+        vo.setDefaultBranch(project.getDefaultBranch());
+        vo.setHttpUrl(project.getHttpUrl());
+        vo.setSshUrl(project.getSshUrl());
+        return vo;
+    }
+
+    private IntegrationRepositoryTreeNodeVO toRepositoryTreeNodeVO(RemoteRepositoryTreeNode node) {
+        IntegrationRepositoryTreeNodeVO vo = new IntegrationRepositoryTreeNodeVO();
+        vo.setPath(node.getPath());
+        vo.setName(node.getName());
+        vo.setType(node.getType());
+        vo.setLeaf(node.isLeaf());
+        return vo;
+    }
 
     /**
      * 对配置信息进行脱敏处理

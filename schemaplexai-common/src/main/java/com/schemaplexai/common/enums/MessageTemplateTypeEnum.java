@@ -15,7 +15,10 @@ public enum MessageTemplateTypeEnum {
     HUMAN_REVIEW_PENDING("human_review_pending", "人工审核待办通知"),
     APPROVAL_RESULT("approval_result", "审批结果通知"),
     SYSTEM_ALERT("system_alert", "系统告警通知"),
-    PROJECT_SYNC_SUMMARY("project_sync_summary", "项目同步摘要");
+    PROJECT_SYNC_SUMMARY("project_sync_summary", "项目同步摘要"),
+    REVIEW_COMPLETED("review_completed", "评审完成通知"),
+    REVIEW_REMIND("review_remind", "评审超时催办"),
+    REVIEW_ESCALATE("review_escalate", "评审超时升级");
 
     private final String code;
 
