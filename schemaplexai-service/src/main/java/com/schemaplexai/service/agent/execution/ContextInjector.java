@@ -83,6 +83,11 @@ public class ContextInjector {
     @Autowired(required = false)
     private ScoringService scoringService;
 
+    /** Agent 长期记忆服务（两阶段记忆管线） */
+    @Lazy
+    @Autowired(required = false)
+    private com.schemaplexai.service.agent.memory.AgentMemoryExtractionService agentMemoryService;
+
     // =========================================================================
     //  公开方法
     // =========================================================================
@@ -256,6 +261,24 @@ public class ContextInjector {
                 String teamText = teamSb.toString().trim();
                 sections.add("## 团队成员已完成输出\n" + compressText(teamText, budget.teamBudgetChars()));
                 log.debug("注入团队共享上下文: teamAgentId={}, members={}", teamAgentId, teamContext.size());
+            }
+        }
+
+        // L_memory: Agent 长期记忆（跨会话知识积累）
+        if (agentMemoryService != null && StringUtils.hasText(tenantId)) {
+            try {
+                var memories = agentMemoryService.getActiveMemories(tenantId, agentId, 10);
+                if (memories != null && !memories.isEmpty()) {
+                    StringBuilder memorySb = new StringBuilder();
+                    for (var memory : memories) {
+                        memorySb.append("- [").append(memory.getMemoryType()).append("] ")
+                                .append(memory.getContent()).append("\n");
+                    }
+                    sections.add("## 历史记忆\n" + compressText(memorySb.toString().trim(), 2000));
+                    log.debug("注入Agent长期记忆: agentId={}, count={}", agentId, memories.size());
+                }
+            } catch (Exception e) {
+                log.debug("记忆注入跳过: agentId={}, error={}", agentId, e.getMessage());
             }
         }
 

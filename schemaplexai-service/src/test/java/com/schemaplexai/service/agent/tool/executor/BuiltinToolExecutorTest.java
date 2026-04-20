@@ -14,6 +14,7 @@ import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.sandbox.WasmSandboxService;
 import com.schemaplexai.service.tool.security.ToolSecurityValidator;
 import com.schemaplexai.service.workspace.WorkspacePathResolver;
+import com.schemaplexai.service.agent.tool.executor.ToolExecutionLockService;
 import com.sun.net.httpserver.HttpServer;
 import okhttp3.OkHttpClient;
 import org.junit.jupiter.api.Test;
@@ -45,7 +46,8 @@ class BuiltinToolExecutorTest {
                 mock(SandboxGuard.class),
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
-                mock(WasmSandboxService.class)
+                mock(WasmSandboxService.class),
+                mock(ToolExecutionLockService.class)
         );
         Method method = BuiltinToolExecutor.class.getDeclaredMethod("truncateCommandOutput", String.class);
         method.setAccessible(true);
@@ -95,7 +97,8 @@ class BuiltinToolExecutorTest {
                     mock(SandboxGuard.class),
                     new OkHttpClient(),
                     mock(ToolSecurityValidator.class),
-                    mock(WasmSandboxService.class)
+                    mock(WasmSandboxService.class),
+                    mock(ToolExecutionLockService.class)
             );
             ToolCall toolCall = ToolCall.builder()
                     .callId("call-web-fetch")
@@ -137,7 +140,8 @@ class BuiltinToolExecutorTest {
                 mock(SandboxGuard.class),
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
-                mock(WasmSandboxService.class)
+                mock(WasmSandboxService.class),
+                mock(ToolExecutionLockService.class)
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-sys-read")
@@ -170,7 +174,8 @@ class BuiltinToolExecutorTest {
                 mock(SandboxGuard.class),
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
-                mock(WasmSandboxService.class)
+                mock(WasmSandboxService.class),
+                passthroughLockService()
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-default-workdir")
@@ -215,7 +220,8 @@ class BuiltinToolExecutorTest {
                 mock(SandboxGuard.class),
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
-                mock(WasmSandboxService.class)
+                mock(WasmSandboxService.class),
+                passthroughLockService()
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-workdir-alias")
@@ -262,7 +268,8 @@ class BuiltinToolExecutorTest {
                 mock(SandboxGuard.class),
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
-                mock(WasmSandboxService.class)
+                mock(WasmSandboxService.class),
+                mock(ToolExecutionLockService.class)
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-project-root")
@@ -284,5 +291,22 @@ class BuiltinToolExecutorTest {
 
     private List<ShellCommandAdapter> adapters() {
         return List.of(new MacCommandAdapter(), new LinuxCommandAdapter(), new WindowsCommandAdapter());
+    }
+
+    private ToolExecutionLockService passthroughLockService() {
+        ToolExecutionLockService lockService = mock(ToolExecutionLockService.class);
+        try {
+            when(lockService.executeWithReadLock(any(), any())).thenAnswer(inv -> {
+                ToolExecutionLockService.LockAction<?> action = inv.getArgument(1);
+                return action.execute();
+            });
+            when(lockService.executeWithWriteLock(any(), any())).thenAnswer(inv -> {
+                ToolExecutionLockService.LockAction<?> action = inv.getArgument(1);
+                return action.execute();
+            });
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        return lockService;
     }
 }

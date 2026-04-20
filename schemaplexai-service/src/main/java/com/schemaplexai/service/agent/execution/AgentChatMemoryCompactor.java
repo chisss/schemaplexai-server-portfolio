@@ -4,11 +4,15 @@ import com.schemaplexai.service.ai.AiModelConfig;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.memory.chat.TokenWindowChatMemory;
+import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
@@ -18,15 +22,17 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * ChatMemory 压缩器。
+ * ChatMemory 压缩器（增强版：支持模型驱动摘要）
  *
  * <p>策略：
  * <ul>
  *   <li>底层窗口切换为 TokenWindow</li>
  *   <li>保留最近原文消息</li>
  *   <li>将更早轮次折叠为结构化历史摘要</li>
+ *   <li>优先使用小模型生成高质量摘要，降级到字符串提取</li>
  * </ul>
  */
+@Slf4j
 final class AgentChatMemoryCompactor {
 
     private static final String SUMMARY_HEADER = "[历史摘要]";
@@ -36,10 +42,34 @@ final class AgentChatMemoryCompactor {
     private static final int TOOL_SUMMARY_CHAR_LIMIT = 1_200;
     private static final int LARGE_TOOL_RESULT_CHAR_THRESHOLD = 1_200;
 
+    private static final String MODEL_SUMMARIZATION_PROMPT = """
+            将以下对话历史压缩为简洁的结构化摘要。保留：
+            1. 用户的核心目标和需求
+            2. 已完成的关键操作和结果
+            3. 重要的技术决策和约束
+            4. 待处理的事项
+
+            输出格式：
+            目标: <一句话概括>
+            已完成: <关键操作列表>
+            决策: <重要决策>
+            待处理: <未完成事项>
+
+            保持简洁，总长度不超过800字。
+            """;
+
     private final TokenEstimatorSupport tokenEstimatorSupport;
+    private ChatModel compactionModel;
 
     AgentChatMemoryCompactor(TokenEstimatorSupport tokenEstimatorSupport) {
         this.tokenEstimatorSupport = tokenEstimatorSupport;
+    }
+
+    /**
+     * 设置用于上下文压缩的小模型（可选，未设置时降级到字符串提取）
+     */
+    void setCompactionModel(ChatModel compactionModel) {
+        this.compactionModel = compactionModel;
     }
 
     ChatMemory createChatMemory(String conversationId,
@@ -76,7 +106,12 @@ final class AgentChatMemoryCompactor {
 
         List<ChatMessage> historical = messages.subList(0, splitIndex);
         List<ChatMessage> recent = messages.subList(splitIndex, messages.size());
-        String summary = buildHistoricalSummary(historical);
+
+        // 优先使用模型驱动摘要，降级到字符串提取
+        String summary = modelBasedSummarize(historical);
+        if (!StringUtils.hasText(summary)) {
+            summary = buildHistoricalSummary(historical);
+        }
         if (!StringUtils.hasText(summary)) {
             return new CompactionResult(false, beforeTokens, beforeTokens, 0, messages.size(), messages.size());
         }
@@ -300,6 +335,43 @@ final class AgentChatMemoryCompactor {
             summary.append("- ").append(line).append("\n");
         }
         return compactText(summary.toString(), TOOL_SUMMARY_CHAR_LIMIT);
+    }
+
+    /**
+     * 模型驱动摘要：使用小模型生成高质量压缩摘要
+     */
+    private String modelBasedSummarize(List<ChatMessage> historicalMessages) {
+        if (compactionModel == null || historicalMessages == null || historicalMessages.isEmpty()) {
+            return null;
+        }
+        try {
+            StringBuilder historyText = new StringBuilder();
+            for (ChatMessage msg : historicalMessages) {
+                String role = msg instanceof UserMessage ? "用户" :
+                        msg instanceof AiMessage ? "AI" : "系统";
+                String text = msg instanceof UserMessage um ? um.singleText() :
+                        msg instanceof AiMessage am ? am.text() : null;
+                if (StringUtils.hasText(text)) {
+                    historyText.append(role).append(": ").append(compactText(text, 300)).append("\n");
+                }
+            }
+            if (historyText.isEmpty()) {
+                return null;
+            }
+            ChatResponse response = compactionModel.chat(List.of(
+                    SystemMessage.from(MODEL_SUMMARIZATION_PROMPT),
+                    UserMessage.from(historyText.toString())
+            ));
+            String summary = response.aiMessage().text();
+            if (StringUtils.hasText(summary)) {
+                log.info("模型驱动上下文压缩完成: inputMessages={}, summaryChars={}",
+                        historicalMessages.size(), summary.length());
+                return SUMMARY_HEADER + "\n" + compactText(summary, SUMMARY_CHAR_LIMIT);
+            }
+        } catch (Exception e) {
+            log.warn("模型驱动摘要失败，降级到字符串提取: {}", e.getMessage());
+        }
+        return null;
     }
 
     private String buildHistoricalSummary(List<ChatMessage> historicalMessages) {

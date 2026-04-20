@@ -58,4 +58,12 @@ public class CompositeChatMemoryStore implements ChatMemoryStore {
         postgresChatMemoryStore.deleteMessages(memoryId);
         redisChatMemoryStore.deleteMessages(memoryId);
     }
+
+    /**
+     * 失效指定会话的 Redis 缓存（回滚后调用，强制从 PG 重新加载）
+     */
+    public void invalidateCache(Object memoryId) {
+        redisChatMemoryStore.deleteMessages(memoryId);
+        log.debug("已失效会话缓存: memoryId={}", memoryId);
+    }
 }

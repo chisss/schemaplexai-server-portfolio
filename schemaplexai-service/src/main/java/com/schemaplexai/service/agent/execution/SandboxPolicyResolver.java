@@ -15,7 +15,9 @@ import com.schemaplexai.model.entity.Workspace;
 import com.schemaplexai.service.workspace.WorkspacePathResolver;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -26,10 +28,15 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * 沙箱策略解析器
+ * 沙箱策略解析器（支持热重载）
+ * <p>参考 Codex CLI 的 ArcSwap 热重载机制，
+ * 使用 AtomicReference 缓存策略，策略变更时原子替换。
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class SandboxPolicyResolver {
@@ -47,16 +54,35 @@ public class SandboxPolicyResolver {
 
     private Set<String> defaultAllowedCommands = Set.of();
 
+    /** 租户策略热缓存：tenantId -> TenantRuntimePolicy */
+    private final ConcurrentHashMap<String, AtomicReference<TenantRuntimePolicy>> policyCache = new ConcurrentHashMap<>();
+
     @PostConstruct
     void init() {
         defaultAllowedCommands = parseAllowedCommands(defaultAllowedCommandsConfig);
     }
 
+    /**
+     * 监听策略变更事件，原子替换缓存
+     */
+    @EventListener
+    public void onPolicyChanged(SandboxPolicyChangedEvent event) {
+        if (event != null && StringUtils.hasText(event.tenantId())) {
+            policyCache.remove(event.tenantId());
+            log.info("沙箱策略缓存已失效: tenantId={}", event.tenantId());
+        }
+    }
+
+    /**
+     * 手动失效指定租户的策略缓存
+     */
+    public void evictPolicyCache(String tenantId) {
+        policyCache.remove(tenantId);
+    }
+
     public SandboxPolicy resolve(Agent agent, AgentExecutionContext context) {
         String tenantId = context.getTenantId();
-        TenantRuntimePolicy runtimePolicy = StringUtils.hasText(tenantId)
-                ? tenantRuntimePolicyMapper.selectById(tenantId)
-                : null;
+        TenantRuntimePolicy runtimePolicy = loadTenantPolicy(tenantId);
         SandboxProfileEnum profile = SandboxProfileEnum.fromCode(runtimePolicy != null ? runtimePolicy.getSandboxProfile() : null);
         AgentRuntimeEngineEnum runtimeEngine = AgentRuntimeEngineEnum.fromCode(context.getRuntimeEngine());
         Set<String> allowedToolCodes = resolveAllowedToolCodes(agent, context);
@@ -242,4 +268,26 @@ public class SandboxPolicyResolver {
                         Set::copyOf
                 ));
     }
+
+    private TenantRuntimePolicy loadTenantPolicy(String tenantId) {
+        if (!StringUtils.hasText(tenantId)) {
+            return null;
+        }
+        AtomicReference<TenantRuntimePolicy> ref = policyCache.computeIfAbsent(tenantId,
+                k -> new AtomicReference<>());
+        TenantRuntimePolicy cached = ref.get();
+        if (cached != null) {
+            return cached;
+        }
+        TenantRuntimePolicy fromDb = tenantRuntimePolicyMapper.selectById(tenantId);
+        if (fromDb != null) {
+            ref.set(fromDb);
+        }
+        return fromDb;
+    }
+
+    /**
+     * 策略变更事件（由管理端发布）
+     */
+    public record SandboxPolicyChangedEvent(String tenantId) {}
 }

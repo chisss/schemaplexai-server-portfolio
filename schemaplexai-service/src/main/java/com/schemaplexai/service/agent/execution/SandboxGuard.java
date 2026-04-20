@@ -5,9 +5,13 @@ import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.service.agent.tool.ToolApprovalAmendmentService;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -21,8 +25,9 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 沙箱守卫
+ * 沙箱守卫（集成渐进式信任 Amendment 机制）
  */
+@Slf4j
 @Component
 public class SandboxGuard {
 
@@ -34,6 +39,10 @@ public class SandboxGuard {
 
     @Value("${schemaplexai.sandbox.allowed-commands:ls,cat,head,tail,grep,find,wc,sort,uniq,diff,echo,pwd,date,whoami}")
     private String allowedCommandsConfig;
+
+    @Lazy
+    @Autowired(required = false)
+    private ToolApprovalAmendmentService amendmentService;
 
     private Set<String> configuredAllowedCommands = Set.of();
 
@@ -102,6 +111,13 @@ public class SandboxGuard {
         }
         if (policy != null && policy.getSandboxProfile() == SandboxProfileEnum.STRICT) {
             return "STRICT 沙箱禁止所有 bash 命令";
+        }
+
+        // 渐进式信任：检查 Amendment 规则是否自动放行
+        if (policy != null && amendmentService != null
+                && amendmentService.isAutoApproved(policy.getTenantId(), policy.getAgentId(), "sys.bash", command)) {
+            log.debug("Amendment 自动放行: command={}", command);
+            return null;
         }
 
         Set<String> allowedCommands = resolveAllowedCommands(policy);
