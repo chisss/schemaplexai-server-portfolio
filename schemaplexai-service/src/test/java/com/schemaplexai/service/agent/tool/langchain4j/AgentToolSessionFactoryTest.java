@@ -3,6 +3,7 @@ package com.schemaplexai.service.agent.tool.langchain4j;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
+import com.schemaplexai.dao.mapper.ApiGatewayMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.McpServerMapper;
 import com.schemaplexai.dao.mapper.SkillMapper;
@@ -12,6 +13,7 @@ import com.schemaplexai.service.ai.LangChain4jToolSpecProvider;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.SkillToolExecutor;
+import com.schemaplexai.service.agent.tool.executor.ApiGatewayToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.integration.mcp.LangChain4jMcpClientFactory;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
@@ -44,8 +46,10 @@ class AgentToolSessionFactoryTest {
         BuiltinToolMapper builtinToolMapper = mock(BuiltinToolMapper.class);
         SkillMapper skillMapper = mock(SkillMapper.class);
         McpServerMapper mcpServerMapper = mock(McpServerMapper.class);
+        ApiGatewayMapper apiGatewayMapper = mock(ApiGatewayMapper.class);
         BuiltinToolExecutor builtinToolExecutor = mock(BuiltinToolExecutor.class);
         SkillToolExecutor skillToolExecutor = mock(SkillToolExecutor.class);
+        ApiGatewayToolExecutor apiGatewayToolExecutor = mock(ApiGatewayToolExecutor.class);
         LangChain4jMcpClientFactory mcpClientFactory = mock(LangChain4jMcpClientFactory.class);
 
         when(bindingMapper.selectList(any())).thenReturn(List.of(binding));
@@ -64,8 +68,10 @@ class AgentToolSessionFactoryTest {
                 builtinToolMapper,
                 skillMapper,
                 mcpServerMapper,
+                apiGatewayMapper,
                 builtinToolExecutor,
                 skillToolExecutor,
+                apiGatewayToolExecutor,
                 new LangChain4jToolSpecProvider(),
                 mcpClientFactory
         );

@@ -7,6 +7,7 @@ import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentModelBindingTypeEnum;
 import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.common.enums.AgentTypeEnum;
+import com.schemaplexai.common.enums.TeamMemberExecutionMode;
 import com.schemaplexai.common.enums.TeamMemberRoleTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
@@ -55,7 +56,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -108,6 +112,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     private static final String LOG_LEVEL_INFO = "INFO";
     private static final String LOG_LEVEL_WARN = "WARN";
     private static final String LOG_LEVEL_ERROR = "ERROR";
+    private static final long MEMBER_EXECUTION_TIMEOUT_MINUTES = 10;
     private static final List<String> NON_FINAL_SECTION_KEYWORDS = List.of(
             "待补充", "已剔除", "剔除", "风险", "未知", "待执行", "后续动作", "高潜力"
     );
@@ -296,9 +301,22 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             }
             contributorMembers.add(member);
         }
-        List<Map<String, Object>> memberResults = new ArrayList<>(executeContributorSequence(
-                agent, execution, parentContext, contributorMembers, retryCount, userInput, userOptions, retryFeedback
-        ));
+
+        TeamMemberExecutionMode mode = resolveExecutionMode(contributorMembers, execution.getTenantId(), agent.getId());
+        log.info("Team 成员执行模式: mode={}, contributors={}, executionId={}",
+                mode.getCode(), contributorMembers.size(), execution.getId());
+
+        List<Map<String, Object>> memberResults;
+        if (mode == TeamMemberExecutionMode.PARALLEL && contributorMembers.size() > 1) {
+            memberResults = new ArrayList<>(executeMemberBatch(
+                    agent, execution, parentContext, contributorMembers, retryCount, userInput, userOptions, retryFeedback, null
+            ));
+        } else {
+            memberResults = new ArrayList<>(executeContributorsPipeline(
+                    agent, execution, parentContext, contributorMembers, retryCount, userInput, userOptions, retryFeedback
+            ));
+        }
+
         if (leadMember == null || hasPausedMemberResult(memberResults)) {
             return memberResults;
         }
@@ -310,14 +328,45 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         return memberResults;
     }
 
-    private List<Map<String, Object>> executeContributorSequence(Agent agent,
-                                                                 AgentExecution execution,
-                                                                 AgentExecutionContext parentContext,
-                                                                 List<AgentTeamMember> members,
-                                                                 int retryCount,
-                                                                 String userInput,
-                                                                 Map<String, Object> userOptions,
-                                                                 String retryFeedback) {
+    /**
+     * 判断 contributor 成员是否可以并行执行：
+     * 所有成员均无文件系统写工具绑定时使用 PARALLEL，否则 PIPELINE
+     */
+    private TeamMemberExecutionMode resolveExecutionMode(List<AgentTeamMember> contributors, String tenantId, String agentId) {
+        if (CollectionUtils.isEmpty(contributors) || contributors.size() <= 1) {
+            return TeamMemberExecutionMode.PIPELINE;
+        }
+        for (AgentTeamMember member : contributors) {
+            if (memberHasWriteTools(tenantId, agentId, member.getId())) {
+                return TeamMemberExecutionMode.PIPELINE;
+            }
+        }
+        return TeamMemberExecutionMode.PARALLEL;
+    }
+
+    private static final Set<String> FS_WRITE_TOOL_CODES = Set.of(
+            "sys.write", "sys.edit", "sys.bash", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv"
+    );
+
+    private boolean memberHasWriteTools(String tenantId, String agentId, String memberId) {
+        List<AgentTeamMemberToolBinding> bindings = agentTeamMemberToolBindingMapper.selectList(
+                new LambdaQueryWrapper<AgentTeamMemberToolBinding>()
+                        .eq(AgentTeamMemberToolBinding::getMemberId, memberId)
+                        .eq(AgentTeamMemberToolBinding::getEnabled, true));
+        if (CollectionUtils.isEmpty(bindings)) {
+            return false;
+        }
+        return bindings.stream().anyMatch(b -> FS_WRITE_TOOL_CODES.contains(b.getToolCode()));
+    }
+
+    private List<Map<String, Object>> executeContributorsPipeline(Agent agent,
+                                                                   AgentExecution execution,
+                                                                   AgentExecutionContext parentContext,
+                                                                   List<AgentTeamMember> members,
+                                                                   int retryCount,
+                                                                   String userInput,
+                                                                   Map<String, Object> userOptions,
+                                                                   String retryFeedback) {
         List<Map<String, Object>> results = new ArrayList<>();
         if (CollectionUtils.isEmpty(members)) {
             return results;
@@ -346,10 +395,24 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                                                          String upstreamEvidence) {
         List<CompletableFuture<Map<String, Object>>> futures = new ArrayList<>();
         for (AgentTeamMember member : members) {
-            futures.add(executeMember(
+            CompletableFuture<Map<String, Object>> future = executeMember(
                     agent, execution, parentContext, member, retryCount, userInput, userOptions, retryFeedback,
                     upstreamEvidence
-            ));
+            ).orTimeout(MEMBER_EXECUTION_TIMEOUT_MINUTES, TimeUnit.MINUTES)
+                    .exceptionally(throwable -> {
+                        log.error("Team 成员并行执行异常: memberId={}, error={}", member.getId(), throwable.getMessage());
+                        Map<String, Object> errorPayload = new LinkedHashMap<>();
+                        errorPayload.put(TeamGraphConstants.RESULT_MEMBER_ID, member.getId());
+                        errorPayload.put(TeamGraphConstants.RESULT_ROLE_NAME, member.getRoleName());
+                        errorPayload.put(TeamGraphConstants.RESULT_ROLE_TYPE, member.getRoleType());
+                        errorPayload.put(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.FAILED.getCode());
+                        String errorMsg = throwable instanceof TimeoutException
+                                ? "成员执行超时（" + MEMBER_EXECUTION_TIMEOUT_MINUTES + "分钟）"
+                                : throwable.getMessage();
+                        errorPayload.put(TeamGraphConstants.RESULT_ERROR_MESSAGE, errorMsg);
+                        return errorPayload;
+                    });
+            futures.add(future);
         }
         CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
         return futures.stream().map(CompletableFuture::join).toList();

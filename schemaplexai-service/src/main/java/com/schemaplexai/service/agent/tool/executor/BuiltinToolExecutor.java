@@ -58,6 +58,14 @@ public class BuiltinToolExecutor implements ToolExecutor {
             "web.fetch", "code.exec"
     );
 
+    private static final Set<String> WRITE_TOOL_CODES = Set.of(
+            "sys.write", "sys.edit", "sys.bash", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv"
+    );
+
+    private static final Set<String> READ_TOOL_CODES = Set.of(
+            "sys.read", "sys.glob", "sys.grep", "sys.ls", "sys.stat"
+    );
+
     private static final long PROCESS_TIMEOUT_SECONDS = 30;
     private static final int MAX_COMMAND_OUTPUT_LENGTH = 24000;
     private static final int DEFAULT_FETCH_MAX_CHARS = 12000;
@@ -101,6 +109,7 @@ public class BuiltinToolExecutor implements ToolExecutor {
     private final OkHttpClient httpClient;
     private final ToolSecurityValidator toolSecurityValidator;
     private final WasmSandboxService wasmSandboxService;
+    private final ToolExecutionLockService toolExecutionLockService;
 
     @Override
     public String sourceType() {
@@ -176,52 +185,19 @@ public class BuiltinToolExecutor implements ToolExecutor {
                 processBuilder.directory(workingDirectory.toFile());
             }
             processBuilder.redirectErrorStream(true);
-            Process process = processBuilder.start();
-            FutureTask<String> outputTask = new FutureTask<>(() -> readProcessOutput(process));
-            Thread outputReader = new Thread(outputTask, "builtin-tool-output-reader");
-            outputReader.setDaemon(true);
-            outputReader.start();
 
-            boolean finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                process.waitFor(3, TimeUnit.SECONDS);
-                outputTask.cancel(true);
-                String error = "命令执行超时";
-                logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, error);
-                return failure(toolCall, error);
+            // 并行执行保护：写操作加写锁，读操作加读锁
+            ToolExecutionLockService.LockAction<ToolResult> processAction = () ->
+                    executeProcess(processBuilder, toolCall, toolCode, startAt, safeArgsForLog, tenantId, agentId);
+            if (workingDirectory != null) {
+                if (WRITE_TOOL_CODES.contains(toolCode)) {
+                    return toolExecutionLockService.executeWithWriteLock(workingDirectory, processAction);
+                }
+                if (READ_TOOL_CODES.contains(toolCode)) {
+                    return toolExecutionLockService.executeWithReadLock(workingDirectory, processAction);
+                }
             }
-
-            String output;
-            try {
-                output = outputTask.get(1, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                output = "";
-            } catch (Exception e) {
-                output = "";
-            }
-            int exitCode = process.exitValue();
-            LocalDateTime endAt = LocalDateTime.now();
-
-            if (exitCode == 0) {
-                String sanitizedOutput = truncateCommandOutput(output);
-                Map<String, Object> result = Map.of("output", sanitizedOutput);
-                logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.SUCCESS.getCode(), startAt, endAt, safeArgsForLog, result, null);
-                return ToolResult.builder()
-                        .callId(toolCall.getCallId())
-                        .toolCode(toolCode)
-                        .success(true)
-                        .result(objectMapper.valueToTree(result))
-                        .build();
-            } else {
-                String error = "命令执行失败，退出码: " + exitCode;
-                logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, endAt, safeArgsForLog, null, error);
-                return failure(toolCall, error);
-            }
+            return processAction.execute();
         } catch (Exception e) {
             log.error("系统工具执行失败: toolCode={}, error={}", toolCode, e.getMessage());
             logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
@@ -688,6 +664,57 @@ public class BuiltinToolExecutor implements ToolExecutor {
 
     private boolean requiresWorkingDirectory(String toolCode) {
         return StringUtils.hasText(toolCode) && toolCode.startsWith("sys.");
+    }
+
+    private ToolResult executeProcess(ProcessBuilder processBuilder, ToolCall toolCall, String toolCode,
+                                       LocalDateTime startAt, Map<String, Object> safeArgsForLog,
+                                       String tenantId, String agentId) throws Exception {
+        Process process = processBuilder.start();
+        FutureTask<String> outputTask = new FutureTask<>(() -> readProcessOutput(process));
+        Thread outputReader = new Thread(outputTask, "builtin-tool-output-reader");
+        outputReader.setDaemon(true);
+        outputReader.start();
+
+        boolean finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            process.waitFor(3, TimeUnit.SECONDS);
+            outputTask.cancel(true);
+            String error = "命令执行超时";
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, error);
+            return failure(toolCall, error);
+        }
+
+        String output;
+        try {
+            output = outputTask.get(1, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            output = "";
+        } catch (Exception e) {
+            output = "";
+        }
+        int exitCode = process.exitValue();
+        LocalDateTime endAt = LocalDateTime.now();
+
+        if (exitCode == 0) {
+            String sanitizedOutput = truncateCommandOutput(output);
+            Map<String, Object> result = Map.of("output", sanitizedOutput);
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.SUCCESS.getCode(), startAt, endAt, safeArgsForLog, result, null);
+            return ToolResult.builder()
+                    .callId(toolCall.getCallId())
+                    .toolCode(toolCode)
+                    .success(true)
+                    .result(objectMapper.valueToTree(result))
+                    .build();
+        } else {
+            String error = "命令执行失败，退出码: " + exitCode;
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, endAt, safeArgsForLog, null, error);
+            return failure(toolCall, error);
+        }
     }
 
     private ToolResult failure(ToolCall toolCall, String message) {

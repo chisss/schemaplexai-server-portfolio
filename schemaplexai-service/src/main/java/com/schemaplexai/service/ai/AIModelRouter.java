@@ -291,4 +291,42 @@ public class AIModelRouter {
     }
 
     private record IndexedModel(int index, AiModel model) {}
+
+    /**
+     * 解析租户的压缩/摘要用小模型（优先选择低成本模型）
+     */
+    public AiModelConfig resolveCompactModel(String tenantId) {
+        List<AiModel> models = aiModelMapper.selectList(new LambdaQueryWrapper<AiModel>()
+                .eq(AiModel::getTenantId, tenantId)
+                .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
+                .orderByAsc(AiModel::getCreatedAt));
+        // 优先选择名称含 mini/haiku/flash 的小模型
+        AiModel compact = models.stream()
+                .filter(m -> {
+                    String name = m.getName() != null ? m.getName().toLowerCase() : "";
+                    return name.contains("mini") || name.contains("haiku") || name.contains("flash");
+                })
+                .findFirst()
+                .orElse(models.isEmpty() ? null : models.get(0));
+        return compact != null ? AiModelConfig.from(compact) : null;
+    }
+
+    /**
+     * 解析租户的主模型
+     */
+    public AiModelConfig resolvePrimaryModel(String tenantId) {
+        AiModel model = aiModelMapper.selectOne(new LambdaQueryWrapper<AiModel>()
+                .eq(AiModel::getTenantId, tenantId)
+                .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
+                .orderByAsc(AiModel::getCreatedAt)
+                .last("LIMIT 1"));
+        return model != null ? AiModelConfig.from(model) : null;
+    }
+
+    /**
+     * 根据 AiModelConfig 构建 ChatModel 实例
+     */
+    public dev.langchain4j.model.chat.ChatModel buildChatModel(AiModelConfig config) {
+        return modelFactory.getOrCreate(config);
+    }
 }

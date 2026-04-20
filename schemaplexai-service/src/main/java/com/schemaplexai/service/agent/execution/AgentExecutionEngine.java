@@ -17,6 +17,7 @@ import com.schemaplexai.service.agent.execution.AgentModelInvoker.ModelCallResul
 import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
+import com.schemaplexai.service.agent.memory.AgentMemoryExtractionService;
 import com.schemaplexai.service.ai.AIModelRouter;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jResolution;
@@ -36,6 +37,8 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -103,6 +106,10 @@ public class AgentExecutionEngine {
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
     private final AgentChatMemoryCompactor     chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport);
 
+    @Lazy
+    @Autowired(required = false)
+    private AgentMemoryExtractionService agentMemoryExtractionService;
+
     // =========================================================================
     //  公开入口
     // =========================================================================
@@ -168,6 +175,12 @@ public class AgentExecutionEngine {
         // 解析模型链
         List<LangChain4jResolution> modelChain = resolveModelChain(ctx);
         LangChain4jResolution first = modelChain.getFirst();
+
+        // 为上下文压缩设置小模型（优先选择低成本模型）
+        AiModelConfig compactModelConfig = aiModelRouter.resolveCompactModel(tenantId);
+        if (compactModelConfig != null) {
+            chatMemoryCompactor.setCompactionModel(aiModelRouter.buildChatModel(compactModelConfig));
+        }
 
         // 构建 System Prompt
         String extraContext  = buildExtraContext(ctx);
@@ -690,6 +703,15 @@ public class AgentExecutionEngine {
                 "Agent 执行完成", null, elapsed(startMs));
         executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.COMPLETED.getCode(),
                 state.getLastRound(), "Agent 执行完成", startMs);
+
+        // 异步触发记忆提取（执行完成后从对话历史中提取记忆）
+        if (agentMemoryExtractionService != null && StringUtils.hasText(conversationId)) {
+            List<ChatMessage> history = compositeChatMemoryStore.getMessages(conversationId);
+            if (history != null && !history.isEmpty()) {
+                agentMemoryExtractionService.extractMemoriesAsync(tenantId, agentId, executionId, history);
+            }
+        }
+
         return AgentExecutionResult.builder()
                 .status(STATUS_COMPLETED)
                 .outputResult(sanitized)

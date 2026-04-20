@@ -59,6 +59,9 @@ public class ChatMessageEntity implements Serializable {
     /** 消息在会话中的顺序索引 */
     private Integer messageIndex;
 
+    /** 对话轮次索引（用于回滚） */
+    private Integer turnIndex;
+
     /** 创建时间 */
     private LocalDateTime createdAt;
 
