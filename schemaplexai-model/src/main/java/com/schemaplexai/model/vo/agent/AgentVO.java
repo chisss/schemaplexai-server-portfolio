@@ -48,6 +48,9 @@ public class AgentVO {
     /** 技能标签 */
     private List<String> skills;
 
+    /** 技能显示名称 */
+    private List<String> skillDisplayNames;
+
     /** 工作类型/团队模板code */
     private String workType;
 

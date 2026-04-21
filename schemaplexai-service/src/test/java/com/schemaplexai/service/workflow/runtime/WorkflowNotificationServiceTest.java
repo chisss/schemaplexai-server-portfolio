@@ -121,4 +121,145 @@ class WorkflowNotificationServiceTest {
         assertThat(request.getMessage().getContent()).contains("completed");
         assertThat(request.getMessage().getPreviewUrl()).isEqualTo("https://feishu.cn/docx/doxcn-test-doc");
     }
+
+    @Test
+    void shouldRenderInlineNotificationTemplateVariables() {
+        NotificationChannelMapper notificationChannelMapper = mock(NotificationChannelMapper.class);
+        WorkflowTemplateMapper workflowTemplateMapper = mock(WorkflowTemplateMapper.class);
+        SpecMapper specMapper = mock(SpecMapper.class);
+        NotificationDispatchService notificationDispatchService = mock(NotificationDispatchService.class);
+
+        WorkflowNotificationService service = new WorkflowNotificationService(
+                notificationChannelMapper,
+                mock(MessageTemplateMapper.class),
+                workflowTemplateMapper,
+                specMapper,
+                notificationDispatchService
+        );
+
+        NotificationChannel channel = new NotificationChannel();
+        channel.setId("channel-2");
+        channel.setName("飞书");
+        channel.setChannelType("feishu");
+        when(notificationChannelMapper.selectById("channel-2")).thenReturn(channel);
+
+        WorkflowTemplate workflowTemplate = new WorkflowTemplate();
+        workflowTemplate.setId("wf-template-2");
+        workflowTemplate.setName("SchemaPlexAI演示-财税协同闭环-闭环工作流");
+        when(workflowTemplateMapper.selectById("wf-template-2")).thenReturn(workflowTemplate);
+
+        Spec spec = new Spec();
+        spec.setId("spec-2");
+        spec.setName("财税协同闭环");
+        when(specMapper.selectById("spec-2")).thenReturn(spec);
+
+        when(notificationDispatchService.send(any(NotificationDispatchRequest.class)))
+                .thenReturn(NotificationSendResult.builder()
+                        .recordId("record-2")
+                        .responseSummary("ok")
+                        .build());
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("instance-2");
+        instance.setTemplateId("wf-template-2");
+        instance.setSpecId("spec-2");
+        instance.setName("财税协同实例");
+        instance.setVariables(Map.of(
+                "artifactDeliveryType", "feishu_doc",
+                "artifactDeliveryUrl", "https://feishu.cn/docx/doxcn-inline-doc",
+                "artifactDeliveryDocumentId", "doxcn-inline-doc"
+        ));
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setId("node-exec-2");
+        nodeExecution.setNodeLabel("飞书完成通知");
+
+        service.sendWorkflowCompletedNotification(instance, nodeExecution, Map.of(
+                "channelId", "channel-2",
+                "title", "${workflowTemplateName} 已完成",
+                "messageTemplate", "文档链接：${artifactDeliveryUrl}\n文档ID：${artifactDeliveryDocumentId}"
+        ));
+
+        ArgumentCaptor<NotificationDispatchRequest> requestCaptor = ArgumentCaptor.forClass(NotificationDispatchRequest.class);
+        verify(notificationDispatchService).send(requestCaptor.capture());
+
+        NotificationDispatchRequest request = requestCaptor.getValue();
+        assertThat(request.getMessage().getTitle()).isEqualTo("SchemaPlexAI演示-财税协同闭环-闭环工作流 已完成");
+        assertThat(request.getMessage().getContent()).contains("https://feishu.cn/docx/doxcn-inline-doc");
+        assertThat(request.getMessage().getContent()).contains("doxcn-inline-doc");
+        assertThat(request.getMessage().getPreviewUrl()).isEqualTo("https://feishu.cn/docx/doxcn-inline-doc");
+    }
+
+    @Test
+    void shouldFallbackToNestedArtifactVariablesWhenTopLevelVariablesMissing() {
+        NotificationChannelMapper notificationChannelMapper = mock(NotificationChannelMapper.class);
+        WorkflowTemplateMapper workflowTemplateMapper = mock(WorkflowTemplateMapper.class);
+        SpecMapper specMapper = mock(SpecMapper.class);
+        NotificationDispatchService notificationDispatchService = mock(NotificationDispatchService.class);
+
+        WorkflowNotificationService service = new WorkflowNotificationService(
+                notificationChannelMapper,
+                mock(MessageTemplateMapper.class),
+                workflowTemplateMapper,
+                specMapper,
+                notificationDispatchService
+        );
+
+        NotificationChannel channel = new NotificationChannel();
+        channel.setId("channel-3");
+        channel.setName("飞书");
+        channel.setChannelType("feishu");
+        when(notificationChannelMapper.selectById("channel-3")).thenReturn(channel);
+
+        WorkflowTemplate workflowTemplate = new WorkflowTemplate();
+        workflowTemplate.setId("wf-template-3");
+        workflowTemplate.setName("SchemaPlexAI演示-数字化定制交付-闭环工作流");
+        when(workflowTemplateMapper.selectById("wf-template-3")).thenReturn(workflowTemplate);
+
+        Spec spec = new Spec();
+        spec.setId("spec-3");
+        spec.setName("数字化定制交付");
+        when(specMapper.selectById("spec-3")).thenReturn(spec);
+
+        when(notificationDispatchService.send(any(NotificationDispatchRequest.class)))
+                .thenReturn(NotificationSendResult.builder()
+                        .recordId("record-3")
+                        .responseSummary("ok")
+                        .build());
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("instance-3");
+        instance.setTemplateId("wf-template-3");
+        instance.setSpecId("spec-3");
+        instance.setName("数字化定制实例");
+        instance.setVariables(Map.of(
+                "scene_delivery_team_output", Map.of(
+                        "handoffPayload", Map.of(
+                                "docRef", Map.of(
+                                        "deliveryUrl", "https://feishu.cn/docx/doxcn-nested-doc",
+                                        "deliveryDocumentId", "doxcn-nested-doc"
+                                )
+                        )
+                )
+        ));
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setId("node-exec-3");
+        nodeExecution.setNodeLabel("飞书完成通知");
+
+        service.sendWorkflowCompletedNotification(instance, nodeExecution, Map.of(
+                "channelId", "channel-3",
+                "title", "${workflowTemplateName} 已完成",
+                "messageTemplate", "文档链接：${artifactDeliveryUrl}\n文档ID：${artifactDeliveryDocumentId}"
+        ));
+
+        ArgumentCaptor<NotificationDispatchRequest> requestCaptor = ArgumentCaptor.forClass(NotificationDispatchRequest.class);
+        verify(notificationDispatchService).send(requestCaptor.capture());
+
+        NotificationDispatchRequest request = requestCaptor.getValue();
+        assertThat(request.getMessage().getTitle()).isEqualTo("SchemaPlexAI演示-数字化定制交付-闭环工作流 已完成");
+        assertThat(request.getMessage().getContent()).contains("https://feishu.cn/docx/doxcn-nested-doc");
+        assertThat(request.getMessage().getContent()).contains("doxcn-nested-doc");
+        assertThat(request.getMessage().getPreviewUrl()).isEqualTo("https://feishu.cn/docx/doxcn-nested-doc");
+    }
 }

@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -260,10 +261,11 @@ public class WorkflowNotificationService {
         if (!StringUtils.hasText(title) && !StringUtils.hasText(content)) {
             throw new BusinessException(ResultCode.MESSAGE_TEMPLATE_NOT_FOUND, "通信渠道节点未绑定消息模板");
         }
+        Map<String, Object> variables = buildWorkflowVariables(instance, nodeExecution, null);
         NotificationMessage message = NotificationMessage.builder()
-                .title(StringUtils.hasText(title) ? title : "工作流通知")
-                .content(content)
-                .previewUrl(buildWorkflowInstancePreviewUrl(instance.getId()))
+                .title(renderTemplate(StringUtils.hasText(title) ? title : "工作流通知", variables))
+                .content(renderTemplate(content, variables))
+                .previewUrl((String) variables.get("previewUrl"))
                 .build();
         return new ResolvedNotificationMessage(message, null, null, null);
     }
@@ -388,10 +390,58 @@ public class WorkflowNotificationService {
             return null;
         }
         Object value = instance.getVariables().get(key);
-        if (value == null || !StringUtils.hasText(String.valueOf(value))) {
+        if (value != null && StringUtils.hasText(String.valueOf(value))) {
+            return String.valueOf(value);
+        }
+        return findNestedArtifactValue(instance.getVariables(), key);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String findNestedArtifactValue(Map<String, Object> variables, String key) {
+        if (variables == null || variables.isEmpty()) {
             return null;
         }
-        return String.valueOf(value);
+        Set<String> aliases = switch (key) {
+            case "artifactDeliveryUrl" -> Set.of("artifactDeliveryUrl", "deliveryUrl", "previewUrl");
+            case "artifactDeliveryDocumentId" -> Set.of("artifactDeliveryDocumentId", "deliveryDocumentId", "documentId");
+            case "artifactDeliveryType" -> Set.of("artifactDeliveryType", "deliveryType");
+            default -> Set.of(key);
+        };
+        for (Object value : variables.values()) {
+            String resolved = findNestedArtifactValue(value, aliases);
+            if (StringUtils.hasText(resolved)) {
+                return resolved;
+            }
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String findNestedArtifactValue(Object value, Set<String> aliases) {
+        if (value instanceof Map<?, ?> mapValue) {
+            for (String alias : aliases) {
+                Object direct = ((Map<String, Object>) mapValue).get(alias);
+                if (direct != null && StringUtils.hasText(String.valueOf(direct))) {
+                    return String.valueOf(direct);
+                }
+            }
+            for (Object nestedValue : ((Map<String, Object>) mapValue).values()) {
+                String resolved = findNestedArtifactValue(nestedValue, aliases);
+                if (StringUtils.hasText(resolved)) {
+                    return resolved;
+                }
+            }
+            return null;
+        }
+        if (value instanceof Iterable<?> iterableValue) {
+            for (Object nestedValue : iterableValue) {
+                String resolved = findNestedArtifactValue(nestedValue, aliases);
+                if (StringUtils.hasText(resolved)) {
+                    return resolved;
+                }
+            }
+        }
+        return null;
     }
 
     private String buildWorkflowInstancePreviewUrl(String instanceId) {

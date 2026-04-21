@@ -74,6 +74,9 @@ public class AgentMemberToolServiceImpl implements AgentMemberToolService {
                 if ("skill".equals(sourceType) && !StringUtils.hasText(sourceRefId)) {
                     throw new BusinessException(ResultCode.BAD_REQUEST, "Skill 工具必须指定 sourceRefId");
                 }
+                if ("api_gateway".equals(sourceType) && !StringUtils.hasText(sourceRefId)) {
+                    throw new BusinessException(ResultCode.BAD_REQUEST, "外部接口工具必须指定 sourceRefId");
+                }
 
                 // 去重
                 String uniqueKey = buildKey(sourceType, sourceRefId, toolCode);

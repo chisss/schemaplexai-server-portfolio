@@ -13,7 +13,8 @@ public enum SkillImplementationTypeEnum {
     MCP("mcp", "MCP 协议实现"),
     BUILTIN("builtin", "内置 Java 类实现"),
     SCRIPT("script", "脚本实现"),
-    API("api", "API 实现");
+    API("api", "API 实现"),
+    PROMPT_PACK("prompt_pack", "提示词资源包");
 
     private final String code;
     private final String description;

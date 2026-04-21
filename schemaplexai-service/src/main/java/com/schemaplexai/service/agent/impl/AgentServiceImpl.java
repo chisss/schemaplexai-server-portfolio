@@ -24,6 +24,7 @@ import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
 import com.schemaplexai.dao.mapper.AiModelGroupItemMapper;
 import com.schemaplexai.dao.mapper.AiModelMapper;
+import com.schemaplexai.dao.mapper.ApiGatewayMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.ChatMessageMapper;
 import com.schemaplexai.dao.mapper.ContextEntityMapper;
@@ -74,6 +75,7 @@ import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.model.entity.AgentTeamMemberContextBinding;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.AgentTeamMemberToolBinding;
+import com.schemaplexai.model.entity.ApiGateway;
 import com.schemaplexai.model.entity.ChatMessageEntity;
 import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
@@ -125,6 +127,7 @@ import java.util.stream.Collectors;
 public class AgentServiceImpl implements AgentService {
 
     public static final String QUEUED = AgentExecutionStatusEnum.QUEUED.getCode();
+    private static final int MAX_AGENT_TOOL_BINDINGS = 20;
     private final AgentConfigMapper agentConfigMapper;
     private final AgentMapper agentMapper;
     private final AgentTeamMemberMapper agentTeamMemberMapper;
@@ -135,6 +138,7 @@ public class AgentServiceImpl implements AgentService {
     private final AiModelMapper aiModelMapper;
     private final AiModelGroupItemMapper aiModelGroupItemMapper;
     private final BuiltinToolMapper builtinToolMapper;
+    private final ApiGatewayMapper apiGatewayMapper;
     private final SkillMapper skillMapper;
     private final McpServerMapper mcpServerMapper;
     private final TeamTemplateMapper teamTemplateMapper;
@@ -565,22 +569,32 @@ public class AgentServiceImpl implements AgentService {
                 .eq(AgentToolBinding::getAgentId, agentId));
 
         if (request != null && !CollectionUtils.isEmpty(request.getTools())) {
-            Set<String> deduplicatedCodes = new HashSet<>();
+            Set<String> deduplicatedKeys = new HashSet<>();
             for (var item : request.getTools()) {
                 if (item == null || !StringUtils.hasText(item.getToolCode())) {
                     continue;
                 }
                 String normalizedCode = item.getToolCode().trim();
-                if (!deduplicatedCodes.add(normalizedCode)) {
-                    continue;
-                }
-
-                String sourceType = StringUtils.hasText(item.getSourceType()) ? item.getSourceType().trim() : "builtin";
-                if ("mcp".equals(sourceType) && !StringUtils.hasText(item.getSourceRefId())) {
+                String sourceType = StringUtils.hasText(item.getSourceType())
+                        ? item.getSourceType().trim().toLowerCase() : "builtin";
+                String sourceRefId = StringUtils.hasText(item.getSourceRefId()) ? item.getSourceRefId().trim() : null;
+                if ("mcp".equals(sourceType) && !StringUtils.hasText(sourceRefId)) {
                     throw new BusinessException(ResultCode.BAD_REQUEST, "MCP 工具必须指定 sourceRefId");
                 }
-                if ("skill".equals(sourceType) && !StringUtils.hasText(item.getSourceRefId())) {
+                if ("skill".equals(sourceType) && !StringUtils.hasText(sourceRefId)) {
                     throw new BusinessException(ResultCode.BAD_REQUEST, "Skill 工具必须指定 sourceRefId");
+                }
+                if ("api_gateway".equals(sourceType) && !StringUtils.hasText(sourceRefId)) {
+                    throw new BusinessException(ResultCode.BAD_REQUEST, "外部接口工具必须指定 sourceRefId");
+                }
+
+                String uniqueKey = buildToolKey(sourceType, sourceRefId, normalizedCode);
+                if (!deduplicatedKeys.add(uniqueKey)) {
+                    continue;
+                }
+                if (deduplicatedKeys.size() > MAX_AGENT_TOOL_BINDINGS) {
+                    throw new BusinessException(ResultCode.BAD_REQUEST,
+                            "Agent 绑定工具数量不能超过 " + MAX_AGENT_TOOL_BINDINGS + " 个");
                 }
 
                 var binding = new AgentToolBinding();
@@ -588,7 +602,7 @@ public class AgentServiceImpl implements AgentService {
                 binding.setAgentId(agentId);
                 binding.setToolCode(normalizedCode);
                 binding.setSourceType(sourceType);
-                binding.setSourceRefId(item.getSourceRefId());
+                binding.setSourceRefId(sourceRefId);
                 binding.setEnabled(item.getEnabled() == null || item.getEnabled());
                 binding.setPriority(item.getPriority() == null ? 100 : item.getPriority());
                 binding.setConfigOverride(item.getConfigOverride());
@@ -618,6 +632,9 @@ public class AgentServiceImpl implements AgentService {
             mergedTools.putIfAbsent(buildToolKey(tool.getSourceType(), tool.getSourceRefId(), tool.getToolCode()), tool);
         }
         for (AvailableToolVO tool : loadSkillTools(agent.getTenantId(), boundKeys)) {
+            mergedTools.putIfAbsent(buildToolKey(tool.getSourceType(), tool.getSourceRefId(), tool.getToolCode()), tool);
+        }
+        for (AvailableToolVO tool : loadApiGatewayTools(agent.getTenantId(), boundKeys)) {
             mergedTools.putIfAbsent(buildToolKey(tool.getSourceType(), tool.getSourceRefId(), tool.getToolCode()), tool);
         }
         for (AvailableToolVO tool : loadMcpTools(agent.getTenantId(), boundKeys)) {
@@ -713,6 +730,39 @@ public class AgentServiceImpl implements AgentService {
             availableTool.setSourceType("skill");
             availableTool.setCategory("skill");
             availableTool.setSourceRefId(skill.getId());
+            availableTool.setAlreadyBound(boundKeys.contains(key));
+            deduplicated.put(key, availableTool);
+        }
+        return new ArrayList<>(deduplicated.values());
+    }
+
+    private List<AvailableToolVO> loadApiGatewayTools(String tenantId, Set<String> boundKeys) {
+        var wrapper = new LambdaQueryWrapper<ApiGateway>()
+                .eq(ApiGateway::getStatus, CommonConstant.STATUS_ACTIVE)
+                .orderByAsc(ApiGateway::getName);
+        if (StringUtils.hasText(tenantId)) {
+            wrapper.eq(ApiGateway::getTenantId, tenantId);
+        }
+
+        var gateways = apiGatewayMapper.selectList(wrapper);
+        Map<String, AvailableToolVO> deduplicated = new LinkedHashMap<>();
+        for (ApiGateway gateway : gateways) {
+            if (!StringUtils.hasText(gateway.getId()) || !StringUtils.hasText(gateway.getName())) {
+                continue;
+            }
+            String toolCode = gateway.getName().trim();
+            String key = buildToolKey("api_gateway", gateway.getId(), toolCode);
+            if (deduplicated.containsKey(key)) {
+                continue;
+            }
+            var availableTool = new AvailableToolVO();
+            availableTool.setToolCode(toolCode);
+            availableTool.setName(toolCode);
+            availableTool.setDescription("API网关: " + gateway.getMethod() + " " + gateway.getUrl()
+                    + (StringUtils.hasText(gateway.getDescription()) ? " - " + gateway.getDescription() : ""));
+            availableTool.setSourceType("api_gateway");
+            availableTool.setCategory("api_gateway");
+            availableTool.setSourceRefId(gateway.getId());
             availableTool.setAlreadyBound(boundKeys.contains(key));
             deduplicated.put(key, availableTool);
         }
@@ -961,6 +1011,7 @@ public class AgentServiceImpl implements AgentService {
                 .toList();
         vo.setBuiltinPositions(builtinPositions);
         vo.setAgentTag(agent.getAgentTag());
+        vo.setSkillDisplayNames(resolveSkillDisplayNames(agent.getSkills(), agent.getTenantId()));
         // 附加团队成员（含工具绑定信息）
         var members = agentTeamMemberMapper.selectList(
                 new LambdaQueryWrapper<AgentTeamMember>()
@@ -986,6 +1037,54 @@ public class AgentServiceImpl implements AgentService {
             vo.setTeamConfigDone(true);
         }
         return vo;
+    }
+
+    /**
+     * 将 Agent 保存的技能编码/ID 解析为展示名称，未命中时回退原值。
+     */
+    private List<String> resolveSkillDisplayNames(List<String> skills, String tenantId) {
+        if (CollectionUtils.isEmpty(skills)) {
+            return List.of();
+        }
+        List<String> normalizedSkills = skills.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .toList();
+        if (normalizedSkills.isEmpty()) {
+            return List.of();
+        }
+
+        var wrapper = new LambdaQueryWrapper<Skill>()
+                .select(Skill::getId, Skill::getName, Skill::getDisplayName, Skill::getTenantId)
+                .and(w -> w.in(Skill::getId, normalizedSkills).or().in(Skill::getName, normalizedSkills));
+        if (StringUtils.hasText(tenantId)) {
+            wrapper.and(w -> w.eq(Skill::getTenantId, tenantId).or().isNull(Skill::getTenantId));
+        } else {
+            wrapper.isNull(Skill::getTenantId);
+        }
+
+        var resolvedSkills = skillMapper.selectList(wrapper);
+        Map<String, String> displayNameMap = new LinkedHashMap<>();
+        for (Skill skill : resolvedSkills) {
+            String displayName = StringUtils.hasText(skill.getDisplayName())
+                    ? skill.getDisplayName().trim()
+                    : skill.getName();
+            if (!StringUtils.hasText(displayName)) {
+                continue;
+            }
+            if (StringUtils.hasText(skill.getName())
+                    && (!displayNameMap.containsKey(skill.getName()) || StringUtils.hasText(skill.getTenantId()))) {
+                displayNameMap.put(skill.getName(), displayName);
+            }
+            if (StringUtils.hasText(skill.getId())
+                    && (!displayNameMap.containsKey(skill.getId()) || StringUtils.hasText(skill.getTenantId()))) {
+                displayNameMap.put(skill.getId(), displayName);
+            }
+        }
+        return normalizedSkills.stream()
+                .map(skill -> displayNameMap.getOrDefault(skill, skill))
+                .toList();
     }
 
     private void validateTeamMemberRequest(Agent agent, AgentTeamMemberBatchRequest request) {

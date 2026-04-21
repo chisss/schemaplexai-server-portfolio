@@ -1,6 +1,8 @@
 package com.schemaplexai.service.memory.rag;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.schemaplexai.common.constant.DocumentIngestionConstant;
+import com.schemaplexai.common.enums.KnowledgeDocumentStatusEnum;
 import com.schemaplexai.dao.mapper.KnowledgeDocumentMapper;
 import com.schemaplexai.model.entity.KnowledgeDocument;
 import com.schemaplexai.model.entity.RagOperationLog;
@@ -41,6 +43,8 @@ import java.util.UUID;
 @Service
 public class DocumentIngestionService {
 
+    private static final CleaningDocumentTransformer CLEANING_TRANSFORMER = new CleaningDocumentTransformer();
+
     private final RagMilvusStoreFactory ragMilvusStoreFactory;
     private final RagConfigService ragConfigService;
     private final EmbeddingQuotaGuard embeddingQuotaGuard;
@@ -77,19 +81,19 @@ public class DocumentIngestionService {
         }
 
         public static TextIngestionResult success(int chunkCount) {
-            return new TextIngestionResult("success", chunkCount, null);
+            return new TextIngestionResult(DocumentIngestionConstant.RESULT_SUCCESS, chunkCount, null);
         }
 
         public static TextIngestionResult failed(String errorMessage) {
-            return new TextIngestionResult("failed", 0, errorMessage);
+            return new TextIngestionResult(DocumentIngestionConstant.RESULT_FAILED, 0, errorMessage);
         }
 
         public static TextIngestionResult skipped(String errorMessage) {
-            return new TextIngestionResult("skipped", 0, errorMessage);
+            return new TextIngestionResult(DocumentIngestionConstant.RESULT_SKIPPED, 0, errorMessage);
         }
 
         public boolean isSuccess() {
-            return "success".equalsIgnoreCase(status);
+            return DocumentIngestionConstant.RESULT_SUCCESS.equalsIgnoreCase(status);
         }
     }
 
@@ -116,13 +120,16 @@ public class DocumentIngestionService {
         if (!settings.isEnabled() || embeddingStore == null) {
             String errorMessage = !settings.isEnabled() ? "RAG 未启用" : "EmbeddingStore 不可用";
             log.warn("跳过文档摄入: documentId={}, tenantId={}, reason={}", documentId, tenantId, errorMessage);
-            updateDocumentStatus(documentId, "failed", errorMessage, 0, 0, settings.getModelId());
-            recordWriteOperation("knowledge_document", documentId, contextId, tenantId, settings,
-                    0, 0, 0, 0L, "failed", errorMessage, buildMetadata(fileName, settings));
+            updateDocumentStatus(documentId, KnowledgeDocumentStatusEnum.FAILED.getCode(),
+                    errorMessage, 0, 0, settings.getModelId());
+            recordWriteOperation(DocumentIngestionConstant.SOURCE_KNOWLEDGE_DOCUMENT, documentId,
+                    contextId, tenantId, settings, 0, 0, 0, 0L,
+                    DocumentIngestionConstant.RESULT_FAILED, errorMessage, buildMetadata(fileName, settings));
             return;
         }
 
-        updateDocumentStatus(documentId, "processing", null, 0, 0, settings.getModelId());
+        updateDocumentStatus(documentId, KnowledgeDocumentStatusEnum.PROCESSING.getCode(),
+                null, 0, 0, settings.getModelId());
         long startMs = System.currentTimeMillis();
 
         try (InputStream fileStream = documentStorageService.getObject(doc.getBucket(), doc.getObjectKey())) {
@@ -142,18 +149,18 @@ public class DocumentIngestionService {
                     .sum();
             embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, totalTokens);
 
-            removeExistingSegments(embeddingStore, "document_id", documentId);
+            removeExistingSegments(embeddingStore, DocumentIngestionConstant.META_DOCUMENT_ID, documentId);
 
             List<String> ids = new ArrayList<>(segments.size());
             List<Embedding> embeddings = new ArrayList<>(segments.size());
             List<TextSegment> embeddedSegments = new ArrayList<>(segments.size());
             for (int i = 0; i < segments.size(); i++) {
                 TextSegment segment = segments.get(i);
-                segment.metadata().put("tenant_id", tenantId);
-                segment.metadata().put("context_id", contextId != null ? contextId : "");
-                segment.metadata().put("document_id", documentId);
-                segment.metadata().put("chunk_index", String.valueOf(i));
-                segment.metadata().put("file_name", fileName);
+                segment.metadata().put(DocumentIngestionConstant.META_TENANT_ID, tenantId);
+                segment.metadata().put(DocumentIngestionConstant.META_CONTEXT_ID, contextId != null ? contextId : "");
+                segment.metadata().put(DocumentIngestionConstant.META_DOCUMENT_ID, documentId);
+                segment.metadata().put(DocumentIngestionConstant.META_CHUNK_INDEX, String.valueOf(i));
+                segment.metadata().put(DocumentIngestionConstant.META_FILE_NAME, fileName);
                 ids.add(buildChunkId(documentId, i));
                 embeddings.add(Embedding.from(embeddingService.embed(tenantId, segment.text())));
                 embeddedSegments.add(segment);
@@ -163,16 +170,20 @@ public class DocumentIngestionService {
             }
 
             long durationMs = System.currentTimeMillis() - startMs;
-            updateDocumentStatus(documentId, "completed", null, ids.size(), totalTokens, settings.getModelId());
-            recordWriteOperation("knowledge_document", documentId, contextId, tenantId, settings,
-                    ids.size(), document.text().length(), totalTokens, durationMs, "success", null, buildMetadata(fileName, settings));
+            updateDocumentStatus(documentId, KnowledgeDocumentStatusEnum.COMPLETED.getCode(),
+                    null, ids.size(), totalTokens, settings.getModelId());
+            recordWriteOperation(DocumentIngestionConstant.SOURCE_KNOWLEDGE_DOCUMENT, documentId,
+                    contextId, tenantId, settings, ids.size(), document.text().length(), totalTokens,
+                    durationMs, DocumentIngestionConstant.RESULT_SUCCESS, null, buildMetadata(fileName, settings));
             log.info("文档摄入完成: documentId={}, chunks={}, durationMs={}", documentId, ids.size(), durationMs);
         } catch (Exception e) {
             long durationMs = System.currentTimeMillis() - startMs;
             log.error("文档摄入失败: documentId={}, error={}", documentId, e.getMessage(), e);
-            updateDocumentStatus(documentId, "failed", e.getMessage(), 0, 0, settings.getModelId());
-            recordWriteOperation("knowledge_document", documentId, contextId, tenantId, settings,
-                    0, 0, 0, durationMs, "failed", e.getMessage(), buildMetadata(fileName, settings));
+            updateDocumentStatus(documentId, KnowledgeDocumentStatusEnum.FAILED.getCode(),
+                    e.getMessage(), 0, 0, settings.getModelId());
+            recordWriteOperation(DocumentIngestionConstant.SOURCE_KNOWLEDGE_DOCUMENT, documentId,
+                    contextId, tenantId, settings, 0, 0, 0, durationMs,
+                    DocumentIngestionConstant.RESULT_FAILED, e.getMessage(), buildMetadata(fileName, settings));
         }
     }
 
@@ -184,10 +195,9 @@ public class DocumentIngestionService {
         EmbeddingStore<TextSegment> embeddingStore = resolveStore(tenantId);
         if (!settings.isEnabled() || embeddingStore == null) {
             String errorMessage = !settings.isEnabled() ? "RAG 未启用" : "EmbeddingStore 不可用";
-            recordWriteOperation("context_item", itemId, contextId, tenantId, settings,
-                    0, content != null ? content.length() : 0, 0, 0L,
-                    "skipped", errorMessage,
-                    buildMetadata(null, settings));
+            recordWriteOperation(DocumentIngestionConstant.SOURCE_CONTEXT_ITEM, itemId, contextId,
+                    tenantId, settings, 0, content != null ? content.length() : 0, 0, 0L,
+                    DocumentIngestionConstant.RESULT_SKIPPED, errorMessage, buildMetadata(null, settings));
             log.warn("EmbeddingStore 不可用或 RAG 未启用，跳过文本摄入: itemId={}", itemId);
             return TextIngestionResult.skipped(errorMessage);
         }
@@ -207,17 +217,17 @@ public class DocumentIngestionService {
                     .sum();
             embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, totalTokens);
 
-            removeExistingSegments(embeddingStore, "item_id", itemId);
+            removeExistingSegments(embeddingStore, DocumentIngestionConstant.META_ITEM_ID, itemId);
 
             List<String> ids = new ArrayList<>(segments.size());
             List<Embedding> embeddings = new ArrayList<>(segments.size());
             List<TextSegment> embeddedSegments = new ArrayList<>(segments.size());
             for (int i = 0; i < segments.size(); i++) {
                 TextSegment segment = segments.get(i);
-                segment.metadata().put("tenant_id", tenantId);
-                segment.metadata().put("context_id", contextId != null ? contextId : "");
-                segment.metadata().put("item_id", itemId);
-                segment.metadata().put("chunk_index", String.valueOf(i));
+                segment.metadata().put(DocumentIngestionConstant.META_TENANT_ID, tenantId);
+                segment.metadata().put(DocumentIngestionConstant.META_CONTEXT_ID, contextId != null ? contextId : "");
+                segment.metadata().put(DocumentIngestionConstant.META_ITEM_ID, itemId);
+                segment.metadata().put(DocumentIngestionConstant.META_CHUNK_INDEX, String.valueOf(i));
                 ids.add(buildChunkId(itemId, i));
                 embeddings.add(Embedding.from(embeddingService.embed(tenantId, segment.text())));
                 embeddedSegments.add(segment);
@@ -227,15 +237,17 @@ public class DocumentIngestionService {
             }
 
             long durationMs = System.currentTimeMillis() - startMs;
-            recordWriteOperation("context_item", itemId, contextId, tenantId, settings,
-                    ids.size(), content.length(), totalTokens, durationMs, "success", null, buildMetadata(null, settings));
+            recordWriteOperation(DocumentIngestionConstant.SOURCE_CONTEXT_ITEM, itemId, contextId,
+                    tenantId, settings, ids.size(), content.length(), totalTokens, durationMs,
+                    DocumentIngestionConstant.RESULT_SUCCESS, null, buildMetadata(null, settings));
             log.debug("文本摄入完成: itemId={}, chunks={}, durationMs={}", itemId, ids.size(), durationMs);
             return TextIngestionResult.success(ids.size());
         } catch (Exception e) {
             long durationMs = System.currentTimeMillis() - startMs;
-            recordWriteOperation("context_item", itemId, contextId, tenantId, settings,
-                    0, content != null ? content.length() : 0, EmbeddingTokenEstimator.estimate(content), durationMs, "failed", e.getMessage(),
-                    buildMetadata(null, settings));
+            recordWriteOperation(DocumentIngestionConstant.SOURCE_CONTEXT_ITEM, itemId, contextId,
+                    tenantId, settings, 0, content != null ? content.length() : 0,
+                    EmbeddingTokenEstimator.estimate(content), durationMs,
+                    DocumentIngestionConstant.RESULT_FAILED, e.getMessage(), buildMetadata(null, settings));
             log.warn("文本摄入失败: itemId={}, error={}", itemId, e.getMessage());
             return TextIngestionResult.failed(e.getMessage());
         }
@@ -246,7 +258,7 @@ public class DocumentIngestionService {
         if (embeddingStore == null || !StringUtils.hasText(itemId)) {
             return;
         }
-        removeExistingSegments(embeddingStore, "item_id", itemId);
+        removeExistingSegments(embeddingStore, DocumentIngestionConstant.META_ITEM_ID, itemId);
     }
 
     public void removeByContextId(String tenantId, String contextId) {
@@ -254,7 +266,7 @@ public class DocumentIngestionService {
         if (embeddingStore == null || !StringUtils.hasText(contextId)) {
             return;
         }
-        removeExistingSegments(embeddingStore, "context_id", contextId);
+        removeExistingSegments(embeddingStore, DocumentIngestionConstant.META_CONTEXT_ID, contextId);
     }
 
     private EmbeddingStore<TextSegment> resolveStore(String tenantId) {
@@ -265,7 +277,7 @@ public class DocumentIngestionService {
         if (!cleaningEnabled) {
             return document;
         }
-        return new CleaningDocumentTransformer().transform(document);
+        return CLEANING_TRANSFORMER.transform(document);
     }
 
     private void removeExistingSegments(EmbeddingStore<TextSegment> embeddingStore, String metadataKey, String value) {
@@ -305,7 +317,7 @@ public class DocumentIngestionService {
                                       String errorMessage, Map<String, Object> metadata) {
         RagOperationLog operationLog = new RagOperationLog();
         operationLog.setTenantId(tenantId);
-        operationLog.setOperationType("write");
+        operationLog.setOperationType(DocumentIngestionConstant.OPERATION_WRITE);
         operationLog.setSourceType(sourceType);
         operationLog.setSourceId(sourceId);
         operationLog.setContextId(contextId);
@@ -338,5 +350,4 @@ public class DocumentIngestionService {
     private String buildChunkId(String sourceId, int chunkIndex) {
         return UUID.nameUUIDFromBytes((sourceId + "#" + chunkIndex).getBytes()).toString();
     }
-
 }

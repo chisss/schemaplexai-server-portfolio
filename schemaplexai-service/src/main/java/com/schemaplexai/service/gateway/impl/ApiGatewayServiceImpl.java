@@ -2,6 +2,7 @@ package com.schemaplexai.service.gateway.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -32,7 +33,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -45,6 +48,7 @@ public class ApiGatewayServiceImpl implements ApiGatewayService {
     private final ApiGatewayLogMapper logMapper;
     private final ApiGatewayExecutor executor;
     private final EntityValidator entityValidator;
+    private final ObjectMapper objectMapper;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -146,7 +150,7 @@ public class ApiGatewayServiceImpl implements ApiGatewayService {
                 request != null ? request.getQueryParams() : null,
                 request != null ? request.getBody() : null);
 
-        saveLog(gateway, result, "user", SecurityUtil.getCurrentUserId());
+        saveLog(gateway, request, result, "user", SecurityUtil.getCurrentUserId());
         return result;
     }
 
@@ -159,7 +163,7 @@ public class ApiGatewayServiceImpl implements ApiGatewayService {
                 request != null ? request.getQueryParams() : null,
                 request != null ? request.getBody() : null);
 
-        saveLog(gateway, result, callerType, callerId);
+        saveLog(gateway, request, result, callerType, callerId);
         return result;
     }
 
@@ -241,22 +245,102 @@ public class ApiGatewayServiceImpl implements ApiGatewayService {
                 .map(this::toVO).collect(Collectors.toList());
     }
 
-    private void saveLog(ApiGateway gateway, ApiGatewayTestResult result,
+    private void saveLog(ApiGateway gateway, ApiGatewayTestRequest request, ApiGatewayTestResult result,
                          String callerType, String callerId) {
         var logEntity = new ApiGatewayLog();
         logEntity.setTenantId(gateway.getTenantId());
         logEntity.setGatewayId(gateway.getId());
         logEntity.setCallerType(callerType);
         logEntity.setCallerId(callerId);
-        logEntity.setRequestUrl(gateway.getUrl());
+        logEntity.setRequestUrl(buildRequestUrl(gateway, request != null ? request.getQueryParams() : null));
         logEntity.setRequestMethod(gateway.getMethod());
+        logEntity.setRequestHeaders(resolveRequestHeaders(gateway, request));
+        logEntity.setRequestBody(resolveRequestBody(gateway, request));
         logEntity.setResponseStatus(result.getStatusCode());
+        logEntity.setResponseHeaders(result.getResponseHeaders());
         logEntity.setResponseBody(result.getResponseBody());
         logEntity.setDurationMs(result.getDurationMs());
         logEntity.setSuccess(result.getSuccess());
         logEntity.setErrorMessage(result.getErrorMessage());
         logEntity.setCreatedAt(LocalDateTime.now());
         logMapper.insert(logEntity);
+    }
+
+    private String buildRequestUrl(ApiGateway gateway, Map<String, Object> overrideQueryParams) {
+        if (gateway == null || !StringUtils.hasText(gateway.getUrl())) {
+            return null;
+        }
+        Map<String, Object> mergedParams = new HashMap<>();
+        if (gateway.getQueryParams() != null) {
+            mergedParams.putAll(gateway.getQueryParams());
+        }
+        if (overrideQueryParams != null) {
+            mergedParams.putAll(overrideQueryParams);
+        }
+        if (mergedParams.isEmpty()) {
+            return gateway.getUrl();
+        }
+        StringBuilder builder = new StringBuilder(gateway.getUrl());
+        builder.append(gateway.getUrl().contains("?") ? "&" : "?");
+        var iterator = mergedParams.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            builder.append(entry.getKey()).append("=").append(entry.getValue());
+            if (iterator.hasNext()) {
+                builder.append("&");
+            }
+        }
+        return builder.toString();
+    }
+
+    private Map<String, Object> resolveRequestHeaders(ApiGateway gateway, ApiGatewayTestRequest request) {
+        Map<String, Object> mergedHeaders = new HashMap<>();
+        if (gateway != null && gateway.getHeaders() != null) {
+            mergedHeaders.putAll(gateway.getHeaders());
+        }
+        if (request != null && request.getHeaders() != null) {
+            mergedHeaders.putAll(request.getHeaders());
+        }
+        if (mergedHeaders.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> sanitizedHeaders = new HashMap<>();
+        mergedHeaders.forEach((key, value) -> sanitizedHeaders.put(key, maskSensitiveValue(key, value)));
+        return sanitizedHeaders;
+    }
+
+    private String resolveRequestBody(ApiGateway gateway, ApiGatewayTestRequest request) {
+        if (request != null && StringUtils.hasText(request.getBody())) {
+            return request.getBody();
+        }
+        if (gateway == null || gateway.getRequestBodySchema() == null) {
+            return null;
+        }
+        Object example = gateway.getRequestBodySchema().get("example");
+        if (example == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(example);
+        } catch (Exception ex) {
+            log.warn("序列化API网关请求示例失败: gatewayId={}", gateway.getId(), ex);
+            return String.valueOf(example);
+        }
+    }
+
+    private Object maskSensitiveValue(String key, Object value) {
+        if (!StringUtils.hasText(key)) {
+            return value;
+        }
+        String lowerKey = key.toLowerCase();
+        if (lowerKey.contains("authorization")
+                || lowerKey.contains("token")
+                || lowerKey.contains("secret")
+                || lowerKey.contains("password")
+                || lowerKey.contains("api-key")) {
+            return "***";
+        }
+        return value;
     }
 
     private ApiGatewayVO toVO(ApiGateway entity) {

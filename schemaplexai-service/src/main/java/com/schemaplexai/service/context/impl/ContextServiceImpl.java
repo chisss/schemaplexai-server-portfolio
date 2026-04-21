@@ -42,6 +42,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 上下文管理服务实现
@@ -262,22 +263,33 @@ public class ContextServiceImpl implements ContextService {
             throw new BusinessException(ResultCode.CONTEXT_ITEM_NOT_FOUND);
         }
 
+        boolean titleChanged = StringUtils.hasText(request.getTitle()) && !Objects.equals(request.getTitle(), item.getTitle());
+        boolean contentChanged = request.getContent() != null && !Objects.equals(request.getContent(), item.getContent());
+        boolean sourceUrlChanged = request.getSourceUrl() != null && !Objects.equals(request.getSourceUrl(), item.getSourceUrl());
+        boolean metadataChanged = request.getMetadata() != null && !Objects.equals(request.getMetadata(), item.getMetadata());
+        boolean sortOrderChanged = request.getSortOrder() != null && !Objects.equals(request.getSortOrder(), item.getSortOrder());
+
+        if (!titleChanged && !contentChanged && !sourceUrlChanged && !metadataChanged && !sortOrderChanged) {
+            log.info("上下文条目内容未变化，跳过更新与向量化: contextId={}, itemId={}", contextId, itemId);
+            return contextItemConverter.toVO(item);
+        }
+
         var updateItem = new ContextItem();
         updateItem.setId(itemId);
-        if (StringUtils.hasText(request.getTitle())) {
+        if (titleChanged) {
             updateItem.setTitle(request.getTitle());
         }
-        if (request.getContent() != null) {
+        if (contentChanged) {
             updateItem.setContent(request.getContent());
             updateItem.setTokenCount(contextItemHandler.calculateTokenCount(request.getContent()));
         }
-        if (request.getSourceUrl() != null) {
+        if (sourceUrlChanged) {
             updateItem.setSourceUrl(request.getSourceUrl());
         }
-        if (request.getMetadata() != null) {
+        if (metadataChanged) {
             updateItem.setMetadata(request.getMetadata());
         }
-        if (request.getSortOrder() != null) {
+        if (sortOrderChanged) {
             updateItem.setSortOrder(request.getSortOrder());
         }
         updateItem.setUpdatedBy(SecurityUtil.getCurrentUserId());
@@ -285,7 +297,7 @@ public class ContextServiceImpl implements ContextService {
         contextItemMapper.updateById(updateItem);
 
         String tenantId = SecurityUtil.getCurrentTenantId();
-        if (request.getContent() != null) {
+        if (contentChanged) {
             if (StringUtils.hasText(request.getContent())) {
                 vectorizeContextItem(itemId, tenantId, contextId, request.getContent());
             } else {

@@ -79,9 +79,10 @@ public class WorkflowArtifactService {
                                                                Map<String, Object> nodeConfig,
                                                                String result,
                                                                Map<String, Object> runtimeMetadata) {
-        if (!shouldPersist(instance, nodeExec, nodeConfig) || !StringUtils.hasText(instance.getSpecId())) {
+        if (!shouldPersist(instance, nodeExec, nodeConfig)) {
             return Map.of();
         }
+        boolean specBound = StringUtils.hasText(instance.getSpecId());
 
         String workspacePath = getVariable(instance, "workspacePath", null);
         String declaredArtifactOutputPath = extractDeclaredArtifactPath(result);
@@ -129,16 +130,21 @@ public class WorkflowArtifactService {
         artifact.put("artifactContent", markdown);
         artifact.put("artifactType", payload.artifactType());
         artifact.put("artifactFormat", payload.format());
-        artifact.put("rawContent", sanitizeArtifactContent(result));
+        artifact.put("rawContent", markdown);
+        artifact.put("agentRawContent", sanitizeArtifactContent(result));
         if (StringUtils.hasText(docType)) {
-            SpecDocument savedDocument = saveSpecDocument(instance.getSpecId(), docType, markdown, nodeExec.getNodeId());
-            artifact.put("artifactSaved", true);
             artifact.put("artifactDocType", docType);
-            if (savedDocument != null) {
-                artifact.put("artifactDocId", savedDocument.getId());
-                artifact.put("artifactDocVersion", savedDocument.getVersion());
-            } else if (expectedDocVersion != null) {
-                artifact.put("artifactDocVersion", expectedDocVersion);
+            if (specBound) {
+                SpecDocument savedDocument = saveSpecDocument(instance.getSpecId(), docType, markdown, nodeExec.getNodeId());
+                artifact.put("artifactSaved", true);
+                if (savedDocument != null) {
+                    artifact.put("artifactDocId", savedDocument.getId());
+                    artifact.put("artifactDocVersion", savedDocument.getVersion());
+                } else if (expectedDocVersion != null) {
+                    artifact.put("artifactDocVersion", expectedDocVersion);
+                }
+            } else {
+                artifact.put("artifactSaved", false);
             }
         }
 
@@ -166,11 +172,13 @@ public class WorkflowArtifactService {
             });
             commitArtifact(workspacePath, committedPaths, instance);
 
-            Spec update = new Spec();
-            update.setId(instance.getSpecId());
-            update.setArtifactDocPath(artifact.containsKey("artifactOutputPath")
-                    ? String.valueOf(artifact.get("artifactOutputPath")) : artifactOutputPath);
-            specMapper.updateById(update);
+            if (specBound) {
+                Spec update = new Spec();
+                update.setId(instance.getSpecId());
+                update.setArtifactDocPath(artifact.containsKey("artifactOutputPath")
+                        ? String.valueOf(artifact.get("artifactOutputPath")) : artifactOutputPath);
+                specMapper.updateById(update);
+            }
         }
 
         ExternalDeliveryResult externalDelivery = publishExternalDeliveryIfNecessary(instance, nodeExec, nodeConfig, payload);
@@ -181,7 +189,7 @@ public class WorkflowArtifactService {
 
         ArtifactService.WorkflowArtifactPersistResult persistedArtifact = artifactService.saveWorkflowArtifact(
                 new ArtifactService.WorkflowArtifactPersistCommand(
-                        getVariable(instance, "tenantId", null),
+                        firstNonBlank(getVariable(instance, "tenantId", null), instance != null ? instance.getTenantId() : null),
                         instance.getSpecId(),
                         instance.getId(),
                         getVariable(instance, "workspaceId", null),
@@ -777,17 +785,17 @@ public class WorkflowArtifactService {
                                              Integer docVersion,
                                              Map<String, Object> runtimeMetadata) {
         Map<String, String> entries = new java.util.LinkedHashMap<>();
-        putMetadata(entries, "Spec ID", instance != null ? instance.getSpecId() : null, "系统未提供");
-        putMetadata(entries, "工作流实例 ID", instance != null ? instance.getId() : null, "系统未提供");
-        putMetadata(entries, "工作流节点", nodeExec != null ? nodeExec.getNodeId() : null, "系统未提供");
-        putMetadata(entries, "模型名", readMetadataValue(runtimeMetadata, "agentModel"), "系统未提供");
-        putMetadata(entries, "执行 ID", readMetadataValue(runtimeMetadata, "agentExecutionId"), "系统未提供");
-        putMetadata(entries, "运行时引擎", readMetadataValue(runtimeMetadata, "runtimeEngine"), "系统未提供");
-        putMetadata(entries, "文档类型", docType, "系统未提供");
-        putMetadata(entries, "文档版本", docVersion == null ? null : "v" + docVersion, "当前步骤未生成");
-        putMetadata(entries, "质量分", readMetadataValue(runtimeMetadata, "qualityScore"), "当前步骤未生成");
-        putMetadata(entries, "质量任务 ID", readMetadataValue(runtimeMetadata, "qualityTaskId"), "当前步骤未生成");
-        putMetadata(entries, "质量检查时间", readMetadataValue(runtimeMetadata, "qualityCheckedAt"), "当前步骤未生成");
+        putMetadata(entries, "Spec ID", instance != null ? instance.getSpecId() : null);
+        putMetadata(entries, "工作流实例 ID", instance != null ? instance.getId() : null);
+        putMetadata(entries, "工作流节点", nodeExec != null ? nodeExec.getNodeId() : null);
+        putMetadata(entries, "模型名", readMetadataValue(runtimeMetadata, "agentModel"));
+        putMetadata(entries, "执行 ID", readMetadataValue(runtimeMetadata, "agentExecutionId"));
+        putMetadata(entries, "运行时引擎", readMetadataValue(runtimeMetadata, "runtimeEngine"));
+        putMetadata(entries, "文档类型", docType);
+        putMetadata(entries, "文档版本", docVersion == null ? null : "v" + docVersion);
+        putMetadata(entries, "质量分", readMetadataValue(runtimeMetadata, "qualityScore"));
+        putMetadata(entries, "质量任务 ID", readMetadataValue(runtimeMetadata, "qualityTaskId"));
+        putMetadata(entries, "质量检查时间", readMetadataValue(runtimeMetadata, "qualityCheckedAt"));
         if (entries.isEmpty()) {
             return null;
         }
@@ -807,13 +815,12 @@ public class WorkflowArtifactService {
         return builder.toString();
     }
 
-    private void putMetadata(Map<String, String> target, String label, String value, String fallback) {
+    private void putMetadata(Map<String, String> target, String label, String value) {
         if (target == null || !StringUtils.hasText(label)) {
             return;
         }
-        String resolved = StringUtils.hasText(value) ? value.trim() : fallback;
-        if (StringUtils.hasText(resolved)) {
-            target.put(label, resolved);
+        if (StringUtils.hasText(value)) {
+            target.put(label, value.trim());
         }
     }
 

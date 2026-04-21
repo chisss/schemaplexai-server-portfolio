@@ -131,6 +131,71 @@ class GitOperationServiceTest {
         assertThat(summary.implementationChangedFileCount()).isEqualTo(1);
     }
 
+    @Test
+    void commitChangesShouldSkipWhenPathIsNotGitWorktreeRoot() throws Exception {
+        Assumptions.assumeTrue(isGitAvailable(), "git 命令不可用，跳过工作树提交测试");
+
+        Path repo = tempDir.resolve("root-repo");
+        Path nestedWorkspace = repo.resolve("nested/workspace");
+
+        run(tempDir, "git", "init", "--initial-branch=main", repo.toString());
+        Files.writeString(repo.resolve("README.md"), "# root\n", StandardCharsets.UTF_8);
+        run(repo, "git", "add", "README.md");
+        run(
+                repo,
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init"
+        );
+
+        Files.createDirectories(nestedWorkspace);
+        Files.writeString(nestedWorkspace.resolve("output.md"), "# nested\n", StandardCharsets.UTF_8);
+
+        GitOperationService service = new GitOperationService();
+        boolean committed = service.commitChanges(nestedWorkspace.toString(), "docs: should skip");
+
+        assertThat(committed).isFalse();
+        assertThat(run(repo, "git", "log", "-1", "--pretty=%s")).isEqualTo("init");
+    }
+
+    @Test
+    void inspectWorkspaceChangesShouldIgnoreNestedDirectoryWithoutGitMetadata() throws Exception {
+        Assumptions.assumeTrue(isGitAvailable(), "git 命令不可用，跳过工作树变更检测测试");
+
+        Path repo = tempDir.resolve("inspect-root");
+        Path nestedWorkspace = repo.resolve("nested/workspace");
+
+        run(tempDir, "git", "init", "--initial-branch=main", repo.toString());
+        Files.writeString(repo.resolve("README.md"), "# root\n", StandardCharsets.UTF_8);
+        run(repo, "git", "add", "README.md");
+        run(
+                repo,
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init"
+        );
+
+        Files.createDirectories(nestedWorkspace);
+        Files.writeString(nestedWorkspace.resolve("output.md"), "# nested\n", StandardCharsets.UTF_8);
+
+        GitOperationService service = new GitOperationService();
+        GitOperationService.WorkspaceChangeSummary summary = service.inspectWorkspaceChanges(nestedWorkspace.toString());
+
+        assertThat(summary.clean()).isTrue();
+        assertThat(summary.changedFiles()).isEmpty();
+        assertThat(summary.implementationFiles()).isEmpty();
+    }
+
     private boolean isGitAvailable() {
         try {
             run(tempDir, "git", "--version");
