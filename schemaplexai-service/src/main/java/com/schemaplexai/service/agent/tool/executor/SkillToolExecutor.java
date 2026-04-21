@@ -108,6 +108,7 @@ public class SkillToolExecutor implements ToolExecutor {
                 case BUILTIN -> executeBuiltinSkill(tenantId, agentId, skill, toolCall, implementation, binding.getId());
                 case SCRIPT -> executeScriptSkill(skill, toolCall, implementation);
                 case API -> executeApiSkill(tenantId, agentId, skill, toolCall, implementation, binding);
+                case PROMPT_PACK -> executePromptPackSkill(skill, toolCall, implementation);
             };
 
             LocalDateTime endAt = LocalDateTime.now();
@@ -366,9 +367,86 @@ public class SkillToolExecutor implements ToolExecutor {
         }
     }
 
+    /**
+     * PROMPT_PACK 类型 Skill 执行
+     * <p>
+     * 将 Skill 提示词、资源摘要和调用参数整理为结构化执行指引，
+     * 便于 Team Agent 在最终交付前快速吸收领域约束。
+     * </p>
+     */
+    private ToolResult executePromptPackSkill(Skill skill, ToolCall toolCall, Map<String, Object> implementation) {
+        Map<String, Object> args = convertArguments(toolCall != null ? toolCall.getArguments() : null);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("skillId", skill.getId());
+        result.put("skillName", skill.getName());
+        result.put("displayName", StringUtils.hasText(skill.getDisplayName()) ? skill.getDisplayName() : skill.getName());
+        result.put("activationPrompt", skill.getSkillPrompt());
+        result.put("sceneInput", args.getOrDefault("scene_input", ""));
+        result.put("expectedOutput", args.getOrDefault("expected_output", ""));
+
+        List<String> resourceSummaries = new java.util.ArrayList<>();
+        if (skill.getResources() != null) {
+            for (Object resourceObject : skill.getResources()) {
+                if (!(resourceObject instanceof Map<?, ?> resourceMap)) {
+                    continue;
+                }
+                String relativePath = textValue(resourceMap.get("relativePath"));
+                String content = textValue(resourceMap.get("content"));
+                if (!StringUtils.hasText(relativePath) && !StringUtils.hasText(content)) {
+                    continue;
+                }
+                if (StringUtils.hasText(relativePath) && StringUtils.hasText(content)) {
+                    resourceSummaries.add(relativePath + ": " + truncate(content, 280));
+                    continue;
+                }
+                resourceSummaries.add(StringUtils.hasText(relativePath) ? relativePath : truncate(content, 280));
+            }
+        }
+        result.put("resourceSummaries", resourceSummaries);
+
+        Map<String, Object> exposureConfig = skill.getExposureConfig() != null ? skill.getExposureConfig() : Map.of();
+        result.put("sceneGroup", exposureConfig.getOrDefault("sceneGroup", ""));
+        result.put("progressiveDisclosure", exposureConfig.getOrDefault("progressiveDisclosure", Boolean.FALSE));
+
+        String implementationContent = firstText(implementation, "content", "prompt", "instruction");
+        if (StringUtils.hasText(implementationContent)) {
+            result.put("implementationGuide", truncate(implementationContent, 600));
+        }
+        result.put("recommendedChecklist", buildPromptPackChecklist(skill, args, resourceSummaries));
+        return success(toolCall, result);
+    }
+
     private RequestBody buildJsonBody(Map<String, Object> params) throws Exception {
         byte[] json = objectMapper.writeValueAsBytes(params);
         return RequestBody.create(json, MediaType.parse("application/json"));
+    }
+
+    private List<String> buildPromptPackChecklist(Skill skill,
+                                                  Map<String, Object> args,
+                                                  List<String> resourceSummaries) {
+        List<String> checklist = new java.util.ArrayList<>();
+        checklist.add("先吸收已绑定上下文和上游成员已确认事实，再使用技能结论。");
+        if (StringUtils.hasText(textValue(args.get("scene_input")))) {
+            checklist.add("优先围绕 scene_input 中的客户目标、约束和样本数据输出。");
+        }
+        if (!resourceSummaries.isEmpty()) {
+            checklist.add("引用资源包中的字段或规则时，要明确说明来源文件。");
+        }
+        if (StringUtils.hasText(skill.getDescription())) {
+            checklist.add("交付内容需覆盖技能描述中的核心目标：" + truncate(skill.getDescription(), 120));
+        }
+        return checklist;
+    }
+
+    private String textValue(Object value) {
+        return value == null ? null : String.valueOf(value).trim();
+    }
+
+    private String truncate(String content, int maxLength) {
+        if (!StringUtils.hasText(content) || content.length() <= maxLength) {
+            return content;
+        }
+        return content.substring(0, maxLength) + "...";
     }
 
     private Map<String, Object> convertArguments(JsonNode argumentsNode) {

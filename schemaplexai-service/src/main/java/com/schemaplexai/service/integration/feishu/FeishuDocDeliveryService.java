@@ -44,6 +44,9 @@ public class FeishuDocDeliveryService {
     private static final int FEISHU_TABLE_BLOCK_TYPE = 31;
     private static final int FEISHU_TABLE_CELL_BLOCK_TYPE = 32;
     private static final int MAX_FEISHU_TABLE_COLUMNS = 9;
+    private static final int MIN_TABLE_COLUMN_WIDTH = 120;
+    private static final int MAX_TABLE_COLUMN_WIDTH = 360;
+    private static final int TARGET_TABLE_WIDTH = 860;
 
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -258,12 +261,88 @@ public class FeishuDocDeliveryService {
         Map<String, Object> property = new LinkedHashMap<>();
         property.put("row_size", table.rowCount());
         property.put("column_size", table.columnCount());
+        property.put("header_row", Boolean.TRUE);
+        property.put("column_width", buildColumnWidths(table));
         return Map.of(
                 "block_id", tableBlockId,
                 "block_type", FEISHU_TABLE_BLOCK_TYPE,
                 "table", Map.of("property", property),
                 "children", cellBlockIds
         );
+    }
+
+    private List<Integer> buildColumnWidths(MarkdownTable table) {
+        if (table == null || table.columnCount() <= 0) {
+            return List.of();
+        }
+        List<Integer> rawWidths = new ArrayList<>();
+        int totalWidth = 0;
+        for (int columnIndex = 0; columnIndex < table.columnCount(); columnIndex++) {
+            int width = estimateColumnWidth(table, columnIndex);
+            rawWidths.add(width);
+            totalWidth += width;
+        }
+        if (totalWidth <= 0 || totalWidth == TARGET_TABLE_WIDTH) {
+            return rawWidths;
+        }
+        List<Integer> scaledWidths = new ArrayList<>();
+        int adjustedTotal = 0;
+        for (int index = 0; index < rawWidths.size(); index++) {
+            int width = rawWidths.get(index);
+            int scaledWidth = Math.max(MIN_TABLE_COLUMN_WIDTH,
+                    Math.min(MAX_TABLE_COLUMN_WIDTH, Math.round(width * (TARGET_TABLE_WIDTH / (float) totalWidth))));
+            scaledWidths.add(scaledWidth);
+            adjustedTotal += scaledWidth;
+        }
+        if (adjustedTotal == TARGET_TABLE_WIDTH || scaledWidths.isEmpty()) {
+            return scaledWidths;
+        }
+        int remainder = TARGET_TABLE_WIDTH - adjustedTotal;
+        int cursor = 0;
+        while (remainder != 0 && cursor < scaledWidths.size() * 4) {
+            int index = cursor % scaledWidths.size();
+            int current = scaledWidths.get(index);
+            if (remainder > 0 && current < MAX_TABLE_COLUMN_WIDTH) {
+                scaledWidths.set(index, current + 1);
+                remainder--;
+            } else if (remainder < 0 && current > MIN_TABLE_COLUMN_WIDTH) {
+                scaledWidths.set(index, current - 1);
+                remainder++;
+            }
+            cursor++;
+        }
+        return scaledWidths;
+    }
+
+    private int estimateColumnWidth(MarkdownTable table, int columnIndex) {
+        int maxWeight = 0;
+        for (List<String> row : table.rows()) {
+            if (row == null || columnIndex >= row.size()) {
+                continue;
+            }
+            maxWeight = Math.max(maxWeight, textVisualWeight(row.get(columnIndex)));
+        }
+        if (table.columnCount() == 2 && columnIndex == 0) {
+            return Math.max(MIN_TABLE_COLUMN_WIDTH, Math.min(220, 60 + maxWeight * 10));
+        }
+        return Math.max(MIN_TABLE_COLUMN_WIDTH, Math.min(MAX_TABLE_COLUMN_WIDTH, 80 + maxWeight * 10));
+    }
+
+    private int textVisualWeight(String content) {
+        if (!StringUtils.hasText(content)) {
+            return 4;
+        }
+        int weight = 0;
+        for (char character : content.toCharArray()) {
+            if (Character.UnicodeScript.of(character) == Character.UnicodeScript.HAN) {
+                weight += 2;
+            } else if (Character.isWhitespace(character)) {
+                weight += 1;
+            } else {
+                weight += 1;
+            }
+        }
+        return Math.max(4, Math.min(28, weight));
     }
 
     private Map<String, Object> tableCellDescendantBlock(String cellBlockId, String textBlockId) {

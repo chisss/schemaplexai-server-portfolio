@@ -159,7 +159,7 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
             action.setActionId(UUID.randomUUID().toString());
             action.setActionType("INVESTIGATE");
             action.setTitle("处理 " + summary.getSecurityEventCount() + " 个安全事件");
-            action.setTargetUrl("/security/incidents");
+            action.setTargetUrl("/security-compliance/overview");
             action.setPriority(priority++);
             actions.add(action);
         }
@@ -212,7 +212,7 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
             item.setItemType("workflow");
             item.setTitle(wf.getName());
             item.setStatus(wf.getStatus());
-            item.setTargetUrl("/workflow/executions/" + wf.getId());
+            item.setTargetUrl("/workflow/" + wf.getId());
             item.setUpdatedAt(wf.getUpdatedAt() != null ? wf.getUpdatedAt().toString() : null);
             return item;
         }).toList());
@@ -230,7 +230,7 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
             item.setTitle(wf.getName());
             item.setStatus(wf.getStatus());
             item.setSeverity("HIGH");
-            item.setTargetUrl("/workflow/executions/" + wf.getId());
+            item.setTargetUrl("/workflow/" + wf.getId());
             item.setUpdatedAt(wf.getUpdatedAt() != null ? wf.getUpdatedAt().toString() : null);
             return item;
         }).toList());
@@ -310,7 +310,7 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
             alert.setSeverity(inc.getRiskLevel() != null ? inc.getRiskLevel().toUpperCase() : "MEDIUM");
             alert.setTitle(inc.getEventTitle());
             alert.setDescription(inc.getEventDetail());
-            alert.setTargetUrl("/security/incidents/" + inc.getId());
+            alert.setTargetUrl("/security-compliance/overview");
             alert.setCreatedAt(inc.getCreatedAt() != null ? inc.getCreatedAt().toString() : null);
             alerts.add(alert);
         }
@@ -330,7 +330,7 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
             chain.setBlockerTitle(wf.getName());
             chain.setBlockedResource("工作流执行");
             chain.setStatus(wf.getStatus());
-            chain.setTargetUrl("/workflow/executions/" + wf.getId());
+            chain.setTargetUrl("/workflow/" + wf.getId());
             chains.add(chain);
         }
         panel.setBlockChains(chains);

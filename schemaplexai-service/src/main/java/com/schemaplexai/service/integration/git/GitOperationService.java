@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.AccessDeniedException;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import com.schemaplexai.model.vo.workspace.BranchDiffFileVO;
@@ -42,6 +44,7 @@ import com.schemaplexai.model.vo.workspace.WorkspaceBranchDiffVO;
 public class GitOperationService {
 
     private static final Set<String> DIFF_EXCLUDED_ROOTS = Set.of(".git", ".mirror.git", ".worktrees");
+    private static final long COMMAND_TIMEOUT_SECONDS = 15L;
 
     @Value("${schemaplexai.workspace.root-path:/data/workspaces}")
     private String workspaceRootPath;
@@ -652,15 +655,21 @@ public class GitOperationService {
     }
 
     public boolean commitChanges(String worktreePath, String message, List<String> forceIncludePaths) throws GitAPIException, IOException {
-        List<String> normalizedForceIncludePaths = normalizeForceIncludePaths(worktreePath, forceIncludePaths);
-        log.info("提交工作树变更: worktree={}, forceIncludePaths={}", worktreePath, normalizedForceIncludePaths);
+        Path gitWorktreeRoot = requireGitWorktreeRoot(worktreePath);
+        if (gitWorktreeRoot == null) {
+            log.info("目标路径不是 Git 工作树根目录，跳过提交: worktree={}", worktreePath);
+            return false;
+        }
+        String normalizedWorktreePath = gitWorktreeRoot.toString();
+        List<String> normalizedForceIncludePaths = normalizeForceIncludePaths(normalizedWorktreePath, forceIncludePaths);
+        log.info("提交工作树变更: worktree={}, forceIncludePaths={}", normalizedWorktreePath, normalizedForceIncludePaths);
         if (!normalizedForceIncludePaths.isEmpty()) {
-            return commitChangesWithCli(worktreePath, message, normalizedForceIncludePaths);
+            return commitChangesWithCli(normalizedWorktreePath, message, normalizedForceIncludePaths);
         }
         try {
-            try (Git git = Git.open(new File(worktreePath))) {
+            try (Git git = Git.open(gitWorktreeRoot.toFile())) {
                 if (git.status().call().isClean()) {
-                    log.info("工作树无变更，跳过提交: worktree={}", worktreePath);
+                    log.info("工作树无变更，跳过提交: worktree={}", normalizedWorktreePath);
                     return false;
                 }
                 git.add().addFilepattern(".").call();
@@ -669,12 +678,12 @@ public class GitOperationService {
                         .setAuthor("SchemaPlexAI", "noreply@schemaplexai.local")
                         .setCommitter("SchemaPlexAI", "noreply@schemaplexai.local")
                         .call();
-                log.info("工作树提交成功: worktree={}", worktreePath);
+                log.info("工作树提交成功: worktree={}", normalizedWorktreePath);
                 return true;
             }
         } catch (Exception ex) {
-            log.warn("JGit 提交工作树失败，回退到 git CLI: worktree={}, error={}", worktreePath, ex.getMessage());
-            return commitChangesWithCli(worktreePath, message, List.of());
+            log.warn("JGit 提交工作树失败，回退到 git CLI: worktree={}, error={}", normalizedWorktreePath, ex.getMessage());
+            return commitChangesWithCli(normalizedWorktreePath, message, List.of());
         }
     }
 
@@ -689,9 +698,8 @@ public class GitOperationService {
                 log.info("工作树无变更，跳过提交: worktree={}", worktreePath);
                 return false;
             }
-        }
-        runGitCommand(worktreePath, "git", "add", "-A");
-        if (!forceIncludePaths.isEmpty()) {
+            runGitCommand(worktreePath, "git", "add", "-A");
+        } else {
             List<String> addCommand = new ArrayList<>(List.of("git", "add", "-f", "--"));
             addCommand.addAll(forceIncludePaths);
             runGitCommand(worktreePath, addCommand.toArray(new String[0]));
@@ -747,7 +755,12 @@ public class GitOperationService {
      * 检查工作树当前变更，区分“任意改动”与“实现类改动”
      */
     public WorkspaceChangeSummary inspectWorkspaceChanges(String worktreePath) throws IOException {
-        String statusOutput = runGitCommand(worktreePath, "git", "status", "--porcelain", "--untracked-files=all");
+        Path gitWorktreeRoot = requireGitWorktreeRoot(worktreePath);
+        if (gitWorktreeRoot == null) {
+            log.info("目标路径不是 Git 工作树根目录，跳过变更检查: worktree={}", worktreePath);
+            return new WorkspaceChangeSummary(true, List.of(), List.of());
+        }
+        String statusOutput = runGitCommand(gitWorktreeRoot.toString(), "git", "status", "--porcelain", "--untracked-files=all");
         if (!StringUtils.hasText(statusOutput)) {
             return new WorkspaceChangeSummary(true, List.of(), List.of());
         }
@@ -907,18 +920,59 @@ public class GitOperationService {
         }
         builder.redirectErrorStream(true);
         Process process = builder.start();
-        try (InputStream inputStream = process.getInputStream()) {
-            String output = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
-            try {
-                int exitCode = process.waitFor();
-                if (!allowedExitCodes.contains(exitCode)) {
-                    throw new IOException("执行命令失败: " + String.join(" ", command) + System.lineSeparator() + output);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IOException("执行命令被中断", e);
+        ByteArrayOutputStream outputBuffer = new ByteArrayOutputStream();
+        Thread readerThread = new Thread(() -> {
+            try (InputStream inputStream = process.getInputStream()) {
+                inputStream.transferTo(outputBuffer);
+            } catch (IOException ignored) {
+                // 命令失败时由主线程统一处理输出与异常。
             }
-            return output;
+        }, "git-command-reader");
+        readerThread.setDaemon(true);
+        readerThread.start();
+        try {
+            boolean finished = process.waitFor(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                joinReaderThread(readerThread);
+                throw new IOException("执行命令超时: " + String.join(" ", command));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+            joinReaderThread(readerThread);
+            throw new IOException("执行命令被中断", e);
+        }
+        joinReaderThread(readerThread);
+        String output = outputBuffer.toString(StandardCharsets.UTF_8);
+        int exitCode = process.exitValue();
+        if (!allowedExitCodes.contains(exitCode)) {
+            throw new IOException("执行命令失败: " + String.join(" ", command) + System.lineSeparator() + output);
+        }
+        return output;
+    }
+
+    private Path requireGitWorktreeRoot(String worktreePath) throws IOException {
+        if (!StringUtils.hasText(worktreePath)) {
+            return null;
+        }
+        Path rootPath = Path.of(worktreePath).toAbsolutePath().normalize();
+        if (!Files.isDirectory(rootPath)) {
+            return null;
+        }
+        Path gitMetadata = rootPath.resolve(".git");
+        if (!Files.exists(gitMetadata)) {
+            return null;
+        }
+        return rootPath;
+    }
+
+    private void joinReaderThread(Thread readerThread) throws IOException {
+        try {
+            readerThread.join(TimeUnit.SECONDS.toMillis(1));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("等待命令输出线程结束时被中断", e);
         }
     }
 

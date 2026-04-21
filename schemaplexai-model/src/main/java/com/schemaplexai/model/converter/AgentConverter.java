@@ -27,6 +27,7 @@ public interface AgentConverter {
     @Mapping(target = "builtinPositions", ignore = true)
     @Mapping(target = "teamConfigDone", ignore = true)
     @Mapping(target = "contextBindingDone", ignore = true)
+    @Mapping(target = "skillDisplayNames", ignore = true)
     @Mapping(target = "templateName", ignore = true)
     AgentVO toVO(Agent agent);
 

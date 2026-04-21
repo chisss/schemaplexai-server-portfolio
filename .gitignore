@@ -39,3 +39,6 @@ logs/
 
 # 文档目录（不上传）
 /docs/
+.spec-workflow
+.serena
+sql

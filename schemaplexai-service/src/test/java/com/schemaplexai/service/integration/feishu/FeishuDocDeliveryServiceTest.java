@@ -152,6 +152,8 @@ class FeishuDocDeliveryServiceTest {
             Map<String, Object> property = (Map<String, Object>) table.get("property");
             assertThat(property.get("row_size")).isEqualTo(3);
             assertThat(property.get("column_size")).isEqualTo(2);
+            assertThat(property.get("header_row")).isEqualTo(Boolean.TRUE);
+            assertThat(property.get("column_width")).isInstanceOf(List.class);
             assertThat(property).doesNotContainKey("merge_info");
 
             assertDescendantTextContent(server.rootDescendantRequests().getFirst(), "cell_1_text", "公司名称");
@@ -200,6 +202,8 @@ class FeishuDocDeliveryServiceTest {
             Map<String, Object> secondTableProperty = (Map<String, Object>) ((Map<String, Object>) secondChildren.getFirst().get("table")).get("property");
             assertThat(firstTableProperty.get("column_size")).isEqualTo(9);
             assertThat(secondTableProperty.get("column_size")).isEqualTo(3);
+            assertThat(firstTableProperty.get("column_width")).isInstanceOf(List.class);
+            assertThat(secondTableProperty.get("column_width")).isInstanceOf(List.class);
             assertThat(firstTableProperty).doesNotContainKey("merge_info");
             assertThat(secondTableProperty).doesNotContainKey("merge_info");
 

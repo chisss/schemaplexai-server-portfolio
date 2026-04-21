@@ -18,6 +18,7 @@ import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.memory.AgentMemoryExtractionService;
+import com.schemaplexai.service.agent.memory.AgentInstructionsAutoService;
 import com.schemaplexai.service.ai.AIModelRouter;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jResolution;
@@ -110,6 +111,10 @@ public class AgentExecutionEngine {
     @Autowired(required = false)
     private AgentMemoryExtractionService agentMemoryExtractionService;
 
+    @Lazy
+    @Autowired(required = false)
+    private AgentInstructionsAutoService agentInstructionsAutoService;
+
     // =========================================================================
     //  公开入口
     // =========================================================================
@@ -180,6 +185,15 @@ public class AgentExecutionEngine {
         AiModelConfig compactModelConfig = aiModelRouter.resolveCompactModel(tenantId);
         if (compactModelConfig != null) {
             chatMemoryCompactor.setCompactionModel(aiModelRouter.buildChatModel(compactModelConfig));
+        }
+
+        // 首次执行时自动创建专属指令（幂等，非首次仅一次 SELECT）
+        if (agentInstructionsAutoService != null) {
+            try {
+                agentInstructionsAutoService.autoInitIfAbsent(tenantId, agentId);
+            } catch (Exception e) {
+                log.warn("自动初始化Agent专属指令失败: agentId={}, error={}", agentId, e.getMessage());
+            }
         }
 
         // 构建 System Prompt
@@ -710,6 +724,11 @@ public class AgentExecutionEngine {
             if (history != null && !history.isEmpty()) {
                 agentMemoryExtractionService.extractMemoriesAsync(tenantId, agentId, executionId, history);
             }
+        }
+
+        // 异步从记忆中压缩更新 Agent 专属指令
+        if (agentInstructionsAutoService != null) {
+            agentInstructionsAutoService.updateFromMemoriesAsync(tenantId, agentId, executionId);
         }
 
         return AgentExecutionResult.builder()

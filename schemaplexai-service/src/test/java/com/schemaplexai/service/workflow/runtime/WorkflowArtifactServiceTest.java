@@ -756,6 +756,96 @@ class WorkflowArtifactServiceTest {
     }
 
     @Test
+    void shouldPublishFeishuDocForNonSpecWorkflowInstance() {
+        SpecMapper specMapper = mock(SpecMapper.class);
+        SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);
+        GitOperationService gitOperationService = mock(GitOperationService.class);
+        ArtifactService artifactService = mockArtifactService();
+        NotificationChannelMapper notificationChannelMapper = mock(NotificationChannelMapper.class);
+        FeishuDocDeliveryService feishuDocDeliveryService = mock(FeishuDocDeliveryService.class);
+
+        WorkflowArtifactService service = newService(
+                specMapper,
+                specVersionHandler,
+                gitOperationService,
+                artifactService,
+                notificationChannelMapper,
+                feishuDocDeliveryService
+        );
+
+        NotificationChannel channel = new NotificationChannel();
+        channel.setId("channel-non-spec");
+        channel.setName("飞书机器人通知");
+        channel.setChannelType("feishu");
+        channel.setStatus("active");
+        channel.setConfig(Map.of(
+                "app_id", "cli_mock",
+                "app_secret", "mock-secret"
+        ));
+        when(notificationChannelMapper.selectById("channel-non-spec")).thenReturn(channel);
+        when(feishuDocDeliveryService.deliver(any(), any(), any()))
+                .thenReturn(new FeishuDocDeliveryService.FeishuDocDeliveryResult(
+                        "doxcnNonSpec123",
+                        "https://feishu.cn/docx/doxcnNonSpec123",
+                        "SchemaPlexAI 门店经营演示交付",
+                        2,
+                        5
+                ));
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-non-spec");
+        instance.setSpecId(null);
+        instance.setTenantId("tenant-non-spec");
+        instance.setVariables(new HashMap<>(Map.of(
+                "workspaceId", "workspace-1",
+                "workspacePath", tempDir.toString(),
+                "artifactOutputPath", "marketing/store/",
+                "specType", "marketing"
+        )));
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setNodeId("delivery_team");
+        nodeExecution.setNodeLabel("客户交付 Team");
+
+        Map<String, Object> artifact = service.persistAgentArtifactIfNecessary(
+                instance,
+                nodeExecution,
+                Map.of(
+                        "artifactType", "marketing_copy_bundle",
+                        "artifactTitle", "SchemaPlexAI 门店经营演示交付",
+                        "artifactDeliveryType", "feishu_doc",
+                        "artifactDeliveryChannelId", "channel-non-spec"
+                ),
+                """
+                        {
+                          "summary": "已生成门店经营闭环交付包",
+                          "bundleItems": [
+                            {
+                              "variantKey": "A",
+                              "title": "门店经营闭环交付",
+                              "content": "# 门店经营闭环交付\\n\\n## 已确认事实\\n\\n- 客户：上海徐汇美甲工作室\\n"
+                            }
+                          ]
+                        }
+                        """
+        );
+
+        assertThat(artifact.get("artifactDeliveryType")).isEqualTo("feishu_doc");
+        assertThat(artifact.get("artifactDeliveryUrl")).isEqualTo("https://feishu.cn/docx/doxcnNonSpec123");
+        assertThat(artifact.get("artifactDeliveryDocumentId")).isEqualTo("doxcnNonSpec123");
+
+        ArgumentCaptor<ArtifactService.WorkflowArtifactPersistCommand> commandCaptor =
+                ArgumentCaptor.forClass(ArtifactService.WorkflowArtifactPersistCommand.class);
+        verify(artifactService).saveWorkflowArtifact(commandCaptor.capture());
+        assertThat(commandCaptor.getValue().specId()).isNull();
+        assertThat(commandCaptor.getValue().tenantId()).isEqualTo("tenant-non-spec");
+        assertThat(commandCaptor.getValue().workspaceTargets().stream()
+                .map(ArtifactService.WorkspaceDeliveryTarget::deliveryType)
+                .toList()).contains("feishu_doc");
+        verifyNoInteractions(specVersionHandler);
+    }
+
+    @Test
     void shouldOverrideFeishuDeliveryConfigFromMarketingProfile() {
         SpecMapper specMapper = mock(SpecMapper.class);
         SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);

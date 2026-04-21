@@ -21,6 +21,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
                 .addPathPatterns("/**")
                 .excludePathPatterns(
                         "/auth/**",
+                        "/demo/**",
                         "/i18n/**",
                         "/doc.html",
                         "/swagger-resources/**",

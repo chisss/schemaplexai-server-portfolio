@@ -1,26 +1,29 @@
 package com.schemaplexai.service.knowledge.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.DocumentIngestionConstant;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
+import com.schemaplexai.common.enums.KnowledgeDocumentStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.FilenameSanitizer;
 import com.schemaplexai.common.util.HashUtils;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.KnowledgeDocumentMapper;
+import com.schemaplexai.model.converter.KnowledgeDocumentConverter;
 import com.schemaplexai.model.dto.knowledge.UploadDocumentRequest;
 import com.schemaplexai.model.dto.security.SecurityAuditContext;
 import com.schemaplexai.model.entity.KnowledgeDocument;
 import com.schemaplexai.model.vo.knowledge.KnowledgeDocumentVO;
+import com.schemaplexai.service.knowledge.KnowledgeDocumentAssembler;
 import com.schemaplexai.service.knowledge.KnowledgeDocumentAuditWriter;
 import com.schemaplexai.service.knowledge.KnowledgeDocumentAuditWriter.KnowledgeAuditEvent;
 import com.schemaplexai.service.knowledge.KnowledgeDocumentService;
 import com.schemaplexai.service.memory.rag.DocumentIngestionService;
 import com.schemaplexai.service.storage.DocumentStorageService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
-import org.springframework.core.task.TaskExecutor;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -32,6 +35,8 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Executor;
 
 /**
  * 知识文档管理服务实现（v2）。
@@ -40,16 +45,49 @@ import java.util.Map;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
 
     private static final Tika TIKA = new Tika();
+
+    /** 允许上传的 MIME 类型白名单 */
+    private static final Set<String> ALLOWED_MIME_TYPES = Set.of(
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+            "text/plain",
+            "text/markdown",
+            "text/html",
+            "text/csv"
+    );
+
+    /** 单文件最大 50MB */
+    private static final long MAX_FILE_SIZE = 50L * 1024 * 1024;
 
     private final KnowledgeDocumentMapper documentMapper;
     private final DocumentIngestionService documentIngestionService;
     private final DocumentStorageService documentStorageService;
     private final KnowledgeDocumentAuditWriter auditWriter;
-    private final TaskExecutor taskExecutor;
+    private final KnowledgeDocumentConverter converter;
+    private final KnowledgeDocumentAssembler assembler;
+    private final Executor knowledgeIngestionExecutor;
+
+    public KnowledgeDocumentServiceImpl(
+            KnowledgeDocumentMapper documentMapper,
+            DocumentIngestionService documentIngestionService,
+            DocumentStorageService documentStorageService,
+            KnowledgeDocumentAuditWriter auditWriter,
+            KnowledgeDocumentConverter converter,
+            KnowledgeDocumentAssembler assembler,
+            @Qualifier("knowledgeIngestionExecutor") Executor knowledgeIngestionExecutor) {
+        this.documentMapper = documentMapper;
+        this.documentIngestionService = documentIngestionService;
+        this.documentStorageService = documentStorageService;
+        this.auditWriter = auditWriter;
+        this.converter = converter;
+        this.assembler = assembler;
+        this.knowledgeIngestionExecutor = knowledgeIngestionExecutor;
+    }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -60,14 +98,18 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             throw new BusinessException(ResultCode.BAD_REQUEST, "文件不能为空");
         }
 
+        long fileSize = file.getSize();
+        if (fileSize > MAX_FILE_SIZE) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "文件大小超过限制（最大 50MB）");
+        }
+
         String tenantId = SecurityUtil.getCurrentTenantId();
         String userId = SecurityUtil.getCurrentUserId();
-        String username = SecurityUtil.getCurrentUsername();
         String rawFileName = file.getOriginalFilename();
         String sanitizedName = FilenameSanitizer.sanitize(rawFileName);
         String fileType = FilenameSanitizer.extractExtension(rawFileName);
-        long fileSize = file.getSize();
-        String uploadChannel = StringUtils.hasText(request.getUploadChannel()) ? request.getUploadChannel() : "web";
+        String uploadChannel = StringUtils.hasText(request.getUploadChannel())
+                ? request.getUploadChannel() : DocumentIngestionConstant.DEFAULT_UPLOAD_CHANNEL;
 
         // ① 读取字节 + 计算 SHA256 + MIME 嗅探
         byte[] fileBytes;
@@ -78,6 +120,12 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         }
         String contentSha256 = HashUtils.sha256Hex(fileBytes);
         String mimeType = TIKA.detect(fileBytes, rawFileName);
+
+        // MIME 类型白名单校验
+        if (!ALLOWED_MIME_TYPES.contains(mimeType)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST,
+                    "不支持的文件类型: " + mimeType);
+        }
 
         // ② 租户级 SHA256 去重
         KnowledgeDocument existing = documentMapper.selectOne(new LambdaQueryWrapper<KnowledgeDocument>()
@@ -100,33 +148,16 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
                     .contentSha256(contentSha256)
                     .auditContext(auditContext)
                     .build());
-            return toVO(existing);
+            return converter.toVO(existing);
         }
 
-        // ③ MinIO 流式上传
+        // ③ 组装实体 + MinIO 流式上传
         String bucket = documentStorageService.getDefaultBucket();
-        String documentId = null;
-        var document = new KnowledgeDocument();
-        document.setTenantId(tenantId);
-        document.setContextId(contextId);
-        document.setTitle(StringUtils.hasText(request.getTitle()) ? request.getTitle() : sanitizedName);
-        document.setFileName(sanitizedName);
-        document.setFileType(fileType);
-        document.setFileSize(fileSize);
-        document.setStatus("pending");
-        document.setContentSha256(contentSha256);
-        document.setMimeType(mimeType);
-        document.setBucket(bucket);
-        document.setUploadChannel(uploadChannel);
-        document.setRetryCount(0);
-        document.setCreatedBy(userId);
-        if (request.getMetadata() != null) {
-            document.setMetadata(request.getMetadata());
-        }
+        var document = assembler.assemble(tenantId, contextId, userId, sanitizedName,
+                fileType, fileSize, contentSha256, mimeType, bucket, uploadChannel, request);
         documentMapper.insert(document);
-        documentId = document.getId();
+        String documentId = document.getId();
 
-        // 生成 objectKey 并上传
         String objectKey = documentStorageService.buildKnowledgeObjectKey(tenantId, documentId, sanitizedName);
         document.setObjectKey(objectKey);
         document.setFilePath(bucket + "/" + objectKey);
@@ -140,25 +171,25 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         }
 
         // ④ 审计：上传已接受
-        String finalDocumentId = documentId;
         auditWriter.record(KnowledgeAuditEvent.builder()
                 .tenantId(tenantId)
                 .eventType(SecurityComplianceConstant.EVENT_KB_UPLOAD_ACCEPTED)
                 .action(SecurityComplianceConstant.ACTION_KB_DOC_UPLOAD)
                 .eventTitle("知识文档上传成功")
                 .eventDetail("fileName=" + sanitizedName + ", size=" + fileSize + ", mimeType=" + mimeType)
-                .documentId(finalDocumentId)
+                .documentId(documentId)
                 .fileName(sanitizedName)
                 .contentSha256(contentSha256)
                 .auditContext(auditContext)
                 .metadata(Map.of("fileType", fileType, "uploadChannel", uploadChannel))
                 .build());
 
-        // ⑤ afterCommit 异步触发摄入（确保事务已提交后再执行）
+        // ⑤ afterCommit 异步触发摄入
+        String finalDocumentId = documentId;
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                taskExecutor.execute(() -> {
+                knowledgeIngestionExecutor.execute(() -> {
                     try {
                         documentIngestionService.ingestDocument(finalDocumentId);
                     } catch (Exception e) {
@@ -168,17 +199,16 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             }
         });
 
-        return toVO(document);
+        return converter.toVO(document);
     }
 
     @Override
     public List<KnowledgeDocumentVO> listByContextId(String contextId) {
-        return documentMapper.selectList(new LambdaQueryWrapper<KnowledgeDocument>()
+        List<KnowledgeDocument> documents = documentMapper.selectList(
+                new LambdaQueryWrapper<KnowledgeDocument>()
                         .eq(KnowledgeDocument::getContextId, contextId)
-                        .orderByDesc(KnowledgeDocument::getCreatedAt))
-                .stream()
-                .map(this::toVO)
-                .toList();
+                        .orderByDesc(KnowledgeDocument::getCreatedAt));
+        return converter.toVOList(documents);
     }
 
     @Override
@@ -187,7 +217,7 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         if (document == null) {
             throw new BusinessException(ResultCode.NOT_FOUND, "文档不存在");
         }
-        return toVO(document);
+        return converter.toVO(document);
     }
 
     @Override
@@ -200,30 +230,5 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             throw new BusinessException(ResultCode.FAIL, "文档尚未完成存储");
         }
         return documentStorageService.getPresignedDownloadUrl(document.getBucket(), document.getObjectKey(), 0);
-    }
-
-    private KnowledgeDocumentVO toVO(KnowledgeDocument entity) {
-        var vo = new KnowledgeDocumentVO();
-        vo.setId(entity.getId());
-        vo.setContextId(entity.getContextId());
-        vo.setTitle(entity.getTitle());
-        vo.setFileName(entity.getFileName());
-        vo.setFileType(entity.getFileType());
-        vo.setFileSize(entity.getFileSize());
-        vo.setStatus(entity.getStatus());
-        vo.setChunkCount(entity.getChunkCount());
-        vo.setTotalTokens(entity.getTotalTokens());
-        vo.setEmbeddingModel(entity.getEmbeddingModel());
-        vo.setErrorMessage(entity.getErrorMessage());
-        vo.setContentSha256(entity.getContentSha256());
-        vo.setMimeType(entity.getMimeType());
-        vo.setUploadChannel(entity.getUploadChannel());
-        vo.setCreatedBy(entity.getCreatedBy());
-        vo.setContentWarnings(entity.getContentWarnings());
-        vo.setRetryCount(entity.getRetryCount());
-        vo.setMetadata(entity.getMetadata());
-        vo.setCreatedAt(entity.getCreatedAt());
-        vo.setUpdatedAt(entity.getUpdatedAt());
-        return vo;
     }
 }

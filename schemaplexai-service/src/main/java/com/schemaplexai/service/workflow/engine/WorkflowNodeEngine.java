@@ -1722,6 +1722,7 @@ public class WorkflowNodeEngine {
         value.put("deliveryChannelId", readString(artifactData, "artifactDeliveryChannelId"));
         value.put("deliveryChannelName", readString(artifactData, "artifactDeliveryChannelName"));
         value.put("rawContent", readString(artifactData, "rawContent"));
+        value.put("agentRawContent", readString(artifactData, "agentRawContent"));
         value.put("summary", compactText(artifactContent, 800));
         value.put("contentLength", artifactContent.length());
         return value;
