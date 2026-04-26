@@ -9,6 +9,7 @@ import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentExecutionLog;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -26,6 +27,7 @@ public class AgentLogService {
 
     private final AgentExecutionLogMapper agentExecutionLogMapper;
     private final AgentExecutionMapper agentExecutionMapper;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     /**
      * 追加一条执行日志
@@ -101,6 +103,9 @@ public class AgentLogService {
             log.warn("执行状态未更新（可能已停止）: executionId={}, targetStatus={}", executionId, status);
         } else {
             log.info("更新执行状态: executionId={}, status={}", executionId, status);
+            if (AgentExecutionStatusEnum.COMPLETED.getCode().equals(status)) {
+                applicationEventPublisher.publishEvent(new AgentExecutionCompletedEvent(executionId));
+            }
         }
     }
 }

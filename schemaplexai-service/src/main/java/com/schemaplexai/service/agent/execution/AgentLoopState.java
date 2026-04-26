@@ -2,6 +2,8 @@ package com.schemaplexai.service.agent.execution;
 
 import lombok.Data;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -43,6 +45,17 @@ public class AgentLoopState {
 
     /** 非预期工具调用恢复次数 */
     private int unexpectedToolCallRecoveries;
+
+    // ---- 循环检测字段（AgentLoopDetectionService 使用）----
+
+    /** 最近 N 轮 AI 响应文本的 SHA-256 哈希（滑动窗口） */
+    private final Deque<String> recentResponseHashes = new ArrayDeque<>();
+
+    /** 最近 N 轮工具调用序列摘要（滑动窗口） */
+    private final Deque<String> recentToolSequences = new ArrayDeque<>();
+
+    /** 循环告警累计次数 */
+    private int loopWarningCount;
 
     /**
      * 累加本轮 Token 用量

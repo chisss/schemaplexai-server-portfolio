@@ -2,6 +2,7 @@ package com.schemaplexai.service.cost.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -145,6 +146,30 @@ public class BudgetServiceImpl implements BudgetService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public BudgetVO upsertCurrentBudget(BudgetUpdateRequest request) {
+        Budget currentBudget = findCurrentBudget();
+        if (currentBudget == null) {
+            if (request == null || request.getBudgetAmount() == null) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "当前租户预算金额不能为空");
+            }
+            BudgetCreateRequest createRequest = new BudgetCreateRequest();
+            createRequest.setBudgetLevel("enterprise");
+            createRequest.setTargetId(SecurityUtil.getCurrentTenantId());
+            createRequest.setBudgetCycle("monthly");
+            createRequest.setBudgetAmount(request.getBudgetAmount());
+            createRequest.setAlertThreshold50(request.getAlertThreshold50() != null ? request.getAlertThreshold50() : Boolean.TRUE);
+            createRequest.setAlertThreshold80(request.getAlertThreshold80() != null ? request.getAlertThreshold80() : Boolean.TRUE);
+            createRequest.setAlertThreshold100(request.getAlertThreshold100() != null ? request.getAlertThreshold100() : Boolean.TRUE);
+            createRequest.setOverLimitStrategy(StringUtils.hasText(request.getOverLimitStrategy())
+                    ? request.getOverLimitStrategy()
+                    : "alert");
+            return create(createRequest);
+        }
+        return update(currentBudget.getId(), request);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public void delete(String id) {
         entityValidator.requireExists(budgetMapper, id, ResultCode.BUDGET_NOT_FOUND);
         budgetMapper.deleteById(id);
@@ -152,9 +177,21 @@ public class BudgetServiceImpl implements BudgetService {
     }
 
     @Override
+    public BudgetVO getCurrentBudget() {
+        Budget currentBudget = findCurrentBudget();
+        return currentBudget == null ? null : budgetConverter.toVO(currentBudget);
+    }
+
+    @Override
     public BudgetUsageVO getUsage(String id) {
         Budget budget = entityValidator.requireExists(budgetMapper, id, ResultCode.BUDGET_NOT_FOUND);
         return buildUsage(budget);
+    }
+
+    @Override
+    public BudgetUsageVO getCurrentBudgetUsage() {
+        Budget currentBudget = findCurrentBudget();
+        return currentBudget == null ? null : buildUsage(currentBudget);
     }
 
     @Override
@@ -372,6 +409,20 @@ public class BudgetServiceImpl implements BudgetService {
 
     private String normalizeValue(String value) {
         return StringUtils.hasText(value) ? value.trim().toLowerCase() : value;
+    }
+
+    private Budget findCurrentBudget() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            return null;
+        }
+        return budgetMapper.selectOne(new LambdaQueryWrapper<Budget>()
+                .eq(Budget::getTenantId, tenantId)
+                .eq(Budget::getBudgetLevel, "enterprise")
+                .eq(Budget::getBudgetCycle, "monthly")
+                .eq(Budget::getStatus, "active")
+                .orderByDesc(Budget::getCreatedAt)
+                .last("limit 1"));
     }
 
     private record TimeWindow(LocalDateTime start, LocalDateTime end) {

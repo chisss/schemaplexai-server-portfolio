@@ -33,7 +33,10 @@ public enum AgentLoopLogTypeEnum {
     MODEL_RESOLVED("MODEL_RESOLVED", "模型解析"),
     MODEL_RETRY("MODEL_RETRY", "模型重试"),
     MODEL_FALLBACK_SWITCH("MODEL_FALLBACK_SWITCH", "模型降级切换"),
-    MODEL_FAILURE_FALLBACK("MODEL_FAILURE_FALLBACK", "模型失败降级");
+    MODEL_FAILURE_FALLBACK("MODEL_FAILURE_FALLBACK", "模型失败降级"),
+    LOOP_WARNING("LOOP_WARNING", "循环检测告警"),
+    LOOP_CONFIRMED("LOOP_CONFIRMED", "循环检测确认"),
+    TOOL_OUTPUT_MASKED("TOOL_OUTPUT_MASKED", "工具输出遮蔽压缩");
 
     private final String code;
     private final String description;

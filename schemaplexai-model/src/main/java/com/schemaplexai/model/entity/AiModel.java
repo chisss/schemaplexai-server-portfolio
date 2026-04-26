@@ -36,6 +36,9 @@ public class AiModel implements Serializable {
     /** 提供商编码（关联字典项 item_value，如 Anthropic/OpenAI/DeepSeek） */
     private String providerCode;
 
+    /** 调用协议: openai/anthropic/gemini */
+    private String protocol;
+
     /** 适用场景描述（从字典项同步） */
     private String useCase;
 
@@ -58,6 +61,9 @@ public class AiModel implements Serializable {
     /** 输出Token单价($/1K tokens) */
     private BigDecimal outputPrice;
 
+    /** 生图单张价格 */
+    private BigDecimal imagePrice;
+
     /** 请求超时时间（秒） */
     private Integer timeoutSeconds;
 
@@ -72,6 +78,12 @@ public class AiModel implements Serializable {
 
     /** 模型累计 Tokens 限额 */
     private Integer maxQuotaTokens;
+
+    /** 支持的推理强度等级，逗号分隔，如 "low,medium,high" */
+    private String supportedReasoningEfforts;
+
+    /** 是否支持多模态输入（图片等视觉能力） */
+    private Boolean multimodal;
 
     /** 状态: active/inactive */
     private String status;
@@ -90,6 +102,22 @@ public class AiModel implements Serializable {
 
     /** 最近测试返回的实际模型名称 */
     private String lastTestModel;
+
+    /** 实时 1 分钟请求数 */
+    @TableField(exist = false)
+    private Long runtimeRequestCount1m;
+
+    /** 实时 1 分钟错误率 */
+    @TableField(exist = false)
+    private Double runtimeErrorRate1m;
+
+    /** 实时 P95 延迟 */
+    @TableField(exist = false)
+    private Long runtimeP95LatencyMs;
+
+    /** 实时健康状态 */
+    @TableField(exist = false)
+    private String runtimeHealthStatus;
 
     /** 创建人 */
     @TableField(fill = FieldFill.INSERT)

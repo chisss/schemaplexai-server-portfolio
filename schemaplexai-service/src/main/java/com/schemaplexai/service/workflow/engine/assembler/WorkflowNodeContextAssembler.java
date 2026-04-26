@@ -1,6 +1,7 @@
 package com.schemaplexai.service.workflow.engine.assembler;
 
 import com.schemaplexai.model.entity.WorkflowInstance;
+import com.schemaplexai.service.workflow.ArtifactSceneResolver;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -30,6 +31,23 @@ public class WorkflowNodeContextAssembler {
             "agentResult",
             "summary"
     );
+    private static final List<String> COMPACT_INPUT_VARIABLE_KEYS = List.of(
+            "specName",
+            "jiraTicket",
+            "targetBranch",
+            "workspaceName",
+            "workspacePath",
+            "workflowGoal",
+            "originalRequirement",
+            "specDescription",
+            "requirementsDoc",
+            "designDoc",
+            "tasksDoc",
+            "codeDevelopmentSummary",
+            "implementationDoc",
+            "testPlanDoc",
+            "technicalDoc"
+    );
 
     /**
      * 构建节点输入数据（合并上一节点输出 + 实例变量摘要）
@@ -39,11 +57,7 @@ public class WorkflowNodeContextAssembler {
         if (previousOutput != null) {
             previousOutput.forEach((key, value) -> input.put(key, sanitizeValue(value)));
         }
-        appendCompactVariable(input, instance, "specName");
-        appendCompactVariable(input, instance, "jiraTicket");
-        appendCompactVariable(input, instance, "targetBranch");
-        appendCompactVariable(input, instance, "workspaceName");
-        appendCompactVariable(input, instance, "workspacePath");
+        COMPACT_INPUT_VARIABLE_KEYS.forEach(key -> appendCompactVariable(input, instance, key));
         input.put("_specId", instance.getSpecId());
         input.put("_instanceId", instance.getId());
         return input;
@@ -76,7 +90,7 @@ public class WorkflowNodeContextAssembler {
         appendSection(sb, "实现文档", getVariable(instance, "implementationDoc"));
         appendSection(sb, "测试规划文档", getVariable(instance, "testPlanDoc"));
         appendSection(sb, "交付文档", getVariable(instance, "technicalDoc"));
-        appendPathUsageHint(sb, instance);
+        appendPathUsageHint(sb, instance, config);
         appendEvidenceOutputHint(sb, config);
 
         if (inputData != null && !inputData.isEmpty()) {
@@ -192,6 +206,7 @@ public class WorkflowNodeContextAssembler {
     }
 
     private void appendConfirmedFacts(StringBuilder sb, Map<String, Object> config) {
+        boolean customerDelivery = ArtifactSceneResolver.isCustomerDelivery(config);
         Map<String, String> facts = new LinkedHashMap<>();
         appendFact(facts, "指令来源", resolveInstructionSource(config));
         appendFact(facts, "目标文档类型", readString(config, "artifactDocType"));
@@ -212,14 +227,27 @@ public class WorkflowNodeContextAssembler {
                 .append(": ")
                 .append(truncate(value, MAX_INPUT_VALUE_LENGTH))
                 .append("\n"));
+        if (customerDelivery) {
+            sb.append("- 对以上系统已确认事实，直接转写为客户可读结论或交付依据；不要输出内部仓库审计标题、缺失占位语或回填提示。\n");
+            return;
+        }
         sb.append("- 对以上系统已确认事实，禁止继续写成“待确认”“可能”“推测”；只有系统未提供且未读取到证据的细节，才能标记为“仓库中未发现”或“当前步骤未生成”。\n");
     }
 
     private void appendOutputContract(StringBuilder sb, Map<String, Object> config) {
+        boolean customerDelivery = isDeliveryDocStage(config);
         sb.append("输出约束:\n")
-                .append("- 最终 Markdown 至少包含“已确认事实”“结论”“关键证据”“风险与未知项”四类信息。\n")
-                .append("- 已有系统确认值时，直接复用该值，不要再次写“待确认”。\n")
-                .append("- 系统会在文档落库前回填模型名、执行ID、质量分、文档版本等运行时元数据；不要自行猜测或编造这些字段。\n");
+                .append(customerDelivery
+                        ? "- 最终 Markdown 至少包含“已确认事实”“交付方案”“交付清单/执行步骤”“预期业务价值”“风险与边界”五类信息。\n"
+                        : "- 最终 Markdown 至少包含“已确认事实”“结论”“关键证据”“风险与未知项”四类信息。\n")
+                .append("- 已有系统确认值时，直接复用该值，不要再次写“待确认”。\n");
+        if (customerDelivery) {
+            sb.append("- 客户交付类文档禁止出现内部仓库审计标题、缺失占位语和回填说明。\n");
+            sb.append("- 飞书链接、文档ID、模型名、执行ID等运行时字段如当前未提供，直接省略，不要写“待回填”或占位说明。\n");
+            sb.append("- 交付内容必须直接面向客户或业务负责人表达，优先写方案、节奏、清单、收益与边界，不要复述仓库调研过程。\n");
+        } else {
+            sb.append("- 系统会在文档落库前回填模型名、执行ID、质量分、文档版本等运行时元数据；不要自行猜测或编造这些字段。\n");
+        }
         String artifactDocType = readString(config, "artifactDocType");
         if ("requirements".equals(artifactDocType)) {
             sb.append("- 需求或测试结论文档优先使用表格、短列表和显式证据字段，避免空泛表述。\n");
@@ -236,25 +264,45 @@ public class WorkflowNodeContextAssembler {
         }
     }
 
-    private void appendPathUsageHint(StringBuilder sb, WorkflowInstance instance) {
+    private void appendPathUsageHint(StringBuilder sb, WorkflowInstance instance, Map<String, Object> config) {
+        boolean customerDelivery = isDeliveryDocStage(config);
         sb.append("工具使用提示:\n")
-                .append("- 当前 SchemaPlexAI 平台仓库可直接通过相对路径访问 docs/、schemaplexai-server/、schemaplexai-web/，不要臆测技术栈，先读文档或源码再结论。\n");
+                .append(customerDelivery
+                        ? "- 客户交付节点优先复用上游诊断结论、已生成产物和系统已确认事实；只有关键事实仍缺失时，才补充读取相关文档或工作区产物。\n"
+                        : "- 当前 SchemaPlexAI 平台仓库可直接通过相对路径访问 docs/、schemaplexai-server/、schemaplexai-web/，不要臆测技术栈，先读文档或源码再结论。\n");
         if (StringUtils.hasText(getVariable(instance, "workspacePath"))) {
             sb.append("- 所有 sys.read、sys.grep、sys.ls、sys.bash 等 sys.* 工具调用都必须显式传入 workdir=“工作目录（sys.* 工具 workdir）”，否则会直接失败。\n");
-            sb.append("- 若需要读取导入工作区代码，请把 workdir 设置为“工作目录”对应的绝对路径，并确保 path 始终使用相对路径，不要把绝对路径写进 path。\n");
-            sb.append("- 如果 sys.glob 连续返回空结果，不要反复重试；应直接切换为 sys.ls 定位目标目录，再用 sys.read 或 sys.grep 读取具体源码文件内容。\n");
-            sb.append("- 不要从项目根目录逐级盲扫到预算耗尽；确认语言或模块根目录后，应直接下钻到 controller、api、application、domain、repository、service、event、command、sql 等目标目录。\n");
+            sb.append("- 若需要读取导入工作区内容，请把 workdir 设置为“工作目录”对应的绝对路径，并确保 path 始终使用相对路径，不要把绝对路径写进 path。\n");
+            if (customerDelivery) {
+                sb.append("- 客户交付节点如需补充证据，优先读取 docs/、deliveries/ 或上游已产出的 Markdown，不要从项目根目录盲扫源码。\n");
+            } else {
+                sb.append("- 如果 sys.glob 连续返回空结果，不要反复重试；应直接切换为 sys.ls 定位目标目录，再用 sys.read 或 sys.grep 读取具体源码文件内容。\n");
+                sb.append("- 不要从项目根目录逐级盲扫到预算耗尽；确认语言或模块根目录后，应直接下钻到 controller、api、application、domain、repository、service、event、command、sql 等目标目录。\n");
+            }
         }
     }
 
     private void appendEvidenceOutputHint(StringBuilder sb, Map<String, Object> config) {
+        boolean customerDelivery = isDeliveryDocStage(config);
         sb.append("结果约束:\n")
-                .append("- 最终文档必须区分“当前仓库已确认现状”与“建议改造/待实现项”，不要把现状和方案混写。\n")
-                .append("- 只有在通过 sys.read 或 sys.grep 读取到文件内容后，才能描述接口方法、注解、字段、类职责或 SQL 细节。\n")
-                .append("- 仅通过 sys.ls、sys.glob 看到目录或文件名时，只能说明“存在该目录/文件”，不能推断方法或实现细节。\n")
-                .append("- 如果需要列出文件路径，请直接复用工具结果中的相对路径；未验证到的路径请明确写“仓库中未发现”。\n")
-                .append("- 不要把 call_function_*、工具请求编号、绝对路径或 .../xxx.java 这类占位路径写进最终文档。\n")
-                .append("- 一旦已经读取到某个模块下的真实文件，就不能再把该模块整体写成“待确认”；只能把未读取到的具体细节标记为“仓库中未发现”或“待新增”。\n");
+                .append(customerDelivery
+                        ? "- 客户交付文档只保留对客户有价值的事实、方案、清单、样例与风险，不要输出仓库路径、工具名、源码扫描过程或内部术语。\n"
+                        : "- 最终文档必须区分“当前仓库已确认现状”与“建议改造/待实现项”，不要把现状和方案混写。\n")
+                .append(customerDelivery
+                        ? "- 若某项细节尚未确认，请统一放入“风险与边界”或“待确认事项”，不要写缺失占位语或回填提示。\n"
+                        : "- 只有在通过 sys.read 或 sys.grep 读取到文件内容后，才能描述接口方法、注解、字段、类职责或 SQL 细节。\n")
+                .append(customerDelivery
+                        ? "- 前序节点中已经确认的业务事实、诊断结论和交付路径可以直接复用，不要再次把它们降级成“待确认”。\n"
+                        : "- 仅通过 sys.ls、sys.glob 看到目录或文件名时，只能说明“存在该目录/文件”，不能推断方法或实现细节。\n")
+                .append(customerDelivery
+                        ? "- 不要把飞书链接回填、模型回填、执行回填等系统运行时说明写进正文；当前无值时直接省略。\n"
+                        : "- 如果需要列出文件路径，请直接复用工具结果中的相对路径；未验证到的路径请明确写“仓库中未发现”。\n")
+                .append(customerDelivery
+                        ? "- 交付文档中的接口/数据变更、部署说明和测试结论必须能在前序节点产物中找到依据，但表达方式要转成客户可读语言。\n"
+                        : "- 不要把 call_function_*、工具请求编号、绝对路径或 .../xxx.java 这类占位路径写进最终文档。\n");
+        if (!customerDelivery) {
+            sb.append("- 一旦已经读取到某个模块下的真实文件，就不能再把该模块整体写成“待确认”；只能把未读取到的具体细节标记为“仓库中未发现”或“待新增”。\n");
+        }
         String artifactDocType = readString(config, "artifactDocType");
         if ("requirements".equals(artifactDocType)) {
             sb.append("- 需求分析如需说明前端入口、后端接口或人工审批影响面，必须先读取对应 controller/api 文件内容，再写接口方法与行为。\n");
@@ -385,10 +433,8 @@ public class WorkflowNodeContextAssembler {
     }
 
     private boolean isDeliveryDocStage(Map<String, Object> config) {
-        String artifactDocType = readString(config, "artifactDocType");
-        String outputVariableKey = readString(config, "outputVariableKey");
-        return "delivery".equals(artifactDocType)
-                || "technicalDoc".equals(outputVariableKey);
+        return ArtifactSceneResolver.isCustomerDelivery(config)
+                || "technicalDoc".equals(readString(config, "outputVariableKey"));
     }
 
     private String resolveArtifactFileKey(WorkflowInstance instance) {

@@ -7,6 +7,7 @@ import lombok.Builder;
 import lombok.Getter;
 import org.springframework.util.StringUtils;
 
+import java.math.BigDecimal;
 import java.util.Map;
 
 /**
@@ -31,6 +32,9 @@ public class AiModelConfig {
     /** 解码后的 API Key（明文） */
     private final String apiKey;
 
+    /** 平台内部模型配置 ID */
+    private final String configId;
+
     /** API Base URL（已去除尾部斜杠），如 https://api.anthropic.com */
     private final String baseUrl;
 
@@ -42,6 +46,12 @@ public class AiModelConfig {
 
     /** 实际请求协议，如 anthropic / openai / gemini */
     private final String protocol;
+
+    /** 输入单价 */
+    private final BigDecimal inputPrice;
+
+    /** 输出单价 */
+    private final BigDecimal outputPrice;
 
     /** 最大输出 Token 数 */
     private final int maxTokens;
@@ -61,10 +71,23 @@ public class AiModelConfig {
     /** 模型调用重试间隔（秒） */
     private final int retryIntervalSeconds;
 
+    /** 支持的推理强度等级，逗号分隔，如 "low,medium,high" */
+    private final String supportedReasoningEfforts;
+
+    /** 当前请求的推理强度：low / medium / high */
+    private final String reasoningStrength;
+
+    /** 是否支持多模态输入（图片等视觉能力） */
+    private final boolean multimodal;
+
     /**
      * 从 sf_ai_model 实体构建运行时配置
      */
     public static AiModelConfig from(AiModel model) {
+        return from(model, null);
+    }
+
+    public static AiModelConfig from(AiModel model, String reasoningStrength) {
         String provider = normalizeProvider(model);
         String protocol = resolveProtocol(model, provider);
 
@@ -79,10 +102,13 @@ public class AiModelConfig {
 
         return AiModelConfig.builder()
                 .apiKey(apiKey)
+                .configId(model.getId())
                 .baseUrl(baseUrl)
                 .modelId(model.getModelId())
                 .provider(provider)
                 .protocol(protocol)
+                .inputPrice(model.getInputPrice())
+                .outputPrice(model.getOutputPrice())
                 .maxTokens(model.getMaxTokens() != null ? model.getMaxTokens() : 4096)
                 .contextWindowTokens(resolveContextWindowTokens(model))
                 .maxQuotaTokens(model.getMaxQuotaTokens())
@@ -90,6 +116,9 @@ public class AiModelConfig {
                 .retryCount(model.getRetryCount() != null ? Math.max(model.getRetryCount(), 0) : 0)
                 .retryIntervalSeconds(model.getRetryIntervalSeconds() != null
                         ? Math.max(model.getRetryIntervalSeconds(), 1) : 1)
+                .supportedReasoningEfforts(model.getSupportedReasoningEfforts())
+                .reasoningStrength(reasoningStrength)
+                .multimodal(Boolean.TRUE.equals(model.getMultimodal()))
                 .build();
     }
 
@@ -135,7 +164,17 @@ public class AiModelConfig {
     public String cacheKey() {
         return provider + "|" + protocol + "|" + modelId + "|" + baseUrl + "|" + maxTokens + "|"
                 + contextWindowTokens + "|"
-                + timeoutSeconds + "|" + apiKey.hashCode();
+                + timeoutSeconds + "|" + apiKey.hashCode()
+                + "|" + (reasoningStrength != null ? reasoningStrength : "");
+    }
+
+    /**
+     * 当前推理强度是否被该模型支持
+     */
+    public boolean isReasoningSupported() {
+        return StringUtils.hasText(supportedReasoningEfforts)
+                && StringUtils.hasText(reasoningStrength)
+                && supportedReasoningEfforts.toLowerCase().contains(reasoningStrength.toLowerCase());
     }
 
     public int resolvedContextWindowTokens() {
@@ -152,6 +191,9 @@ public class AiModelConfig {
     }
 
     private static String resolveProtocol(AiModel model, String provider) {
+        if (model != null && StringUtils.hasText(model.getProtocol())) {
+            return normalizeProtocol(model.getProtocol());
+        }
         String explicitProtocol = resolveExplicitProtocol(model != null ? model.getDefaultParams() : null);
         if (StringUtils.hasText(explicitProtocol)) {
             return explicitProtocol;
@@ -170,6 +212,17 @@ public class AiModelConfig {
             return PROTOCOL_ANTHROPIC;
         }
         return PROTOCOL_OPENAI;
+    }
+
+    private static String normalizeProtocol(String protocol) {
+        String normalized = protocol.trim().toLowerCase();
+        return switch (normalized) {
+            case "anthropic", "messages", "anthropic-compatible", "anthropic_compatible" -> PROTOCOL_ANTHROPIC;
+            case "openai", "chat_completions", "chat-completions", "openai-compatible", "openai_compatible" ->
+                    PROTOCOL_OPENAI;
+            case "gemini", "google" -> PROTOCOL_GEMINI;
+            default -> PROTOCOL_OPENAI;
+        };
     }
 
     private static String resolveExplicitProtocol(Map<String, Object> defaultParams) {

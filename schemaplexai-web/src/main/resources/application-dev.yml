@@ -77,9 +77,12 @@ ai:
 
 # ClickHouse 分析数据库
 clickhouse:
+  enabled: true
   url: jdbc:clickhouse://localhost:8123/schemaplexai
   username: default
-  password: ${CLICKHOUSE_PASSWORD:x}
+  password: ${CLICKHOUSE_PASSWORD:clickhouse123}
+  sync-batch-size: 5000
+  sync-lag-seconds: 10
 
 
 # 日志输出到 schemaplexai-server/logs 目录

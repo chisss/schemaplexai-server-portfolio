@@ -1,10 +1,12 @@
 package com.schemaplexai.service.agent.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
+import com.schemaplexai.common.enums.AmendmentScopeEnum;
 import com.schemaplexai.common.enums.AgentStatusEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentTypeEnum;
@@ -97,6 +99,8 @@ import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.agent.validator.AgentValidator;
 import com.schemaplexai.service.common.EntityValidator;
+import com.schemaplexai.service.agent.system.SystemAgentService;
+import com.schemaplexai.service.agent.tool.ToolApprovalAmendmentService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -114,6 +118,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -125,6 +130,12 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class AgentServiceImpl implements AgentService {
+
+    private static final int EXECUTION_SUMMARY_MAX_LENGTH = 1000;
+    private static final int EXECUTION_DETAIL_MAX_LENGTH = 8000;
+    private static final int EXECUTION_LOG_DETAIL_LIMIT = 200;
+    private static final int EXECUTION_LOG_CONTENT_MAX_LENGTH = 4000;
+    private static final int EXECUTION_LOG_SUMMARY_MAX_LENGTH = 240;
 
     public static final String QUEUED = AgentExecutionStatusEnum.QUEUED.getCode();
     private static final int MAX_AGENT_TOOL_BINDINGS = 20;
@@ -161,6 +172,8 @@ public class AgentServiceImpl implements AgentService {
     private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
     private final ExecutionEventStreamService executionEventStreamService;
     private final SecurityRuntimeGuardService securityRuntimeGuardService;
+    private final ToolApprovalAmendmentService toolApprovalAmendmentService;
+    private final SystemAgentService systemAgentService;
 
     @Override
     public PageResult<AgentVO> listAgents(AgentQueryRequest request) {
@@ -236,6 +249,13 @@ public class AgentServiceImpl implements AgentService {
     }
 
     @Override
+    public AgentVO getSystemAgent() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        Agent agent = systemAgentService.getOrCreateSystemAgent(tenantId);
+        return enrichWithDetails(agent);
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public AgentVO createAgent(AgentCreateRequest request) {
         agentValidator.validateNameUnique(request.getName());
@@ -258,6 +278,9 @@ public class AgentServiceImpl implements AgentService {
     @Transactional(rollbackFor = Exception.class)
     public AgentVO updateAgent(String id, AgentUpdateRequest request) {
         var agent = entityValidator.requireExists(agentMapper, id, ResultCode.AGENT_NOT_FOUND);
+        if (Boolean.TRUE.equals(agent.getIsSystemAgent())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "系统内置Agent不允许修改");
+        }
         agentValidator.validateNotBusy(agent);
         validateAgentModelBinding(request.getAiModelType(), request.getAiModel(), request.getAiModelGroupId());
 
@@ -279,9 +302,30 @@ public class AgentServiceImpl implements AgentService {
         updateEntity.setAiModelType(request.getAiModelType());
         updateEntity.setAiModelGroupId(request.getAiModelGroupId());
         agentMapper.updateById(updateEntity);
+        clearTeamMemberModelOverrideWhenModelChanged(agent, request);
 
         log.info("更新Agent成功: agentId={}", id);
         return getAgentById(id);
+    }
+
+    private void clearTeamMemberModelOverrideWhenModelChanged(Agent agent, AgentUpdateRequest request) {
+        if (AgentTypeEnum.TEAM != AgentTypeEnum.fromCode(agent.getAgentType()) || !isModelBindingChanged(agent, request)) {
+            return;
+        }
+        AgentTeamMember updateMember = new AgentTeamMember();
+        updateMember.setModelOverride(null);
+        agentTeamMemberMapper.update(updateMember,
+                new LambdaUpdateWrapper<AgentTeamMember>()
+                        .eq(AgentTeamMember::getAgentId, agent.getId())
+                        .isNotNull(AgentTeamMember::getModelOverride)
+                        .set(AgentTeamMember::getModelOverride, null));
+        log.info("Team Agent模型配置已变更，清空成员模型覆盖: agentId={}", agent.getId());
+    }
+
+    private boolean isModelBindingChanged(Agent agent, AgentUpdateRequest request) {
+        return !Objects.equals(agent.getAiModel(), request.getAiModel())
+                || !Objects.equals(agent.getAiModelType(), request.getAiModelType())
+                || !Objects.equals(agent.getAiModelGroupId(), request.getAiModelGroupId());
     }
 
     @Override
@@ -292,7 +336,7 @@ public class AgentServiceImpl implements AgentService {
         if (AgentStatusEnum.ACTIVE.getCode().equals(agent.getStatus())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "激活状态的Agent不允许删除");
         }
-        if (agentConfigHandler.isBuiltin(id)) {
+        if (agentConfigHandler.isBuiltin(id) || Boolean.TRUE.equals(agent.getIsSystemAgent())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "内置Agent不允许删除");
         }
 
@@ -1055,9 +1099,28 @@ public class AgentServiceImpl implements AgentService {
             return List.of();
         }
 
+        List<String> skillIds = normalizedSkills.stream()
+                .filter(this::isUuid)
+                .toList();
+        List<String> skillNames = normalizedSkills.stream()
+                .filter(skill -> !isUuid(skill))
+                .toList();
+
         var wrapper = new LambdaQueryWrapper<Skill>()
                 .select(Skill::getId, Skill::getName, Skill::getDisplayName, Skill::getTenantId)
-                .and(w -> w.in(Skill::getId, normalizedSkills).or().in(Skill::getName, normalizedSkills));
+                .and(w -> {
+                    boolean hasId = !skillIds.isEmpty();
+                    boolean hasName = !skillNames.isEmpty();
+                    if (hasId) {
+                        w.in(Skill::getId, skillIds);
+                    }
+                    if (hasId && hasName) {
+                        w.or();
+                    }
+                    if (hasName) {
+                        w.in(Skill::getName, skillNames);
+                    }
+                });
         if (StringUtils.hasText(tenantId)) {
             wrapper.and(w -> w.eq(Skill::getTenantId, tenantId).or().isNull(Skill::getTenantId));
         } else {
@@ -1085,6 +1148,18 @@ public class AgentServiceImpl implements AgentService {
         return normalizedSkills.stream()
                 .map(skill -> displayNameMap.getOrDefault(skill, skill))
                 .toList();
+    }
+
+    private boolean isUuid(String value) {
+        if (!StringUtils.hasText(value)) {
+            return false;
+        }
+        try {
+            UUID.fromString(value.trim());
+            return true;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     private void validateTeamMemberRequest(Agent agent, AgentTeamMemberBatchRequest request) {
@@ -1227,6 +1302,7 @@ public class AgentServiceImpl implements AgentService {
         execution.setConversationId(StringUtils.hasText(dto.getConversationId())
                 ? dto.getConversationId()
                 : UUID.randomUUID().toString().replace("-", ""));
+        execution.setExecutionMode(StringUtils.hasText(dto.getExecutionMode()) ? dto.getExecutionMode() : "auto");
         execution.setStatus(QUEUED);
         agentExecutionMapper.insert(execution);
 
@@ -1300,6 +1376,8 @@ public class AgentServiceImpl implements AgentService {
                 .skillCode(dto.getSkillCode())
                 .outputFormat(dto.getOutputFormat())
                 .stream(Boolean.TRUE.equals(dto.getStream()))
+                .executionMode(execution.getExecutionMode())
+                .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
                 .build());
 
         log.info("Agent执行任务已入队: agentId={}, executionId={}", agentId, execution.getId());
@@ -1348,7 +1426,7 @@ public class AgentServiceImpl implements AgentService {
 
         var result = agentExecutionMapper.selectPage(page, wrapper);
         var voList = result.getRecords().stream()
-                .map(this::toExecutionVO)
+                .map(this::toExecutionSummaryVO)
                 .toList();
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
     }
@@ -1367,15 +1445,56 @@ public class AgentServiceImpl implements AgentService {
         if (StringUtils.hasText(execution.getTeamMemberId())) {
             vo.setTeamMemberRoleName(resolveMemberRoleName(execution.getTeamMemberId()));
         }
-        // 附加执行日志
-        var logs = agentExecutionLogMapper.selectList(
-                new LambdaQueryWrapper<AgentExecutionLog>()
-                        .eq(AgentExecutionLog::getExecutionId, executionId)
-                        .orderByAsc(AgentExecutionLog::getCreatedAt));
-        vo.setLogs(logs.stream().map(this::toLogVO).toList());
+        vo.setLogs(null);
         vo.setChildExecutions(buildChildExecutionVOs(execution));
         fillExecutionDiagnostics(vo, execution);
         return vo;
+    }
+
+    @Override
+    public PageResult<AgentExecutionLogVO> pageExecutionLogs(String agentId, String executionId, AgentExecutionQueryDTO query) {
+        requireExecution(agentId, executionId);
+        int pageNo = query == null || query.getPage() == null || query.getPage() < 1 ? 1 : query.getPage();
+        int pageSize = query == null || query.getSize() == null || query.getSize() < 1
+                ? 20 : Math.min(query.getSize(), 100);
+        Page<AgentExecutionLog> page = new Page<>(pageNo, pageSize);
+        Page<AgentExecutionLog> result = agentExecutionLogMapper.selectPage(page,
+                new LambdaQueryWrapper<AgentExecutionLog>()
+                        .select(AgentExecutionLog::getId, AgentExecutionLog::getExecutionId,
+                                AgentExecutionLog::getLogLevel, AgentExecutionLog::getLogType,
+                                AgentExecutionLog::getRoundNum, AgentExecutionLog::getToolName,
+                                AgentExecutionLog::getContent, AgentExecutionLog::getTokenDelta,
+                                AgentExecutionLog::getElapsedMs, AgentExecutionLog::getCreatedAt)
+                        .eq(AgentExecutionLog::getExecutionId, executionId)
+                        .orderByDesc(AgentExecutionLog::getCreatedAt));
+        List<AgentExecutionLogVO> records = result.getRecords().stream()
+                .map(this::toLogSummaryVO)
+                .toList();
+        return new PageResult<>(records, result.getTotal(), result.getCurrent(), result.getSize());
+    }
+
+    @Override
+    public AgentExecutionLogVO getExecutionLog(String agentId, String executionId, String logId) {
+        requireExecution(agentId, executionId);
+        AgentExecutionLog log = agentExecutionLogMapper.selectOne(new LambdaQueryWrapper<AgentExecutionLog>()
+                .eq(AgentExecutionLog::getId, logId)
+                .eq(AgentExecutionLog::getExecutionId, executionId));
+        if (log == null) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "执行日志不存在");
+        }
+        return toLogVO(log);
+    }
+
+    private AgentExecution requireExecution(String agentId, String executionId) {
+        entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
+        AgentExecution execution = agentExecutionMapper.selectOne(new LambdaQueryWrapper<AgentExecution>()
+                .select(AgentExecution::getId, AgentExecution::getAgentId)
+                .eq(AgentExecution::getId, executionId)
+                .eq(AgentExecution::getAgentId, agentId));
+        if (execution == null) {
+            throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
+        }
+        return execution;
     }
 
     @Override
@@ -1388,6 +1507,13 @@ public class AgentServiceImpl implements AgentService {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
         var agent = entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
+
+        // 处理审批决策
+        if (StringUtils.hasText(dto.getApprovalDecision())) {
+            handleApprovalDecision(agent, execution, dto);
+            return;
+        }
+
         if (AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())
                 || AgentTypeEnum.TEAM == AgentTypeEnum.fromCode(agent.getAgentType())) {
             agentRuntimeOrchestrator.resume(executionId, dto);
@@ -1400,6 +1526,48 @@ public class AgentServiceImpl implements AgentService {
                 .payload(dto.getOptions())
                 .timestamp(Instant.now())
                 .build());
+    }
+
+    private void handleApprovalDecision(Agent agent, AgentExecution execution, AgentExecutionInputDTO dto) {
+        String decision = dto.getApprovalDecision();
+        String executionId = execution.getId();
+        String tenantId = agent.getTenantId();
+
+        switch (decision) {
+            case "approve", "approve_always" -> {
+                if ("approve_always".equals(decision) && StringUtils.hasText(dto.getToolCode())) {
+                    toolApprovalAmendmentService.createAmendment(
+                            tenantId, agent.getId(), dto.getToolCode(),
+                            dto.getToolCommand(), SecurityUtil.getCurrentUserId(),
+                            AmendmentScopeEnum.AGENT, null);
+                    log.info("渐进信任: 工具[{}]已设为始终批准", dto.getToolCode());
+                }
+                executionEventStreamService.publish(AgentExecutionEvent.builder()
+                        .eventType(AgentExecutionEventTypeEnum.APPROVAL_GRANTED.getCode())
+                        .executionId(executionId)
+                        .message("用户已批准工具: " + dto.getToolCode())
+                        .timestamp(Instant.now())
+                        .build());
+                if (!StringUtils.hasText(dto.getMessage())) {
+                    dto.setMessage("用户已批准执行工具: " + dto.getToolCode());
+                }
+                agentRuntimeOrchestrator.resume(executionId, dto);
+            }
+            case "deny" -> {
+                executionEventStreamService.publish(AgentExecutionEvent.builder()
+                        .eventType(AgentExecutionEventTypeEnum.APPROVAL_DENIED.getCode())
+                        .executionId(executionId)
+                        .message("用户已拒绝工具: " + dto.getToolCode())
+                        .timestamp(Instant.now())
+                        .build());
+                if (!StringUtils.hasText(dto.getMessage())) {
+                    dto.setMessage("用户已拒绝执行工具: " + dto.getToolCode() + "，请调整方案继续。");
+                }
+                agentRuntimeOrchestrator.resume(executionId, dto);
+            }
+            default -> throw new BusinessException(ResultCode.BAD_REQUEST,
+                    "无效的审批决策: " + decision);
+        }
     }
 
     @Override
@@ -1467,7 +1635,7 @@ public class AgentServiceImpl implements AgentService {
         vo.setTokenInput(execution.getTokenInput());
         vo.setTokenOutput(execution.getTokenOutput());
         vo.setErrorMessage(execution.getErrorMessage());
-        vo.setOutputResult(execution.getOutputResult());
+        vo.setOutputResult(truncateText(execution.getOutputResult(), EXECUTION_DETAIL_MAX_LENGTH));
         vo.setParentExecutionId(execution.getParentExecutionId());
         vo.setTeamMemberId(execution.getTeamMemberId());
         vo.setGraphThreadId(execution.getGraphThreadId());
@@ -1475,6 +1643,17 @@ public class AgentServiceImpl implements AgentService {
         vo.setSandboxPolicySnapshot(execution.getSandboxPolicySnapshot());
         vo.setCreatedAt(execution.getCreatedAt());
         vo.setCompletedAt(execution.getCompletedAt());
+        return vo;
+    }
+
+    private AgentExecutionVO toExecutionSummaryVO(AgentExecution execution) {
+        var vo = toExecutionVO(execution);
+        vo.setInputPrompt(truncateText(vo.getInputPrompt(), EXECUTION_SUMMARY_MAX_LENGTH));
+        vo.setOutputResult(truncateText(vo.getOutputResult(), EXECUTION_SUMMARY_MAX_LENGTH));
+        vo.setErrorMessage(truncateText(vo.getErrorMessage(), EXECUTION_SUMMARY_MAX_LENGTH));
+        vo.setSandboxPolicySnapshot(null);
+        vo.setLogs(null);
+        vo.setChildExecutions(null);
         return vo;
     }
 
@@ -1534,12 +1713,11 @@ public class AgentServiceImpl implements AgentService {
             return List.of();
         }
         Map<String, String> memberRoleNameMap = resolveMemberRoleNameMap(childExecutions);
-        Map<String, List<AgentExecutionLogVO>> childLogMap = resolveChildExecutionLogMap(childExecutions);
         return childExecutions.stream()
                 .map(childExecution -> toChildExecutionVO(
                         childExecution,
                         memberRoleNameMap.get(childExecution.getTeamMemberId()),
-                        childLogMap.getOrDefault(childExecution.getId(), List.of())
+                        List.of()
                 ))
                 .toList();
     }
@@ -1599,7 +1777,7 @@ public class AgentServiceImpl implements AgentService {
         vo.setStatus(execution.getStatus());
         vo.setModel(execution.getAiModel());
         vo.setErrorMessage(execution.getErrorMessage());
-        vo.setOutputResult(execution.getOutputResult());
+        vo.setOutputResult(truncateText(execution.getOutputResult(), EXECUTION_SUMMARY_MAX_LENGTH));
         vo.setLogs(logs);
         vo.setCreatedAt(execution.getCreatedAt());
         vo.setCompletedAt(execution.getCompletedAt());
@@ -1608,15 +1786,30 @@ public class AgentServiceImpl implements AgentService {
 
     private AgentExecutionLogVO toLogVO(AgentExecutionLog log) {
         var vo = new AgentExecutionLogVO();
+        vo.setLogId(log.getId());
         vo.setLogLevel(log.getLogLevel());
         vo.setLogType(log.getLogType());
         vo.setRoundNum(log.getRoundNum());
         vo.setToolName(log.getToolName());
-        vo.setContent(log.getContent());
+        vo.setContent(truncateText(log.getContent(), EXECUTION_LOG_CONTENT_MAX_LENGTH));
+        vo.setSummary(truncateText(log.getContent(), EXECUTION_LOG_SUMMARY_MAX_LENGTH));
         vo.setTokenDelta(log.getTokenDelta());
         vo.setElapsedMs(log.getElapsedMs());
         vo.setCreatedAt(log.getCreatedAt());
         return vo;
+    }
+
+    private AgentExecutionLogVO toLogSummaryVO(AgentExecutionLog log) {
+        var vo = toLogVO(log);
+        vo.setContent(null);
+        return vo;
+    }
+
+    private String truncateText(String text, int maxLength) {
+        if (!StringUtils.hasText(text) || text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength) + "\n...[内容过长，已截断，请缩小执行范围或查看分段日志]";
     }
 
     // ==================== Agent 专属指令 ====================

@@ -21,6 +21,7 @@ import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
 import com.schemaplexai.model.vo.agent.AgentExecuteResultVO;
 import com.schemaplexai.model.vo.agent.AgentExecutionVO;
+import com.schemaplexai.model.vo.agent.AgentExecutionLogVO;
 import com.schemaplexai.model.vo.agent.AgentInstructionsCheckVO;
 import com.schemaplexai.model.vo.agent.AgentTeamMemberVO;
 import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
@@ -81,6 +82,12 @@ public class AgentController {
     @Operation(summary = "获取所有Agent（不分页，用于下拉选择）")
     public R<List<AgentVO>> listAll() {
         return R.ok(agentService.listAllAgents());
+    }
+
+    @GetMapping("/system/default")
+    @Operation(summary = "获取系统默认Agent")
+    public R<AgentVO> getSystemAgent() {
+        return R.ok(agentService.getSystemAgent());
     }
 
     @GetMapping("/{id}")
@@ -257,6 +264,22 @@ public class AgentController {
     public R<AgentExecutionVO> getExecution(@PathVariable String id,
                                              @PathVariable String execId) {
         return R.ok(agentService.getExecution(id, execId));
+    }
+
+    @GetMapping("/{id}/executions/{execId}/logs")
+    @Operation(summary = "分页查询执行日志概要")
+    public R<PageResult<AgentExecutionLogVO>> pageExecutionLogs(@PathVariable String id,
+                                                               @PathVariable String execId,
+                                                               AgentExecutionQueryDTO query) {
+        return R.ok(agentService.pageExecutionLogs(id, execId, query));
+    }
+
+    @GetMapping("/{id}/executions/{execId}/logs/{logId}")
+    @Operation(summary = "获取执行日志详情")
+    public R<AgentExecutionLogVO> getExecutionLog(@PathVariable String id,
+                                                 @PathVariable String execId,
+                                                 @PathVariable String logId) {
+        return R.ok(agentService.getExecutionLog(id, execId, logId));
     }
 
     @PostMapping("/{id}/executions/{execId}/stop")

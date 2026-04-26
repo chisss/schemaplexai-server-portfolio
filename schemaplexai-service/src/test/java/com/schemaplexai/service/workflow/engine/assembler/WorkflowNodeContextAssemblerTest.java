@@ -87,6 +87,22 @@ class WorkflowNodeContextAssemblerTest {
     }
 
     @Test
+    void shouldIncludeBusinessFactVariablesInNodeInputData() {
+        WorkflowInstance instance = buildInstance();
+        instance.getVariables().put("originalRequirement", "请验证营销场景核心能力");
+        instance.getVariables().put("requirementsDoc", "需求文档摘要");
+        instance.getVariables().put("designDoc", "设计文档摘要");
+
+        Map<String, Object> inputData = assembler.buildInputData(instance, Map.of());
+
+        assertThat(inputData).containsEntry("workflowGoal", "输出完整的技术设计与测试规划文档");
+        assertThat(inputData).containsKey("originalRequirement");
+        assertThat(inputData).containsKey("requirementsDoc");
+        assertThat(inputData).containsKey("designDoc");
+        assertThat(inputData).containsEntry("_instanceId", "wf-1");
+    }
+
+    @Test
     void shouldResolveNodeSpecificArtifactPathForRequirementsNode() {
         WorkflowInstance instance = buildInstance();
         Map<String, Object> config = Map.of(
@@ -175,6 +191,33 @@ class WorkflowNodeContextAssemblerTest {
 
         assertThat(prompt).contains("目标产物: docs/AIP-101-test-plan.md");
         assertThat(prompt).contains("测试规划必须明确引用代码开发阶段的真实改动文件");
+    }
+
+    @Test
+    void shouldUseCustomerFacingConstraintsForDeliveryArtifacts() {
+        WorkflowInstance instance = buildInstance();
+        Map<String, Object> config = Map.of(
+                "instructionSource", "upstream",
+                "artifactTitle", "SchemaPlexAI 知识内容生产客户演示方案",
+                "artifactOutputPath", "deliveries/blogger/customer-demo.md",
+                "artifactDeliveryType", "feishu_doc",
+                "outputVariableKey", "bloggerDeliveryResult"
+        );
+
+        String prompt = assembler.buildAgentExecutionPrompt(
+                instance,
+                "方案交付",
+                config,
+                Map.of("result", "请根据客户诊断结果输出最终演示方案")
+        );
+
+        assertThat(prompt).contains("目标产物: deliveries/blogger/customer-demo.md");
+        assertThat(prompt).contains("交付方案");
+        assertThat(prompt).contains("预期业务价值");
+        assertThat(prompt).contains("客户交付节点优先复用上游诊断结论");
+        assertThat(prompt).doesNotContain("当前仓库已确认现状");
+        assertThat(prompt).doesNotContain("仓库中未发现");
+        assertThat(prompt).doesNotContain("当前步骤未生成");
     }
 
     private WorkflowInstance buildInstance() {

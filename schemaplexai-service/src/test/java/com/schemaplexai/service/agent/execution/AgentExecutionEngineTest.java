@@ -7,12 +7,16 @@ import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
+import com.schemaplexai.service.agent.hook.AgentHookExecutor;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jResolution;
+import com.schemaplexai.service.ai.ModelMetricsTracker;
+import com.schemaplexai.service.ai.MultimodalMessageBuilder;
+import com.schemaplexai.service.monitor.AgentTraceService;
+import com.schemaplexai.service.monitor.RouteAnalysisService;
 import com.schemaplexai.service.quality.detector.QualityDetector;
 import com.schemaplexai.service.quality.orchestrator.QualityOrchestrator;
-import com.schemaplexai.service.storage.DocumentStorageService;
-import com.schemaplexai.service.util.FileContentExtractor;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -24,6 +28,7 @@ import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -52,7 +57,7 @@ class AgentExecutionEngineTest {
             Thread.sleep(200L);
             return ChatResponse.builder().aiMessage(AiMessage.from("ok")).build();
         });
-        AgentModelInvoker invoker = new AgentModelInvoker();
+        AgentModelInvoker invoker = buildModelInvoker();
 
         assertThatThrownBy(() -> invoker.invokeWithTimeout(
                 new LangChain4jResolution(chatModel, null),
@@ -65,7 +70,7 @@ class AgentExecutionEngineTest {
 
     @Test
     void shouldUseConfiguredModelTimeoutWhenAvailable() {
-        AgentModelInvoker invoker = new AgentModelInvoker();
+        AgentModelInvoker invoker = buildModelInvoker();
         AiModelConfig config = AiModelConfig.builder().timeoutSeconds(180).build();
 
         long timeoutMillis = invoker.resolveTimeoutMillis(new LangChain4jResolution(null, config), 60_000L);
@@ -80,7 +85,7 @@ class AgentExecutionEngineTest {
             Thread.sleep(120L);
             return ChatResponse.builder().aiMessage(AiMessage.from("ok")).build();
         });
-        AgentModelInvoker invoker = new AgentModelInvoker();
+        AgentModelInvoker invoker = buildModelInvoker();
         AgentEngineParams params = AgentEngineParams.builder()
                 .modelCallTimeoutMillis(50L)
                 .maxModelRetries(0)
@@ -110,7 +115,7 @@ class AgentExecutionEngineTest {
         when(healthyModel.chat(any(ChatRequest.class)))
                 .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("healthy")).build());
 
-        AgentModelInvoker invoker = new AgentModelInvoker();
+        AgentModelInvoker invoker = buildModelInvoker();
         invoker.clearTemporaryUnavailableModels();
         AgentEngineParams params = AgentEngineParams.builder()
                 .modelCallTimeoutMillis(200L)
@@ -163,7 +168,7 @@ class AgentExecutionEngineTest {
         when(healthyModel.chat(any(ChatRequest.class)))
                 .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("healthy")).build());
 
-        AgentModelInvoker invoker = new AgentModelInvoker();
+        AgentModelInvoker invoker = buildModelInvoker();
         invoker.clearTemporaryUnavailableModels();
         AgentEngineParams params = AgentEngineParams.builder()
                 .modelCallTimeoutMillis(50L)
@@ -215,7 +220,7 @@ class AgentExecutionEngineTest {
         when(healthyModel.chat(any(ChatRequest.class)))
                 .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("healthy")).build());
 
-        AgentModelInvoker invoker = new AgentModelInvoker();
+        AgentModelInvoker invoker = buildModelInvoker();
         invoker.clearTemporaryUnavailableModels();
         AgentEngineParams params = AgentEngineParams.builder()
                 .modelCallTimeoutMillis(200L)
@@ -268,7 +273,12 @@ class AgentExecutionEngineTest {
 
         AtomicInteger fallbackAttempts = new AtomicInteger();
         AtomicLong capturedTimeoutMillis = new AtomicLong();
-        AgentModelInvoker invoker = new AgentModelInvoker() {
+        AgentModelInvoker invoker = new AgentModelInvoker(
+                new AgentHookExecutor(List.of(), null),
+                mock(ModelMetricsTracker.class),
+                mock(RouteAnalysisService.class),
+                mock(AgentTraceService.class)
+        ) {
             @Override
             public ChatResponse invokeWithTimeout(LangChain4jResolution resolution,
                                                   ChatRequest request,
@@ -324,6 +334,86 @@ class AgentExecutionEngineTest {
         assertThat(fallbackAttempts.get()).isEqualTo(1);
         assertThat(capturedTimeoutMillis.get()).isEqualTo(TimeUnit.SECONDS.toMillis(30));
         verify(healthyModel, times(1)).chat(any(ChatRequest.class));
+    }
+
+    @Test
+    void shouldFallbackWhenCandidateReturnsBlankResponse() throws Exception {
+        ChatModel blankModel = mock(ChatModel.class);
+        when(blankModel.chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("")).build());
+        ChatModel healthyModel = mock(ChatModel.class);
+        when(healthyModel.chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("healthy")).build());
+
+        AgentModelInvoker invoker = buildModelInvoker();
+        invoker.clearTemporaryUnavailableModels();
+        AgentEngineParams params = AgentEngineParams.builder()
+                .modelCallTimeoutMillis(200L)
+                .maxModelRetries(0)
+                .build();
+        ChatRequest request = ChatRequest.builder()
+                .messages(List.of(UserMessage.from("请输出结果")))
+                .toolSpecifications(List.of())
+                .build();
+        AgentLogService agentLogService = mock(AgentLogService.class);
+        LangChain4jResolution blankResolution = new LangChain4jResolution(
+                blankModel,
+                AiModelConfig.builder().provider("openai").modelId("gpt-5.4").timeoutSeconds(1).build()
+        );
+        LangChain4jResolution healthyResolution = new LangChain4jResolution(
+                healthyModel,
+                AiModelConfig.builder().provider("anthropic").modelId("claude-sonnet-4-6").timeoutSeconds(1).build()
+        );
+
+        AgentModelInvoker.ModelCallResult firstCall = invoker.invokeChainWithRetry(
+                List.of(blankResolution, healthyResolution),
+                request,
+                params,
+                "exec-blank-1", "agent-1", "tenant-1", 1, System.currentTimeMillis(),
+                agentLogService
+        );
+        AgentModelInvoker.ModelCallResult secondCall = invoker.invokeChainWithRetry(
+                List.of(blankResolution, healthyResolution),
+                request,
+                params,
+                "exec-blank-2", "agent-1", "tenant-1", 2, System.currentTimeMillis(),
+                agentLogService
+        );
+
+        assertThat(firstCall.response().aiMessage().text()).isEqualTo("healthy");
+        assertThat(secondCall.response().aiMessage().text()).isEqualTo("healthy");
+        verify(blankModel, times(1)).chat(any(ChatRequest.class));
+        verify(healthyModel, times(2)).chat(any(ChatRequest.class));
+        invoker.clearTemporaryUnavailableModels();
+    }
+
+    @Test
+    void shouldAllowToolOnlyResponseWithoutBlankFallback() throws Exception {
+        ChatModel toolModel = mock(ChatModel.class);
+        when(toolModel.chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from(List.of(
+                        ToolExecutionRequest.builder().id("call-1").name("sys_read").arguments("{}").build()
+                ))).build());
+
+        AgentModelInvoker invoker = buildModelInvoker();
+        ChatRequest request = ChatRequest.builder()
+                .messages(List.of(UserMessage.from("请读取文件")))
+                .toolSpecifications(List.of())
+                .build();
+
+        AgentModelInvoker.ModelCallResult result = invoker.invokeChainWithRetry(
+                List.of(new LangChain4jResolution(
+                        toolModel,
+                        AiModelConfig.builder().provider("openai").modelId("tool-model").timeoutSeconds(1).build()
+                )),
+                request,
+                AgentEngineParams.builder().modelCallTimeoutMillis(200L).maxModelRetries(0).build(),
+                "exec-tool-only", "agent-1", "tenant-1", 1, System.currentTimeMillis(),
+                mock(AgentLogService.class)
+        );
+
+        assertThat(result.response().aiMessage().hasToolExecutionRequests()).isTrue();
+        verify(toolModel, times(1)).chat(any(ChatRequest.class));
     }
 
     // =========================================================================
@@ -726,11 +816,22 @@ class AgentExecutionEngineTest {
         AgentLoopShadowReviewService shadowReviewService = new AgentLoopShadowReviewService(checker, Runnable::run);
         AgentLoopCompletionHandler completionHandler = new AgentLoopCompletionHandler(null, checker, qualityOrchestrator);
         AgentLoopToolHandler toolHandler = new AgentLoopToolHandler(new ObjectMapper());
-        AgentModelInvoker modelInvoker = new AgentModelInvoker();
+        AgentModelInvoker modelInvoker = buildModelInvoker();
         return new AgentExecutionEngine(
                 agentLogService, null, null, null, new ObjectMapper(),
                 eventStreamService, null, null, null,
                 modelInvoker, toolHandler, completionHandler, checker, shadowReviewService, null,
-                mock(DocumentStorageService.class), mock(FileContentExtractor.class));
+                null, mock(AgentTraceService.class), new AgentHookExecutor(List.of(), null),
+                mock(AgentContextBudgetService.class), mock(MultimodalMessageBuilder.class),
+                mock(ObjectProvider.class), mock(ExecutionModeInterceptor.class));
+    }
+
+    private AgentModelInvoker buildModelInvoker() {
+        return new AgentModelInvoker(
+                new AgentHookExecutor(List.of(), null),
+                mock(ModelMetricsTracker.class),
+                mock(RouteAnalysisService.class),
+                mock(AgentTraceService.class)
+        );
     }
 }

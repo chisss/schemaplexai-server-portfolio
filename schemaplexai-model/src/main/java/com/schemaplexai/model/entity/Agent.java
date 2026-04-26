@@ -60,4 +60,10 @@ public class Agent extends BaseEntity {
 
     /** 绑定的模型组ID（aiModelType=model_group时有效） */
     private String aiModelGroupId;
+
+    /** 是否系统内置Agent（不可编辑/删除） */
+    private Boolean isSystemAgent;
+
+    /** 系统Agent唯一编码，如 default_assistant */
+    private String systemAgentCode;
 }

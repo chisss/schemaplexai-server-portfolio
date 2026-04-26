@@ -3,6 +3,7 @@ package com.schemaplexai.service.workflow.engine;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
+import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.RoleMapper;
 import com.schemaplexai.dao.mapper.SpecMapper;
@@ -31,6 +32,9 @@ import com.schemaplexai.service.workflow.runtime.WorkflowNotificationService.Res
 import com.schemaplexai.service.workflow.runtime.WorkflowArtifactService;
 import com.schemaplexai.service.workflow.runtime.WorkflowNotificationService;
 import com.schemaplexai.service.workflow.flowable.FlowableWorkflowBridge;
+import com.schemaplexai.service.ai.ImageGenerationService;
+import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.service.integration.notification.model.NotificationMessage;
 import com.schemaplexai.model.vo.workflow.ReviewSessionVO;
 import org.junit.jupiter.api.Test;
@@ -64,12 +68,13 @@ import static org.mockito.Mockito.when;
 class WorkflowNodeEngineTest {
 
     @Test
-    void shouldMapFailedWorkflowStatusToFailedSpecStatus() throws Exception {
+    void shouldBuildShortImagePromptFromRequirementAndIgnoreLongAgentOutput() throws Exception {
         WorkflowNodeEngine engine = new WorkflowNodeEngine(
                 mock(WorkflowInstanceMapper.class),
                 mock(WorkflowNodeExecutionMapper.class),
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -86,7 +91,64 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
+        );
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setName("短Prompt复测工作流");
+        instance.setVariables(Map.of(
+                "originalRequirement", "生成一张SchemaPlexAI产品发布会海报：AI Agent协同、工作流编排、质量检测和最终交付图片。"
+        ));
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setNodeId("illustration_team");
+        nodeExecution.setNodeLabel("插图生成Team Agent");
+        String longAgentOutput = "java.io.EOFException request_id:abc-123 https://example.com/a.png?X-Tos-Signature=secret "
+                + "上下文过长".repeat(500);
+
+        Method method = WorkflowNodeEngine.class.getDeclaredMethod(
+                "buildRequiredImagePrompt", WorkflowInstance.class, WorkflowNodeExecution.class, Map.class, String.class);
+        method.setAccessible(true);
+        String prompt = (String) method.invoke(engine, instance, nodeExecution, Map.of(), longAgentOutput);
+
+        assertThat(prompt.length()).isLessThanOrEqualTo(800);
+        assertThat(prompt).contains("SchemaPlexAI产品发布会海报");
+        assertThat(prompt).doesNotContain("EOFException");
+        assertThat(prompt).doesNotContain("request_id");
+        assertThat(prompt).doesNotContain("X-Tos-Signature");
+        assertThat(prompt).doesNotContain("上下文过长上下文过长上下文过长");
+    }
+
+    @Test
+    void shouldMapFailedWorkflowStatusToFailedSpecStatus() throws Exception {
+        WorkflowNodeEngine engine = new WorkflowNodeEngine(
+                mock(WorkflowInstanceMapper.class),
+                mock(WorkflowNodeExecutionMapper.class),
+                mock(AgentExecutionMapper.class),
+                mock(AgentMapper.class),
+                mock(AiModelMapper.class),
+                mock(SpecMapper.class),
+                mock(RoleMapper.class),
+                mock(UserRoleMapper.class),
+                mock(ObjectProvider.class),
+                mock(AgentContextPublisher.class),
+                mock(RabbitTemplate.class),
+                mock(DeviationAnalysisHandler.class),
+                mock(QualityReportHandler.class),
+                mock(WorkflowNodeContextAssembler.class),
+                mock(WorkflowArtifactService.class),
+                mock(WorkflowNotificationService.class),
+                mock(ObjectProvider.class),
+                mock(InAppMessageService.class),
+                mock(BuiltinQualityAssuranceService.class),
+                mock(QualityIssueFeedbackService.class),
+                mock(ObjectProvider.class),
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         Method method = WorkflowNodeEngine.class.getDeclaredMethod(
@@ -105,6 +167,7 @@ class WorkflowNodeEngineTest {
                 mock(WorkflowNodeExecutionMapper.class),
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -121,7 +184,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         Method method = WorkflowNodeEngine.class.getDeclaredMethod(
@@ -171,6 +237,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 agentExecutionMapper,
                 agentMapper,
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -187,7 +254,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 securityProvider,
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -237,6 +307,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 agentExecutionMapper,
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -253,7 +324,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -326,6 +400,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 agentExecutionMapper,
                 agentMapper,
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -342,7 +417,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 securityProvider,
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -417,6 +495,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 agentExecutionMapper,
                 agentMapper,
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -433,7 +512,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 securityProvider,
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -480,6 +562,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -496,7 +579,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -540,6 +626,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -556,7 +643,10 @@ class WorkflowNodeEngineTest {
                 builtinQualityAssuranceService,
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         ));
         doNothing().when(engine).advanceWorkflow(eq("wf-1"), eq("node-agent"), anyMap());
 
@@ -594,6 +684,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -610,7 +701,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                flowableWorkflowBridge
+                flowableWorkflowBridge,
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         ));
         doNothing().when(engine).advanceWorkflow(eq("wf-1"), eq("test_planning"), anyMap());
 
@@ -669,6 +763,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -685,7 +780,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         ));
         doNothing().when(engine).advanceWorkflow(eq("wf-1"), eq("code_development"), anyMap());
 
@@ -752,6 +850,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -768,7 +867,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                flowableWorkflowBridge
+                flowableWorkflowBridge,
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         ));
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -828,6 +930,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -844,7 +947,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         ));
         doNothing().when(engine).advanceWorkflow(eq("wf-skip"), eq("doc_generation"), anyMap());
 
@@ -906,6 +1012,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -922,7 +1029,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -1002,6 +1112,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -1018,7 +1129,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -1143,6 +1257,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 mock(AgentExecutionMapper.class),
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 specMapper,
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -1159,7 +1274,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -1223,6 +1341,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 agentExecutionMapper,
                 mock(AgentMapper.class),
+                mock(AiModelMapper.class),
                 specMapper,
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -1239,7 +1358,10 @@ class WorkflowNodeEngineTest {
                 builtinQualityAssuranceService,
                 qualityIssueFeedbackService,
                 mock(ObjectProvider.class),
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();
@@ -1349,6 +1471,7 @@ class WorkflowNodeEngineTest {
                 nodeExecutionMapper,
                 agentExecutionMapper,
                 agentMapper,
+                mock(AiModelMapper.class),
                 mock(SpecMapper.class),
                 mock(RoleMapper.class),
                 mock(UserRoleMapper.class),
@@ -1365,7 +1488,10 @@ class WorkflowNodeEngineTest {
                 mock(BuiltinQualityAssuranceService.class),
                 mock(QualityIssueFeedbackService.class),
                 securityProvider,
-                mock(FlowableWorkflowBridge.class)
+                mock(FlowableWorkflowBridge.class),
+                mock(ImageGenerationService.class),
+                mock(BuiltinToolExecutor.class),
+                new ObjectMapper()
         );
 
         WorkflowInstance instance = new WorkflowInstance();

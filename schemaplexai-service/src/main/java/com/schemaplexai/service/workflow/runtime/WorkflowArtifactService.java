@@ -19,6 +19,7 @@ import com.schemaplexai.service.artifact.ArtifactService;
 import com.schemaplexai.service.integration.feishu.FeishuDocDeliveryService;
 import com.schemaplexai.service.integration.git.GitOperationService;
 import com.schemaplexai.service.spec.handler.SpecVersionHandler;
+import com.schemaplexai.service.workflow.ArtifactSceneResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -378,6 +379,10 @@ public class WorkflowArtifactService {
         String fromConfig = readConfig(nodeConfig, "artifactDocType");
         if (StringUtils.hasText(fromConfig)) {
             return fromConfig.trim();
+        }
+        String inferredDocType = ArtifactSceneResolver.inferArtifactDocType(nodeConfig);
+        if (StringUtils.hasText(inferredDocType)) {
+            return inferredDocType;
         }
         if (nodeExec != null && "doc_gen".equalsIgnoreCase(nodeExec.getNodeId())) {
             return getVariable(instance, "artifactDocType", null);
@@ -746,6 +751,13 @@ public class WorkflowArtifactService {
                                                             Integer docVersion,
                                                             Map<String, Object> runtimeMetadata) {
         String cleanedMarkdown = stripRuntimeMetadataBlock(markdown);
+        if (ArtifactSceneResolver.isCustomerDelivery(nodeConfig)
+                || "delivery".equalsIgnoreCase(defaultIfBlank(docType, ""))) {
+            if (!StringUtils.hasText(cleanedMarkdown)) {
+                return cleanedMarkdown;
+            }
+            return cleanedMarkdown.trim() + System.lineSeparator();
+        }
         String metadataBlock = buildRuntimeMetadataBlock(instance, nodeExec, docType, docVersion, runtimeMetadata);
         if (!StringUtils.hasText(metadataBlock)) {
             return cleanedMarkdown;

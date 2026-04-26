@@ -21,6 +21,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * AI 模型路由器
@@ -38,6 +40,7 @@ public class AIModelRouter {
     private final AiModelRouteMapper aiModelRouteMapper;
     private final AiModelGroupItemMapper groupItemMapper;
     private final ModelLoadBalancer modelLoadBalancer;
+    private final ModelMetricsTracker modelMetricsTracker;
 
     /**
      * 根据 Agent 配置解析模型（支持单个模型和模型组）
@@ -65,6 +68,10 @@ public class AIModelRouter {
      * 解析单模型的降级链路
      */
     public List<LangChain4jResolution> resolveRouteChain(String modelDisplayName) {
+        return resolveRouteChain(modelDisplayName, null);
+    }
+
+    public List<LangChain4jResolution> resolveRouteChain(String modelDisplayName, String reasoningStrength) {
         AiModel primaryModel = requireActiveModelByName(modelDisplayName);
         LinkedHashSet<String> modelIds = new LinkedHashSet<>();
         modelIds.add(primaryModel.getId());
@@ -91,7 +98,7 @@ public class AIModelRouter {
 
         List<LangChain4jResolution> chain = new ArrayList<>();
         for (AiModel model : orderedModels) {
-            chain.add(buildResolution(model));
+            chain.add(buildResolution(model, reasoningStrength));
         }
         return chain;
     }
@@ -240,7 +247,15 @@ public class AIModelRouter {
             return candidates;
         }
         AiModel primary = candidates.getFirst();
-        if (isConnectivityHealthy(primary) || candidates.stream().skip(1).noneMatch(this::isConnectivityHealthy)) {
+        Map<String, ModelMetricsTracker.RuntimeMetrics> metricsMap = candidates.stream()
+                .filter(model -> model != null && StringUtils.hasText(model.getId()))
+                .collect(java.util.stream.Collectors.toMap(
+                        AiModel::getId,
+                        model -> modelMetricsTracker.loadMetrics(model.getId()),
+                        (left, right) -> left
+                ));
+        if (isRouteHealthy(primary, metricsMap)
+                || candidates.stream().skip(1).noneMatch(model -> isRouteHealthy(model, metricsMap))) {
             return candidates;
         }
 
@@ -249,7 +264,10 @@ public class AIModelRouter {
             indexedModels.add(new IndexedModel(i, candidates.get(i)));
         }
         indexedModels.sort(Comparator
-                .comparingInt((IndexedModel item) -> connectivityPriority(item.model()))
+                .comparingInt((IndexedModel item) -> runtimeHealthPriority(item.model(), metricsMap))
+                .thenComparingDouble(item -> runtimeErrorRate(item.model(), metricsMap))
+                .thenComparingLong(item -> runtimeLatency(item.model(), metricsMap))
+                .thenComparingInt(item -> connectivityPriority(item.model()))
                 .thenComparingInt(item -> latencyPriority(item.model()))
                 .thenComparingInt(IndexedModel::index));
 
@@ -264,6 +282,53 @@ public class AIModelRouter {
 
     private boolean isConnectivityHealthy(AiModel model) {
         return model != null && "success".equalsIgnoreCase(model.getLastTestStatus());
+    }
+
+    private boolean isRouteHealthy(AiModel model, Map<String, ModelMetricsTracker.RuntimeMetrics> metricsMap) {
+        if (model == null) {
+            return false;
+        }
+        ModelMetricsTracker.RuntimeMetrics metrics = metricsMap.get(model.getId());
+        if (metrics == null || metrics.requestCount1m() == 0) {
+            return isConnectivityHealthy(model);
+        }
+        return metrics.errorRate1m() < 20D && metrics.p95LatencyMs() < 30_000L;
+    }
+
+    private int runtimeHealthPriority(AiModel model, Map<String, ModelMetricsTracker.RuntimeMetrics> metricsMap) {
+        if (model == null) {
+            return Integer.MAX_VALUE;
+        }
+        ModelMetricsTracker.RuntimeMetrics metrics = metricsMap.get(model.getId());
+        if (metrics == null || metrics.requestCount1m() == 0) {
+            return isConnectivityHealthy(model) ? 1 : 2;
+        }
+        if (metrics.errorRate1m() >= 20D || metrics.p95LatencyMs() >= 30_000L) {
+            return 2;
+        }
+        if (metrics.errorRate1m() >= 5D) {
+            return 1;
+        }
+        return 0;
+    }
+
+    private double runtimeErrorRate(AiModel model, Map<String, ModelMetricsTracker.RuntimeMetrics> metricsMap) {
+        if (model == null) {
+            return Double.MAX_VALUE;
+        }
+        ModelMetricsTracker.RuntimeMetrics metrics = metricsMap.get(model.getId());
+        return metrics == null ? 0D : metrics.errorRate1m();
+    }
+
+    private long runtimeLatency(AiModel model, Map<String, ModelMetricsTracker.RuntimeMetrics> metricsMap) {
+        if (model == null) {
+            return Long.MAX_VALUE;
+        }
+        ModelMetricsTracker.RuntimeMetrics metrics = metricsMap.get(model.getId());
+        if (metrics == null || metrics.p95LatencyMs() <= 0) {
+            return model.getLastTestLatency() == null ? Long.MAX_VALUE : model.getLastTestLatency();
+        }
+        return metrics.p95LatencyMs();
     }
 
     private int connectivityPriority(AiModel model) {
@@ -284,7 +349,11 @@ public class AIModelRouter {
     }
 
     private LangChain4jResolution buildResolution(AiModel aiModel) {
-        AiModelConfig config = AiModelConfig.from(aiModel);
+        return buildResolution(aiModel, null);
+    }
+
+    private LangChain4jResolution buildResolution(AiModel aiModel, String reasoningStrength) {
+        AiModelConfig config = AiModelConfig.from(aiModel, reasoningStrength);
         log.info("AI 模型解析成功: modelName={}, provider={}, modelId={}",
                 aiModel.getName(), config.getProvider(), config.getModelId());
         return new LangChain4jResolution(modelFactory.getOrCreate(config), config);
@@ -300,14 +369,10 @@ public class AIModelRouter {
                 .eq(AiModel::getTenantId, tenantId)
                 .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
                 .orderByAsc(AiModel::getCreatedAt));
-        // 优先选择名称含 mini/haiku/flash 的小模型
-        AiModel compact = models.stream()
-                .filter(m -> {
-                    String name = m.getName() != null ? m.getName().toLowerCase() : "";
-                    return name.contains("mini") || name.contains("haiku") || name.contains("flash");
-                })
+        AiModel compact = orderBackgroundTaskCandidates(models).stream()
+                .filter(this::isCompactModelCandidate)
                 .findFirst()
-                .orElse(models.isEmpty() ? null : models.get(0));
+                .orElseGet(() -> orderBackgroundTaskCandidates(models).stream().findFirst().orElse(null));
         return compact != null ? AiModelConfig.from(compact) : null;
     }
 
@@ -315,12 +380,60 @@ public class AIModelRouter {
      * 解析租户的主模型
      */
     public AiModelConfig resolvePrimaryModel(String tenantId) {
-        AiModel model = aiModelMapper.selectOne(new LambdaQueryWrapper<AiModel>()
+        List<AiModel> models = aiModelMapper.selectList(new LambdaQueryWrapper<AiModel>()
                 .eq(AiModel::getTenantId, tenantId)
                 .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
-                .orderByAsc(AiModel::getCreatedAt)
-                .last("LIMIT 1"));
+                .orderByAsc(AiModel::getCreatedAt));
+        AiModel model = orderBackgroundTaskCandidates(models).stream().findFirst().orElse(null);
         return model != null ? AiModelConfig.from(model) : null;
+    }
+
+    private List<AiModel> orderBackgroundTaskCandidates(List<AiModel> models) {
+        if (CollectionUtils.isEmpty(models)) {
+            return List.of();
+        }
+        List<IndexedModel> indexedModels = new ArrayList<>();
+        for (int i = 0; i < models.size(); i++) {
+            indexedModels.add(new IndexedModel(i, models.get(i)));
+        }
+        return indexedModels.stream()
+                .filter(item -> isTextChatModelCandidate(item.model()))
+                .filter(item -> !isKnownConnectivityFailed(item.model()))
+                .sorted(Comparator
+                        .comparingInt((IndexedModel item) -> connectivityPriority(item.model()))
+                        .thenComparingInt(item -> latencyPriority(item.model()))
+                        .thenComparingInt(IndexedModel::index))
+                .map(IndexedModel::model)
+                .toList();
+    }
+
+    private boolean isTextChatModelCandidate(AiModel model) {
+        if (model == null) {
+            return false;
+        }
+        String useCase = normalizeForMatch(model.getUseCase());
+        String modelId = normalizeForMatch(model.getModelId());
+        String name = normalizeForMatch(model.getName());
+        String text = useCase + " " + modelId + " " + name;
+        return !text.contains("embedding")
+                && !text.contains("image")
+                && !text.contains("生图")
+                && !text.contains("vision")
+                && !text.contains("audio")
+                && !text.contains("语音");
+    }
+
+    private boolean isKnownConnectivityFailed(AiModel model) {
+        return model != null && StringUtils.hasText(model.getLastTestStatus()) && !isConnectivityHealthy(model);
+    }
+
+    private boolean isCompactModelCandidate(AiModel model) {
+        String text = normalizeForMatch(model.getName()) + " " + normalizeForMatch(model.getModelId());
+        return text.contains("mini") || text.contains("haiku") || text.contains("flash");
+    }
+
+    private String normalizeForMatch(String value) {
+        return StringUtils.hasText(value) ? value.toLowerCase(Locale.ROOT) : "";
     }
 
     /**

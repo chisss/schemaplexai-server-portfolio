@@ -1,11 +1,18 @@
 package com.schemaplexai.service.agent.tool.executor;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.common.enums.ToolExecutionStatusEnum;
+import com.schemaplexai.common.enums.ToolIoTypeEnum;
+import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.service.agent.execution.SandboxGuard;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
+import com.schemaplexai.service.agent.tool.audit.ToolExecutionErrorCode;
 import com.schemaplexai.service.agent.tool.audit.ToolExecutionLogService;
 import com.schemaplexai.service.agent.tool.executor.os.CommandValidator;
 import com.schemaplexai.service.agent.tool.executor.os.ShellCommandAdapter;
@@ -14,14 +21,15 @@ import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.service.agent.tool.sandbox.CodeExecRequest;
 import com.schemaplexai.service.agent.tool.sandbox.CodeExecResult;
 import com.schemaplexai.service.agent.tool.sandbox.WasmSandboxService;
+import com.schemaplexai.service.ai.ImageGenerationService;
 import com.schemaplexai.service.tool.security.ToolSecurityValidator;
 import com.schemaplexai.service.workspace.WorkspacePathResolver;
 import okhttp3.HttpUrl;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -31,6 +39,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -49,22 +58,18 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class BuiltinToolExecutor implements ToolExecutor {
 
     private static final Set<String> SUPPORTED_CODES = Set.of(
             "sys.read", "sys.write", "sys.edit", "sys.bash", "sys.glob", "sys.grep",
             "sys.ls", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv", "sys.stat",
-            "web.fetch", "code.exec"
+            "web.fetch", "code.exec", "ai.image.generate"
     );
 
-    private static final Set<String> WRITE_TOOL_CODES = Set.of(
-            "sys.write", "sys.edit", "sys.bash", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv"
-    );
-
-    private static final Set<String> READ_TOOL_CODES = Set.of(
-            "sys.read", "sys.glob", "sys.grep", "sys.ls", "sys.stat"
-    );
+    private static final Cache<String, ToolIoTypeEnum> IO_TYPE_CACHE = Caffeine.newBuilder()
+            .expireAfterWrite(Duration.ofMinutes(10))
+            .maximumSize(100)
+            .build();
 
     private static final long PROCESS_TIMEOUT_SECONDS = 30;
     private static final int MAX_COMMAND_OUTPUT_LENGTH = 24000;
@@ -110,6 +115,51 @@ public class BuiltinToolExecutor implements ToolExecutor {
     private final ToolSecurityValidator toolSecurityValidator;
     private final WasmSandboxService wasmSandboxService;
     private final ToolExecutionLockService toolExecutionLockService;
+    private final BuiltinToolMapper builtinToolMapper;
+    private final ImageGenerationService imageGenerationService;
+
+    @Autowired
+    public BuiltinToolExecutor(ObjectMapper objectMapper,
+                               List<ShellCommandAdapter> adapters,
+                               CommandValidator commandValidator,
+                               ToolExecutionLogService logService,
+                               WorkspacePathResolver workspacePathResolver,
+                               SandboxGuard sandboxGuard,
+                               OkHttpClient httpClient,
+                               ToolSecurityValidator toolSecurityValidator,
+                               WasmSandboxService wasmSandboxService,
+                               ToolExecutionLockService toolExecutionLockService,
+                               BuiltinToolMapper builtinToolMapper,
+                               ImageGenerationService imageGenerationService) {
+        this.objectMapper = objectMapper;
+        this.adapters = adapters;
+        this.commandValidator = commandValidator;
+        this.logService = logService;
+        this.workspacePathResolver = workspacePathResolver;
+        this.sandboxGuard = sandboxGuard;
+        this.httpClient = httpClient;
+        this.toolSecurityValidator = toolSecurityValidator;
+        this.wasmSandboxService = wasmSandboxService;
+        this.toolExecutionLockService = toolExecutionLockService;
+        this.builtinToolMapper = builtinToolMapper;
+        this.imageGenerationService = imageGenerationService;
+    }
+
+    public BuiltinToolExecutor(ObjectMapper objectMapper,
+                               List<ShellCommandAdapter> adapters,
+                               CommandValidator commandValidator,
+                               ToolExecutionLogService logService,
+                               WorkspacePathResolver workspacePathResolver,
+                               SandboxGuard sandboxGuard,
+                               OkHttpClient httpClient,
+                               ToolSecurityValidator toolSecurityValidator,
+                               WasmSandboxService wasmSandboxService,
+                               ToolExecutionLockService toolExecutionLockService,
+                               BuiltinToolMapper builtinToolMapper) {
+        this(objectMapper, adapters, commandValidator, logService, workspacePathResolver, sandboxGuard,
+                httpClient, toolSecurityValidator, wasmSandboxService, toolExecutionLockService,
+                builtinToolMapper, null);
+    }
 
     @Override
     public String sourceType() {
@@ -158,24 +208,35 @@ public class BuiltinToolExecutor implements ToolExecutor {
             if ("code.exec".equals(toolCode)) {
                 return executeCodeExec(tenantId, agentId, toolCall, sandboxPolicy, startAt, args, safeArgsForLog);
             }
+            if ("ai.image.generate".equals(toolCode)) {
+                return executeImageGenerate(tenantId, agentId, toolCall, startAt, args, safeArgsForLog);
+            }
             if (!commandValidator.validateToolArguments(toolCode, args)) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, "系统工具参数校验失败");
+                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null,
+                        ToolExecutionErrorCode.INVALID_ARGUMENT, "系统工具参数校验失败");
                 return failure(toolCall, "系统工具参数校验失败");
             }
             Path workingDirectory = resolveWorkingDirectory(toolCode, args, sandboxPolicy);
             if (requiresWorkingDirectory(toolCode) && workingDirectory == null) {
                 String error = "系统工具调用缺少 workdir";
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, error);
+                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null,
+                        ToolExecutionErrorCode.MISSING_WORKDIR, error);
                 return failure(toolCall, error);
+            }
+            ToolResult missingPathResult = validateReadablePathExists(toolCode, toolCall, args, workingDirectory,
+                    startAt, safeArgsForLog, tenantId, agentId);
+            if (missingPathResult != null) {
+                return missingPathResult;
             }
 
             String command = adapter.adaptCommand(toolCode, args);
 
             if (!commandValidator.isCommandAllowed(toolCode, command)) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, "命令不在白名单");
+                        SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null,
+                        ToolExecutionErrorCode.SANDBOX_VIOLATION, "命令不在白名单");
                 return failure(toolCall, "命令不在白名单");
             }
 
@@ -190,10 +251,11 @@ public class BuiltinToolExecutor implements ToolExecutor {
             ToolExecutionLockService.LockAction<ToolResult> processAction = () ->
                     executeProcess(processBuilder, toolCall, toolCode, startAt, safeArgsForLog, tenantId, agentId);
             if (workingDirectory != null) {
-                if (WRITE_TOOL_CODES.contains(toolCode)) {
+                ToolIoTypeEnum ioType = resolveIoType(toolCode);
+                if (ioType.isWrite()) {
                     return toolExecutionLockService.executeWithWriteLock(workingDirectory, processAction);
                 }
-                if (READ_TOOL_CODES.contains(toolCode)) {
+                if (ioType == ToolIoTypeEnum.READ) {
                     return toolExecutionLockService.executeWithReadLock(workingDirectory, processAction);
                 }
             }
@@ -201,7 +263,8 @@ public class BuiltinToolExecutor implements ToolExecutor {
         } catch (Exception e) {
             log.error("系统工具执行失败: toolCode={}, error={}", toolCode, e.getMessage());
             logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.ERROR.getCode(), startAt, LocalDateTime.now(), null, null, e.getMessage());
+                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.ERROR.getCode(), startAt, LocalDateTime.now(), null, null,
+                    ToolExecutionErrorCode.UNKNOWN_ERROR, e.getMessage());
             return failure(toolCall, "执行失败: " + e.getMessage());
         }
     }
@@ -298,6 +361,50 @@ public class BuiltinToolExecutor implements ToolExecutor {
                     SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(), ToolExecutionStatusEnum.ERROR.getCode(),
                     startAt, LocalDateTime.now(), safeArgsForLog, null, exception.getMessage());
             return failure(toolCall, "执行失败: " + exception.getMessage());
+        }
+    }
+
+    private ToolResult executeImageGenerate(String tenantId,
+                                            String agentId,
+                                            ToolCall toolCall,
+                                            LocalDateTime startAt,
+                                            Map<String, Object> args,
+                                            Map<String, Object> safeArgsForLog) {
+        try {
+            ImageGenerationService.ImageGenerationRequest request = new ImageGenerationService.ImageGenerationRequest();
+            request.setModelId(asString(args.get("modelId")));
+            request.setPrompt(asString(args.get("prompt")));
+            request.setSize(asString(args.get("size")));
+            request.setQuality(asString(args.get("quality")));
+            Object n = args.get("n");
+            if (n instanceof Number number) {
+                request.setN(number.intValue());
+            } else if (n != null && StringUtils.hasText(String.valueOf(n))) {
+                request.setN(Integer.parseInt(String.valueOf(n)));
+            }
+            ImageGenerationService.ImageGenerationResult result = imageGenerationService.generate(request);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("modelId", result.getModelId());
+            payload.put("modelName", result.getModelName());
+            payload.put("prompt", result.getPrompt());
+            payload.put("size", result.getSize());
+            payload.put("quality", result.getQuality());
+            payload.put("imageUrls", result.getImageUrls());
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(), ToolExecutionStatusEnum.SUCCESS.getCode(),
+                    startAt, LocalDateTime.now(), safeArgsForLog, payload, null);
+            return ToolResult.builder()
+                    .callId(toolCall.getCallId())
+                    .toolCode(toolCall.getToolCode())
+                    .success(true)
+                    .result(objectMapper.valueToTree(payload))
+                    .build();
+        } catch (Exception exception) {
+            String error = "生图工具执行失败: " + exception.getMessage();
+            logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                    SourceTypeEnum.BUILTIN.getCode(), toolCall.getToolCode(), ToolExecutionStatusEnum.ERROR.getCode(),
+                    startAt, LocalDateTime.now(), safeArgsForLog, null, error);
+            return failure(toolCall, error);
         }
     }
 
@@ -682,7 +789,8 @@ public class BuiltinToolExecutor implements ToolExecutor {
             outputTask.cancel(true);
             String error = "命令执行超时";
             logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null, error);
+                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), safeArgsForLog, null,
+                    ToolExecutionErrorCode.COMMAND_FAILED, error);
             return failure(toolCall, error);
         }
 
@@ -712,9 +820,39 @@ public class BuiltinToolExecutor implements ToolExecutor {
         } else {
             String error = "命令执行失败，退出码: " + exitCode;
             logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, endAt, safeArgsForLog, null, error);
+                    SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, endAt, safeArgsForLog, null,
+                    ToolExecutionErrorCode.COMMAND_FAILED, error);
             return failure(toolCall, error);
         }
+    }
+
+    private ToolResult validateReadablePathExists(String toolCode, ToolCall toolCall, Map<String, Object> args,
+                                                  Path workingDirectory, LocalDateTime startAt,
+                                                  Map<String, Object> safeArgsForLog, String tenantId,
+                                                  String agentId) {
+        if (workingDirectory == null || args == null || !Set.of("sys.read", "sys.stat").contains(toolCode)) {
+            return null;
+        }
+        String pathValue = asString(args.get("path"));
+        if (!StringUtils.hasText(pathValue)) {
+            return null;
+        }
+        Path target = workingDirectory.resolve(pathValue).normalize();
+        if (java.nio.file.Files.exists(target)) {
+            return null;
+        }
+        String error = "系统工具路径不存在: " + pathValue;
+        Map<String, Object> response = Map.of(
+                "errorCode", ToolExecutionErrorCode.PATH_NOT_FOUND,
+                "path", pathValue,
+                "workdir", workingDirectory.toString(),
+                "suggestion", "请先使用 sys.ls 查看可用目录或修正相对路径"
+        );
+        logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
+                SourceTypeEnum.BUILTIN.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(),
+                startAt, LocalDateTime.now(), safeArgsForLog, response,
+                ToolExecutionErrorCode.PATH_NOT_FOUND, error);
+        return failure(toolCall, error);
     }
 
     private ToolResult failure(ToolCall toolCall, String message) {
@@ -728,5 +866,29 @@ public class BuiltinToolExecutor implements ToolExecutor {
     }
 
     private record LinkCandidate(String url, String text, int priority) {
+    }
+
+    private ToolIoTypeEnum resolveIoType(String toolCode) {
+        if (!StringUtils.hasText(toolCode)) {
+            return ToolIoTypeEnum.READ_WRITE;
+        }
+        ToolIoTypeEnum cached = IO_TYPE_CACHE.getIfPresent(toolCode);
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            BuiltinTool tool = builtinToolMapper.selectOne(
+                    new LambdaQueryWrapper<BuiltinTool>()
+                            .eq(BuiltinTool::getCode, toolCode)
+                            .last("LIMIT 1"));
+            ToolIoTypeEnum ioType = (tool != null && StringUtils.hasText(tool.getIoType()))
+                    ? ToolIoTypeEnum.fromCode(tool.getIoType())
+                    : ToolIoTypeEnum.READ_WRITE;
+            IO_TYPE_CACHE.put(toolCode, ioType);
+            return ioType;
+        } catch (Exception e) {
+            log.warn("查询工具 ioType 失败，使用默认值: toolCode={}, error={}", toolCode, e.getMessage());
+            return ToolIoTypeEnum.READ_WRITE;
+        }
     }
 }

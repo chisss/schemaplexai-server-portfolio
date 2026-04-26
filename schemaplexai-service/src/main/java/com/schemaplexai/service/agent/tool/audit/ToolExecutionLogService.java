@@ -25,6 +25,16 @@ public class ToolExecutionLogService {
                              LocalDateTime startAt, LocalDateTime endAt,
                              Map<String, Object> request, Map<String, Object> response,
                              String errorMessage) {
+        logExecution(tenantId, agentId, sessionId, toolCallId, toolType, toolName, status,
+                startAt, endAt, request, response, null, errorMessage);
+    }
+
+    @Async
+    public void logExecution(String tenantId, String agentId, String sessionId, String toolCallId,
+                             String toolType, String toolName, String status,
+                             LocalDateTime startAt, LocalDateTime endAt,
+                             Map<String, Object> request, Map<String, Object> response,
+                             String errorCode, String errorMessage) {
         try {
             ToolExecutionLog log = new ToolExecutionLog();
             log.setTenantId(tenantId);
@@ -41,6 +51,7 @@ public class ToolExecutionLogService {
             }
             log.setRequestPayload(objectMapper.writeValueAsString(request));
             log.setResponsePayload(objectMapper.writeValueAsString(response));
+            log.setErrorCode(errorCode);
             log.setErrorMessage(errorMessage);
             log.setCreatedAt(LocalDateTime.now());
             logMapper.insert(log);

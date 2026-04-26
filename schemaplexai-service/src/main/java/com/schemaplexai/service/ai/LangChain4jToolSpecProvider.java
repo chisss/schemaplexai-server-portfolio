@@ -51,7 +51,7 @@ public class LangChain4jToolSpecProvider {
         if (searchBehavior != null) {
             builder.addMetadata(ToolSpecification.METADATA_SEARCH_BEHAVIOR, searchBehavior);
         }
-        return builder.build();
+        return ToolNameNormalizer.normalizeSpecification(builder.build());
     }
 
     public JsonObjectSchema buildParameters(JsonNode inputSchema) {

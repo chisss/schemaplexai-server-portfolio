@@ -57,11 +57,24 @@ public class AgentAsyncConfig {
     @Bean("agentExecutorPool")
     public Executor agentExecutorPool(TaskDecorator securityContextTaskDecorator) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(4);
-        executor.setMaxPoolSize(20);
-        executor.setQueueCapacity(200);
+        executor.setCorePoolSize(16);
+        executor.setMaxPoolSize(48);
+        executor.setQueueCapacity(64);
         executor.setThreadNamePrefix("agent-exec-");
         executor.setKeepAliveSeconds(60);
+        executor.setTaskDecorator(securityContextTaskDecorator);
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean("toolParallelPool")
+    public Executor toolParallelPool(TaskDecorator securityContextTaskDecorator) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(32);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("tool-parallel-");
+        executor.setKeepAliveSeconds(30);
         executor.setTaskDecorator(securityContextTaskDecorator);
         executor.initialize();
         return executor;

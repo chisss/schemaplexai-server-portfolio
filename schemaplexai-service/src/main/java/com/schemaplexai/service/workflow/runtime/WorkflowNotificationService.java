@@ -9,17 +9,24 @@ import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.MessageTemplateMapper;
 import com.schemaplexai.dao.mapper.NotificationChannelMapper;
 import com.schemaplexai.dao.mapper.SpecMapper;
+import com.schemaplexai.dao.mapper.AgentExecutionMapper;
+import com.schemaplexai.dao.mapper.ToolExecutionLogMapper;
 import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
+import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.MessageTemplate;
 import com.schemaplexai.model.entity.NotificationChannel;
 import com.schemaplexai.model.entity.Spec;
+import com.schemaplexai.model.entity.ToolExecutionLog;
 import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.entity.WorkflowNodeExecution;
 import com.schemaplexai.model.entity.WorkflowTemplate;
+import com.schemaplexai.model.vo.monitor.AgentTraceFailureCategoryVO;
+import com.schemaplexai.model.vo.monitor.AgentTraceFailureSummaryVO;
 import com.schemaplexai.service.integration.notification.NotificationDispatchService;
 import com.schemaplexai.service.integration.notification.model.NotificationDispatchRequest;
 import com.schemaplexai.service.integration.notification.model.NotificationMessage;
 import com.schemaplexai.service.integration.notification.model.NotificationSendResult;
+import com.schemaplexai.service.monitor.AgentTraceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -36,6 +43,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * 工作流通知服务
@@ -47,12 +55,17 @@ public class WorkflowNotificationService {
 
     private static final Pattern VARIABLE_PATTERN = Pattern.compile("\\$\\{([a-zA-Z0-9_]+)}");
     private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final int NOTIFICATION_VARIABLE_MAX_LENGTH = 800;
+    private static final int NOTIFICATION_IMAGE_URL_MAX_LENGTH = 180;
 
     private final NotificationChannelMapper notificationChannelMapper;
     private final MessageTemplateMapper messageTemplateMapper;
     private final WorkflowTemplateMapper workflowTemplateMapper;
     private final SpecMapper specMapper;
     private final NotificationDispatchService notificationDispatchService;
+    private final AgentExecutionMapper agentExecutionMapper;
+    private final ToolExecutionLogMapper toolExecutionLogMapper;
+    private final AgentTraceService agentTraceService;
 
     @Value("${schemaplexai.frontend-base-url:}")
     private String frontendBaseUrl;
@@ -65,6 +78,7 @@ public class WorkflowNotificationService {
         NotificationSendResult result = notificationDispatchService.send(NotificationDispatchRequest.builder()
                 .channel(channel)
                 .message(resolvedMessage.message())
+                .tenantId(instance.getTenantId())
                 .templateId(resolvedMessage.templateId())
                 .templateName(resolvedMessage.templateName())
                 .templateType(resolvedMessage.templateType())
@@ -116,6 +130,7 @@ public class WorkflowNotificationService {
                 NotificationSendResult result = notificationDispatchService.send(NotificationDispatchRequest.builder()
                         .channel(channel)
                         .message(message)
+                        .tenantId(instance.getTenantId())
                         .templateId(resolvedMessage.templateId())
                         .templateName(resolvedMessage.templateName())
                         .templateType(resolvedMessage.templateType())
@@ -320,10 +335,17 @@ public class WorkflowNotificationService {
         Spec spec = StringUtils.hasText(instance.getSpecId()) ? specMapper.selectById(instance.getSpecId()) : null;
 
         Map<String, Object> variables = new HashMap<>();
+        if (instance.getVariables() != null && !instance.getVariables().isEmpty()) {
+            variables.putAll(instance.getVariables());
+        }
         variables.put("workflowTemplateName", workflowTemplate != null ? workflowTemplate.getName() : "-");
         variables.put("workflowInstanceName", safeValue(instance.getName()));
         variables.put("workflowStatus", resolveWorkflowStatus(instance, templateType));
-        variables.put("specTitle", spec != null && StringUtils.hasText(spec.getName()) ? spec.getName() : "-");
+        String specTitle = spec != null && StringUtils.hasText(spec.getName())
+                ? spec.getName()
+                : safeValue(variables.get("specName"));
+        variables.put("specTitle", specTitle);
+        variables.put("specName", specTitle);
         variables.put("specId", spec != null && StringUtils.hasText(spec.getId()) ? spec.getId() : "-");
         variables.put("currentNodeLabel", nodeExecution != null && StringUtils.hasText(nodeExecution.getNodeLabel())
                 ? nodeExecution.getNodeLabel() : "-");
@@ -334,7 +356,95 @@ public class WorkflowNotificationService {
         variables.put("artifactDeliveryUrl", safeValue(readArtifactDeliveryVariable(instance, "artifactDeliveryUrl")));
         variables.put("artifactDeliveryType", safeValue(readArtifactDeliveryVariable(instance, "artifactDeliveryType")));
         variables.put("artifactDeliveryDocumentId", safeValue(readArtifactDeliveryVariable(instance, "artifactDeliveryDocumentId")));
+        enrichMarketingNotificationVariables(instance, variables);
+        putNotificationImageVariables(variables);
         return variables;
+    }
+
+    private void enrichMarketingNotificationVariables(WorkflowInstance instance, Map<String, Object> variables) {
+        if (instance == null || variables == null) {
+            return;
+        }
+        variables.put("scenarioCode", safeValue(variables.get("scenarioCode")));
+        variables.put("instanceId", safeValue(instance.getId()));
+        variables.put("artifactTitle", resolveArtifactTitle(variables));
+
+        List<AgentExecution> executions = agentExecutionMapper.selectList(
+                new LambdaQueryWrapper<AgentExecution>().eq(AgentExecution::getTaskId, instance.getId()));
+        long tokenInput = executions.stream().map(AgentExecution::getTokenInput)
+                .filter(java.util.Objects::nonNull).mapToLong(Long::longValue).sum();
+        long tokenOutput = executions.stream().map(AgentExecution::getTokenOutput)
+                .filter(java.util.Objects::nonNull).mapToLong(Long::longValue).sum();
+        variables.put("tokenInput", tokenInput);
+        variables.put("tokenOutput", tokenOutput);
+        variables.put("totalTokens", tokenInput + tokenOutput);
+        variables.put("modelName", executions.stream().map(AgentExecution::getAiModel)
+                .filter(StringUtils::hasText).findFirst().orElse("-"));
+
+        String traceId = executions.stream().map(AgentExecution::getId)
+                .filter(StringUtils::hasText).findFirst().orElse(null);
+        AgentTraceFailureSummaryVO failureSummary = StringUtils.hasText(traceId)
+                ? agentTraceService.summarizeFailures(traceId) : null;
+        variables.put("failureSummary", summarizeFailureText(failureSummary));
+        variables.put("notificationPriority",
+                failureSummary != null && defaultLong(failureSummary.getBlockingCount()) > 0 ? "HIGH" : "NORMAL");
+
+        String conversationId = executions.stream().map(AgentExecution::getConversationId)
+                .filter(StringUtils::hasText).findFirst().orElse(null);
+        List<ToolExecutionLog> failedTools = StringUtils.hasText(conversationId)
+                ? toolExecutionLogMapper.selectList(new LambdaQueryWrapper<ToolExecutionLog>()
+                .eq(ToolExecutionLog::getSessionId, conversationId)
+                .ne(ToolExecutionLog::getStatus, "SUCCESS")
+                .orderByDesc(ToolExecutionLog::getCreatedAt)
+                .last("limit 3"))
+                : List.of();
+        variables.put("failedToolSummary", buildFailedToolSummary(failedTools));
+    }
+
+    private String resolveArtifactTitle(Map<String, Object> variables) {
+        Object artifactTitle = variables.get("artifactTitle");
+        if (artifactTitle != null && StringUtils.hasText(String.valueOf(artifactTitle))) {
+            return safeValue(artifactTitle);
+        }
+        Object scenarioName = variables.get("scenarioName");
+        if (scenarioName != null && StringUtils.hasText(String.valueOf(scenarioName))) {
+            return safeValue(scenarioName) + "交付产物";
+        }
+        return "交付产物";
+    }
+
+    private String summarizeFailureText(AgentTraceFailureSummaryVO summary) {
+        if (summary == null) {
+            return "无";
+        }
+        String categoryText = summary.getCategories() == null ? "" : summary.getCategories().stream()
+                .map(this::formatFailureCategory)
+                .filter(StringUtils::hasText)
+                .limit(3)
+                .collect(Collectors.joining("；"));
+        return "阻断=" + defaultLong(summary.getBlockingCount())
+                + "，可恢复=" + defaultLong(summary.getRecoverableCount())
+                + (StringUtils.hasText(categoryText) ? "，分类=" + categoryText : "");
+    }
+
+    private String formatFailureCategory(AgentTraceFailureCategoryVO category) {
+        if (category == null) {
+            return "";
+        }
+        return safeValue(category.getCategory()) + "=" + defaultLong(category.getCount());
+    }
+
+    private String buildFailedToolSummary(List<ToolExecutionLog> failedTools) {
+        if (failedTools == null || failedTools.isEmpty()) {
+            return "无";
+        }
+        return failedTools.stream()
+                .map(item -> safeValue(item.getToolName()) + "(" + safeValue(item.getErrorCode()) + ")")
+                .collect(Collectors.joining("；"));
+    }
+
+    private long defaultLong(Long value) {
+        return value == null ? 0L : value;
     }
 
     private String resolveWorkflowStatus(WorkflowInstance instance, String templateType) {
@@ -358,11 +468,110 @@ public class WorkflowNotificationService {
         StringBuffer buffer = new StringBuffer();
         while (matcher.find()) {
             String key = matcher.group(1);
-            String value = safeValue(variables.get(key));
+            String value = safeNotificationValue(key, variables.get(key));
             matcher.appendReplacement(buffer, Matcher.quoteReplacement(value));
         }
         matcher.appendTail(buffer);
         return buffer.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void putNotificationImageVariables(Map<String, Object> variables) {
+        if (variables == null || variables.isEmpty()) {
+            return;
+        }
+        Object imageUrls = variables.get("imageUrls");
+        if (!(imageUrls instanceof List<?>) && variables.get("illustrationResult") instanceof Map<?, ?> resultMap) {
+            imageUrls = ((Map<String, Object>) resultMap).get("imageUrls");
+        }
+        if (imageUrls instanceof List<?> urls && !urls.isEmpty()) {
+            String firstUrl = safeValue(urls.get(0));
+            variables.put("imageUrl", compactImageUrl(firstUrl));
+            variables.put("imageUrls", urls.stream()
+                    .limit(3)
+                    .map(item -> compactImageUrl(safeValue(item)))
+                    .toList());
+        }
+        Object illustrationResult = variables.get("illustrationResult");
+        if (illustrationResult instanceof Map<?, ?> resultMap) {
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("modelName", resultMap.get("modelName"));
+            summary.put("size", resultMap.get("size"));
+            summary.put("imageCount", imageUrls instanceof List<?> urls ? urls.size() : 0);
+            summary.put("imageUrl", variables.get("imageUrl"));
+            variables.put("illustrationResult", summary);
+        }
+    }
+
+    private String safeNotificationValue(String key, Object value) {
+        if (value == null) {
+            return "-";
+        }
+        if ("imageUrl".equals(key)) {
+            return compactImageUrl(safeValue(value));
+        }
+        if ("imageUrls".equals(key)) {
+            return compactImageUrls(value);
+        }
+        String text = value instanceof Map<?, ?> || value instanceof List<?>
+                ? compactStructuredNotificationValue(value)
+                : safeValue(value);
+        return limitNotificationText(text, NOTIFICATION_VARIABLE_MAX_LENGTH);
+    }
+
+    private String compactImageUrls(Object value) {
+        if (value instanceof List<?> urls) {
+            return urls.stream()
+                    .limit(3)
+                    .map(item -> compactImageUrl(safeValue(item)))
+                    .reduce((left, right) -> left + "\n" + right)
+                    .orElse("-");
+        }
+        return compactImageUrl(safeValue(value));
+    }
+
+    private String compactImageUrl(String url) {
+        if (!StringUtils.hasText(url)) {
+            return "-";
+        }
+        int queryIndex = url.indexOf('?');
+        String withoutQuery = queryIndex > 0 ? url.substring(0, queryIndex) : url;
+        return limitNotificationText(withoutQuery, NOTIFICATION_IMAGE_URL_MAX_LENGTH);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String compactStructuredNotificationValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> source = (Map<String, Object>) map;
+            List<String> parts = new ArrayList<>();
+            appendPart(parts, "模型", source.get("modelName"));
+            appendPart(parts, "尺寸", source.get("size"));
+            Object imageUrls = source.get("imageUrls");
+            if (imageUrls instanceof List<?> urls) {
+                parts.add("图片数量=" + urls.size());
+                if (!urls.isEmpty()) {
+                    parts.add("图片=" + compactImageUrl(safeValue(urls.get(0))));
+                }
+            }
+            appendPart(parts, "摘要", source.get("summary"));
+            if (!parts.isEmpty()) {
+                return String.join("；", parts);
+            }
+        }
+        return safeValue(value);
+    }
+
+    private void appendPart(List<String> parts, String label, Object value) {
+        if (value != null && StringUtils.hasText(String.valueOf(value))) {
+            parts.add(label + "=" + limitNotificationText(String.valueOf(value), 120));
+        }
+    }
+
+    private String limitNotificationText(String value, int maxLength) {
+        if (!StringUtils.hasText(value) || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, Math.max(0, maxLength)) + "...[已截断]";
     }
 
     @SuppressWarnings("unchecked")

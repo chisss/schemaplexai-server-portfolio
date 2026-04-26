@@ -16,6 +16,7 @@ import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.AiModelGroup;
 import com.schemaplexai.model.entity.AiModelGroupItem;
 import com.schemaplexai.model.vo.system.AiModelGroupVO;
+import com.schemaplexai.service.ai.TokenEstimator;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.config.AiModelGroupService;
 import lombok.RequiredArgsConstructor;
@@ -46,6 +47,7 @@ public class AiModelGroupServiceImpl implements AiModelGroupService {
     private final AiModelGroupItemMapper itemMapper;
     private final AiModelMapper aiModelMapper;
     private final EntityValidator entityValidator;
+    private final TokenEstimator tokenEstimator;
 
     @Override
     public List<AiModelGroupVO> listByCurrentTenant() {
@@ -172,11 +174,7 @@ public class AiModelGroupServiceImpl implements AiModelGroupService {
     private List<AiModel> sortModels(List<AiModel> models, String strategy) {
         return switch (strategy) {
             case "by_price" -> models.stream()
-                    .sorted(Comparator.comparing(m -> {
-                        var input = m.getInputPrice() != null ? m.getInputPrice() : BigDecimal.ZERO;
-                        var output = m.getOutputPrice() != null ? m.getOutputPrice() : BigDecimal.ZERO;
-                        return input.add(output);
-                    }))
+                    .sorted(Comparator.comparing(m -> tokenEstimator.estimateTaskCost(m, m.getUseCase())))
                     .collect(Collectors.toList());
             case "by_performance" -> models.stream()
                     .filter(m -> m.getLastTestLatency() != null)

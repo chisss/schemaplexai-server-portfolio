@@ -30,7 +30,20 @@ public enum AgentExecutionEventTypeEnum {
     FAILED("FAILED", "执行失败"),
     CANCELLED("CANCELLED", "执行取消"),
     BLOCKED("BLOCKED", "执行阻断"),
-    PAUSED("PAUSED", "执行暂停");
+    PAUSED("PAUSED", "执行暂停"),
+    STREAM_START("STREAM_START", "流式输出开始"),
+    STREAM_CHUNK("STREAM_CHUNK", "流式输出片段"),
+    STREAM_END("STREAM_END", "流式输出结束"),
+    THINKING("THINKING", "模型思考过程"),
+    TOOL_START("TOOL_START", "工具开始执行"),
+    TOOL_END("TOOL_END", "工具执行完成"),
+    TOOL_PARALLEL_START("TOOL_PARALLEL_START", "并行工具组开始"),
+    TOOL_PARALLEL_END("TOOL_PARALLEL_END", "并行工具组完成"),
+    APPROVAL_REQUIRED("APPROVAL_REQUIRED", "需要人工审批"),
+    APPROVAL_GRANTED("APPROVAL_GRANTED", "审批已通过"),
+    APPROVAL_DENIED("APPROVAL_DENIED", "审批已拒绝"),
+    PLAN_STEP("PLAN_STEP", "计划步骤"),
+    SUGGESTION("SUGGESTION", "建议（仅展示不执行）");
 
     private final String code;
     private final String description;

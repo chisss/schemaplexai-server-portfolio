@@ -27,9 +27,10 @@ public class LangChain4jBindingToolExecutor implements dev.langchain4j.service.t
 
     @Override
     public ToolExecutionResult executeWithContext(ToolExecutionRequest request, dev.langchain4j.invocation.InvocationContext invocationContext) {
+        String actualToolCode = binding != null && binding.getToolCode() != null ? binding.getToolCode() : request.name();
         ToolCall toolCall = ToolCall.builder()
                 .callId(request.id())
-                .toolCode(request.name())
+                .toolCode(actualToolCode)
                 .arguments(parseArguments(request.arguments()))
                 .build();
         ToolResult result = delegate.execute(tenantId, agentId, binding, toolCall, sandboxPolicy);

@@ -9,10 +9,13 @@ import com.schemaplexai.model.dto.system.RagConfigUpdateRequest;
 import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.vo.system.AiModelRouteVO;
+import com.schemaplexai.model.vo.system.AiModelRealHealthCheckVO;
 import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;
 import com.schemaplexai.model.vo.system.RagConfigVO;
 import com.schemaplexai.model.vo.system.RagOperationLogVO;
+import com.schemaplexai.model.vo.system.RouteAnalysisVO;
 import com.schemaplexai.service.config.SystemConfigService;
+import com.schemaplexai.service.ai.AiModelRealHealthCheckService;
 import com.schemaplexai.service.rag.RagConfigService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -41,6 +44,7 @@ public class SystemController {
 
     private final SystemConfigService systemConfigService;
     private final RagConfigService ragConfigService;
+    private final AiModelRealHealthCheckService aiModelRealHealthCheckService;
 
     // ==================== AI模型管理 ====================
 
@@ -82,10 +86,23 @@ public class SystemController {
         return R.ok();
     }
 
+    @PutMapping("/models/{id}/disable")
+    @Operation(summary = "停用AI模型并清理路由和模型组引用")
+    public R<Void> disableAiModel(@PathVariable String id) {
+        systemConfigService.disableAiModel(id);
+        return R.ok();
+    }
+
     @PostMapping("/models/{id}/test-connectivity")
     @Operation(summary = "测试AI模型连通性")
     public R<ConnectivityTestResultVO> testConnectivity(@PathVariable String id) {
         return R.ok(systemConfigService.testConnectivity(id));
+    }
+
+    @PostMapping("/models/{id}/real-health-check")
+    @Operation(summary = "真实协议健康检查AI模型")
+    public R<AiModelRealHealthCheckVO> realHealthCheck(@PathVariable String id) {
+        return R.ok(aiModelRealHealthCheckService.testRealConnectivity(id));
     }
 
     // ==================== 路由规则管理 ====================
@@ -120,6 +137,12 @@ public class SystemController {
     public R<Void> deleteRoute(@PathVariable String id) {
         systemConfigService.deleteRoute(id);
         return R.ok();
+    }
+
+    @GetMapping("/routes/analysis")
+    @Operation(summary = "获取模型路由分析")
+    public R<RouteAnalysisVO> getRouteAnalysis() {
+        return R.ok(systemConfigService.getRouteAnalysis());
     }
 
     // ==================== RAG 管理 ====================

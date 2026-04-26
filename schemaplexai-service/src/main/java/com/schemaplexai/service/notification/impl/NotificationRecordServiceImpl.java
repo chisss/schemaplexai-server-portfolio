@@ -138,11 +138,15 @@ public class NotificationRecordServiceImpl implements NotificationRecordService 
         NotificationChannel channel = request != null ? request.getChannel() : null;
         NotificationMessage message = request != null ? request.getMessage() : null;
         if (channel != null) {
+            record.setTenantId(channel.getTenantId());
             record.setChannelId(channel.getId());
             record.setChannelName(channel.getName());
             record.setChannelType(channel.getChannelType());
         }
         if (request != null) {
+            if (StringUtils.hasText(request.getTenantId())) {
+                record.setTenantId(request.getTenantId());
+            }
             record.setTemplateId(request.getTemplateId());
             record.setTemplateName(request.getTemplateName());
             record.setTemplateType(request.getTemplateType());

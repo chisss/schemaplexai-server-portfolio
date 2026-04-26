@@ -16,6 +16,7 @@ import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
 import com.schemaplexai.model.vo.agent.AgentExecuteResultVO;
 import com.schemaplexai.model.vo.agent.AgentExecutionVO;
+import com.schemaplexai.model.vo.agent.AgentExecutionLogVO;
 import com.schemaplexai.model.vo.agent.AgentInstructionsCheckVO;
 import com.schemaplexai.model.vo.agent.AgentTeamMemberVO;
 import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
@@ -143,6 +144,16 @@ public interface AgentService {
     AgentExecutionVO getExecution(String agentId, String executionId);
 
     /**
+     * 分页查询执行日志概要，详情按日志 ID 懒加载
+     */
+    PageResult<AgentExecutionLogVO> pageExecutionLogs(String agentId, String executionId, AgentExecutionQueryDTO query);
+
+    /**
+     * 获取单条执行日志详情
+     */
+    AgentExecutionLogVO getExecutionLog(String agentId, String executionId, String logId);
+
+    /**
      * 提交执行输入 / 恢复执行
      */
     void submitExecutionInput(String agentId, String executionId, AgentExecutionInputDTO dto);
@@ -156,6 +167,13 @@ public interface AgentService {
      * 查询对话历史消息
      */
     List<ConversationMessageVO> getConversationHistory(String conversationId);
+
+    // ==================== 系统Agent ====================
+
+    /**
+     * 获取当前租户的系统默认Agent
+     */
+    AgentVO getSystemAgent();
 
     // ==================== Agent 专属指令 ====================
 

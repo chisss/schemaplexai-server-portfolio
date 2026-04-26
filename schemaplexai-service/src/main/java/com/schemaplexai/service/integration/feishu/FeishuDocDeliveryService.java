@@ -37,8 +37,9 @@ public class FeishuDocDeliveryService {
     private static final Pattern ORDERED_LIST_PATTERN = Pattern.compile("^\\d+[.)]\\s+(.*)$");
     private static final Pattern TABLE_SEPARATOR_CELL_PATTERN = Pattern.compile("^:?-{3,}:?$");
     private static final int MAX_CHILDREN_PER_REQUEST = 50;
-    private static final int RETRY_LIMIT = 3;
+    private static final int RETRY_LIMIT = 5;
     private static final long RATE_LIMIT_BACKOFF_MILLIS = 500L;
+    private static final long FOLDER_LOCK_BACKOFF_MILLIS = 2000L;
     private static final String DEFAULT_API_BASE_URL = "https://open.feishu.cn";
     private static final String DEFAULT_DOC_URL_PREFIX = "https://feishu.cn/docx/";
     private static final int FEISHU_TABLE_BLOCK_TYPE = 31;
@@ -445,18 +446,19 @@ public class FeishuDocDeliveryService {
                 String respBody = response.body() != null ? response.body().string() : "";
                 Map<String, Object> responseBody = parseResponse(respBody);
                 Object code = responseBody.get("code");
-                boolean rateLimited = isRateLimited(response.code(), code);
+                boolean retryable = isRetryable(response.code(), code);
+                long backoff = isFolderLocked(code) ? FOLDER_LOCK_BACKOFF_MILLIS : RATE_LIMIT_BACKOFF_MILLIS;
                 if (!response.isSuccessful()) {
-                    if (rateLimited && attempt < RETRY_LIMIT) {
-                        sleepQuietly(RATE_LIMIT_BACKOFF_MILLIS * attempt);
+                    if (retryable && attempt < RETRY_LIMIT) {
+                        sleepQuietly(backoff * attempt);
                         continue;
                     }
                     throw new BusinessException(ResultCode.NOTIFICATION_CHANNEL_SEND_FAILED,
                             "飞书接口调用失败: http=" + response.code() + ", body=" + respBody);
                 }
                 if (code != null && !"0".equals(String.valueOf(code))) {
-                    if (rateLimited && attempt < RETRY_LIMIT) {
-                        sleepQuietly(RATE_LIMIT_BACKOFF_MILLIS * attempt);
+                    if (retryable && attempt < RETRY_LIMIT) {
+                        sleepQuietly(backoff * attempt);
                         continue;
                     }
                     throw new BusinessException(ResultCode.NOTIFICATION_CHANNEL_SEND_FAILED,
@@ -485,8 +487,12 @@ public class FeishuDocDeliveryService {
         return objectMapper.readValue(respBody, Map.class);
     }
 
-    private boolean isRateLimited(int httpCode, Object code) {
-        return httpCode == 429 || "99991400".equals(String.valueOf(code));
+    private boolean isRetryable(int httpCode, Object code) {
+        return httpCode == 429 || "99991400".equals(String.valueOf(code)) || isFolderLocked(code);
+    }
+
+    private boolean isFolderLocked(Object code) {
+        return "1770036".equals(String.valueOf(code));
     }
 
     private List<Map<String, Object>> extractBlocks(Object value) {

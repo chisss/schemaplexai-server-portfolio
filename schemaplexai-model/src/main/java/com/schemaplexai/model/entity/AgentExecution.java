@@ -85,6 +85,9 @@ public class AgentExecution implements Serializable {
     /** 错误信息 */
     private String errorMessage;
 
+    /** 执行模式: auto/plan/suggest */
+    private String executionMode;
+
     /** 开始时间 */
     private LocalDateTime startedAt;
 

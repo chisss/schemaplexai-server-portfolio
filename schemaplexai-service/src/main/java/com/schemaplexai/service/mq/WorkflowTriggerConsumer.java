@@ -22,6 +22,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
@@ -61,6 +62,15 @@ public class WorkflowTriggerConsumer {
             String templateId = resolveTemplateId(message);
             if (!StringUtils.hasText(templateId)) {
                 log.warn("未找到匹配的工作流模板: specId={}, triggerType={}", specId, triggerType);
+                return;
+            }
+            WorkflowTemplate template = workflowTemplateMapper.selectById(templateId);
+            if (template == null) {
+                log.warn("工作流模板不存在，跳过事件触发: specId={}, templateId={}", specId, templateId);
+                return;
+            }
+            if (!isEventTriggerEnabled(template)) {
+                log.info("事件触发未启用，跳过工作流创建: specId={}, templateId={}", specId, templateId);
                 return;
             }
 
@@ -210,6 +220,54 @@ public class WorkflowTriggerConsumer {
         variables.put("tenantId", message.getTenantId());
         variables.entrySet().removeIf(entry -> entry.getValue() == null);
         return variables;
+    }
+
+    private boolean isEventTriggerEnabled(WorkflowTemplate template) {
+        Map<String, Object> triggerNode = findTriggerNode(template);
+        if (triggerNode == null || !"trigger_event".equals(readString(triggerNode, "type"))) {
+            return true;
+        }
+        Map<String, Object> config = getConfig(triggerNode);
+        return Boolean.TRUE.equals(config.get("enabled"));
+    }
+
+    private Map<String, Object> findTriggerNode(WorkflowTemplate template) {
+        if (template == null || template.getDefinition() == null) {
+            return null;
+        }
+        Object rawNodes = template.getDefinition().get("nodes");
+        if (!(rawNodes instanceof List<?> nodes)) {
+            return null;
+        }
+        for (Object rawNode : nodes) {
+            if (rawNode instanceof Map<?, ?> rawMap) {
+                Map<String, Object> node = new LinkedHashMap<>();
+                rawMap.forEach((key, value) -> node.put(String.valueOf(key), value));
+                String type = readString(node, "type");
+                if (type.startsWith("trigger_") || "start".equals(type)) {
+                    return node;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Object> getConfig(Map<String, Object> node) {
+        Object rawConfig = node.get("config");
+        if (rawConfig instanceof Map<?, ?> rawMap) {
+            Map<String, Object> config = new LinkedHashMap<>();
+            rawMap.forEach((key, value) -> config.put(String.valueOf(key), value));
+            return config;
+        }
+        return Map.of();
+    }
+
+    private String readString(Map<String, Object> data, String key) {
+        if (data == null || !StringUtils.hasText(key)) {
+            return "";
+        }
+        Object value = data.get(key);
+        return value != null ? String.valueOf(value) : "";
     }
 
     private String findTemplateByTriggerType(String triggerType) {

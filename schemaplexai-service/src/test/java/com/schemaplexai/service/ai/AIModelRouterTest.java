@@ -23,6 +23,7 @@ class AIModelRouterTest {
         AiModelMapper aiModelMapper = mock(AiModelMapper.class);
         AiModelRouteMapper aiModelRouteMapper = mock(AiModelRouteMapper.class);
         LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);
+        ModelMetricsTracker modelMetricsTracker = mock(ModelMetricsTracker.class);
         when(modelFactory.getOrCreate(any())).thenReturn(mock(ChatModel.class));
 
         AiModel primary = buildModel("primary-id", "MiniMax-M2.7", "MiniMax-M2.7", "failed", 166);
@@ -38,13 +39,20 @@ class AIModelRouterTest {
         when(aiModelMapper.selectOne(any()))
                 .thenReturn(primary, primary, secondary, tertiary);
         when(aiModelRouteMapper.selectOne(any())).thenReturn(route);
+        when(modelMetricsTracker.loadMetrics(primary.getId()))
+                .thenReturn(new ModelMetricsTracker.RuntimeMetrics(10L, 4L, 40D, 32_000L, "critical", null));
+        when(modelMetricsTracker.loadMetrics(secondary.getId()))
+                .thenReturn(new ModelMetricsTracker.RuntimeMetrics(10L, 1L, 10D, 900L, "warning", null));
+        when(modelMetricsTracker.loadMetrics(tertiary.getId()))
+                .thenReturn(new ModelMetricsTracker.RuntimeMetrics(10L, 0L, 0D, 500L, "healthy", null));
 
         AIModelRouter router = new AIModelRouter(
                 modelFactory,
                 aiModelMapper,
                 aiModelRouteMapper,
                 mock(AiModelGroupItemMapper.class),
-                mock(ModelLoadBalancer.class)
+                mock(ModelLoadBalancer.class),
+                modelMetricsTracker
         );
 
         List<LangChain4jResolution> chain = router.resolveRouteChain("MiniMax-M2.7");
@@ -59,6 +67,7 @@ class AIModelRouterTest {
         AiModelMapper aiModelMapper = mock(AiModelMapper.class);
         AiModelRouteMapper aiModelRouteMapper = mock(AiModelRouteMapper.class);
         LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);
+        ModelMetricsTracker modelMetricsTracker = mock(ModelMetricsTracker.class);
         when(modelFactory.getOrCreate(any())).thenReturn(mock(ChatModel.class));
 
         AiModel primary = buildModel("primary-id", "Claude Code Sonnet 4.6", "claude-sonnet-4-6", "success", 2278);
@@ -72,13 +81,18 @@ class AIModelRouterTest {
         when(aiModelMapper.selectOne(any()))
                 .thenReturn(primary, primary, secondary);
         when(aiModelRouteMapper.selectOne(any())).thenReturn(route);
+        when(modelMetricsTracker.loadMetrics(primary.getId()))
+                .thenReturn(new ModelMetricsTracker.RuntimeMetrics(10L, 0L, 0D, 700L, "healthy", null));
+        when(modelMetricsTracker.loadMetrics(secondary.getId()))
+                .thenReturn(new ModelMetricsTracker.RuntimeMetrics(10L, 0L, 0D, 500L, "healthy", null));
 
         AIModelRouter router = new AIModelRouter(
                 modelFactory,
                 aiModelMapper,
                 aiModelRouteMapper,
                 mock(AiModelGroupItemMapper.class),
-                mock(ModelLoadBalancer.class)
+                mock(ModelLoadBalancer.class),
+                modelMetricsTracker
         );
 
         List<LangChain4jResolution> chain = router.resolveRouteChain("Claude Code Sonnet 4.6");
@@ -86,6 +100,34 @@ class AIModelRouterTest {
         assertThat(chain)
                 .extracting(item -> item.config().getModelId())
                 .containsExactly("claude-sonnet-4-6", "glm-4.7");
+    }
+
+    @Test
+    void shouldResolvePrimaryModelFromHealthyTextModels() {
+        AiModelMapper aiModelMapper = mock(AiModelMapper.class);
+        LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);
+
+        AiModel failedFirst = buildModel("failed-id", "MiniMax-M2.5", "MiniMax-M2.5", "failed", 194);
+        failedFirst.setUseCase("general_llm");
+        AiModel imageModel = buildModel("image-id", "GPT Image", "gpt-image-1", "success", 300);
+        imageModel.setUseCase("image_generation");
+        AiModel healthyText = buildModel("healthy-id", "DeepSeek V3.2", "deepseek-v3.2", "success", 500);
+        healthyText.setUseCase("general_llm");
+
+        when(aiModelMapper.selectList(any())).thenReturn(List.of(failedFirst, imageModel, healthyText));
+
+        AIModelRouter router = new AIModelRouter(
+                modelFactory,
+                aiModelMapper,
+                mock(AiModelRouteMapper.class),
+                mock(AiModelGroupItemMapper.class),
+                mock(ModelLoadBalancer.class),
+                mock(ModelMetricsTracker.class)
+        );
+
+        AiModelConfig config = router.resolvePrimaryModel("tenant-id");
+
+        assertThat(config.getModelId()).isEqualTo("deepseek-v3.2");
     }
 
     private AiModel buildModel(String id, String name, String modelId, String lastTestStatus, Integer latency) {

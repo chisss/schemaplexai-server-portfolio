@@ -6,12 +6,16 @@ import com.schemaplexai.model.dto.monitor.AuditLogQueryRequest;
 import com.schemaplexai.model.dto.monitor.ReportQueryRequest;
 import com.schemaplexai.model.dto.monitor.ReportTemplateCreateRequest;
 import com.schemaplexai.model.vo.monitor.ActiveAgentVO;
+import com.schemaplexai.model.vo.monitor.AgentTraceSpanVO;
+import com.schemaplexai.model.vo.monitor.AgentTraceVO;
 import com.schemaplexai.model.vo.monitor.AuditLogVO;
 import com.schemaplexai.model.vo.monitor.DashboardVO;
+import com.schemaplexai.model.vo.monitor.AgentTraceFailureSummaryVO;
 import com.schemaplexai.model.vo.monitor.ReportDataVO;
 import com.schemaplexai.model.vo.monitor.ReportTemplateVO;
 import com.schemaplexai.model.vo.monitor.SystemHealthVO;
 import com.schemaplexai.model.vo.monitor.TaskQueueVO;
+import com.schemaplexai.service.monitor.AgentTraceService;
 import com.schemaplexai.service.monitor.AuditLogService;
 import com.schemaplexai.service.monitor.DashboardService;
 import com.schemaplexai.service.monitor.ReportService;
@@ -42,6 +46,7 @@ public class MonitorController {
     private final DashboardService dashboardService;
     private final ReportService reportService;
     private final AuditLogService auditLogService;
+    private final AgentTraceService agentTraceService;
 
     // ==================== 仪表盘 ====================
 
@@ -137,5 +142,29 @@ public class MonitorController {
     @Operation(summary = "获取审计日志详情")
     public R<AuditLogVO> getAuditLog(@PathVariable String id) {
         return R.ok(auditLogService.getById(id));
+    }
+
+    @GetMapping("/traces/agent/{agentId}")
+    @Operation(summary = "查询 Agent 调用链列表")
+    public R<List<AgentTraceVO>> getAgentTraces(@PathVariable String agentId) {
+        return R.ok(agentTraceService.listAgentTraces(agentId));
+    }
+
+    @GetMapping("/traces/recent")
+    @Operation(summary = "查询最近调用链列表")
+    public R<List<AgentTraceVO>> getRecentTraces() {
+        return R.ok(agentTraceService.listAgentTraces(null));
+    }
+
+    @GetMapping("/traces/{traceId}/spans")
+    @Operation(summary = "查询单次执行 Span")
+    public R<List<AgentTraceSpanVO>> getTraceSpans(@PathVariable String traceId) {
+        return R.ok(agentTraceService.listTraceSpans(traceId));
+    }
+
+    @GetMapping("/traces/{traceId}/failure-summary")
+    @Operation(summary = "查询单次执行失败分类摘要")
+    public R<AgentTraceFailureSummaryVO> getTraceFailureSummary(@PathVariable String traceId) {
+        return R.ok(agentTraceService.summarizeFailures(traceId));
     }
 }

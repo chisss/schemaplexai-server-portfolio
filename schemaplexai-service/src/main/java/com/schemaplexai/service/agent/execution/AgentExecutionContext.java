@@ -95,4 +95,12 @@ public class AgentExecutionContext {
 
     /** 是否启用流式输出（当前阶段预留） */
     private boolean stream;
+
+    /** 执行模式: auto/plan/suggest */
+    @Builder.Default
+    private String executionMode = "auto";
+
+    /** 是否系统内置Agent */
+    @Builder.Default
+    private boolean systemAgent = false;
 }

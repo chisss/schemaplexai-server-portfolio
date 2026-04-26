@@ -260,6 +260,7 @@ public class ApiGatewayServiceImpl implements ApiGatewayService {
         logEntity.setResponseHeaders(result.getResponseHeaders());
         logEntity.setResponseBody(result.getResponseBody());
         logEntity.setDurationMs(result.getDurationMs());
+        logEntity.setCost(result.getCost());
         logEntity.setSuccess(result.getSuccess());
         logEntity.setErrorMessage(result.getErrorMessage());
         logEntity.setCreatedAt(LocalDateTime.now());

@@ -8,21 +8,21 @@ import com.schemaplexai.common.constant.ToolConfigConstant;
 import com.schemaplexai.common.enums.HttpMethodEnum;
 import com.schemaplexai.common.enums.McpServerStatusEnum;
 import com.schemaplexai.common.enums.SkillImplementationTypeEnum;
-import com.schemaplexai.common.enums.SkillStatusEnum;
 import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.common.enums.ToolExecutionStatusEnum;
 import com.schemaplexai.dao.mapper.AgentToolConfigMapper;
 import com.schemaplexai.dao.mapper.McpServerMapper;
-import com.schemaplexai.dao.mapper.SkillInstallationMapper;
 import com.schemaplexai.dao.mapper.SkillMapper;
 import com.schemaplexai.model.entity.AgentToolConfig;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.entity.Skill;
-import com.schemaplexai.model.entity.SkillInstallation;
 import com.schemaplexai.service.agent.tool.builtin.BuiltinSkillExecutor;
+import com.schemaplexai.service.agent.tool.audit.ToolExecutionErrorCode;
 import com.schemaplexai.service.agent.tool.audit.ToolExecutionLogService;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
+import com.schemaplexai.service.agent.tool.validator.SkillAccessResult;
+import com.schemaplexai.service.agent.tool.validator.SkillAccessValidator;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import lombok.RequiredArgsConstructor;
@@ -44,7 +44,6 @@ import java.util.Map.Entry;
 public class SkillToolExecutor implements ToolExecutor {
 
     private final SkillMapper skillMapper;
-    private final SkillInstallationMapper skillInstallationMapper;
     private final McpServerMapper mcpServerMapper;
     private final AgentToolConfigMapper agentToolConfigMapper;
     private final McpClientService mcpClientService;
@@ -52,6 +51,7 @@ public class SkillToolExecutor implements ToolExecutor {
     private final ToolExecutionLogService logService;
     private final List<BuiltinSkillExecutor> builtinExecutors;
     private final OkHttpClient okHttpClient;
+    private final SkillAccessValidator skillAccessValidator;
 
     @Override
     public String sourceType() {
@@ -77,15 +77,13 @@ public class SkillToolExecutor implements ToolExecutor {
                         SourceTypeEnum.SKILL.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "Skill 不存在");
                 return failure(toolCall, "Skill 不存在: " + binding.getSourceRefId());
             }
-            if (!SkillStatusEnum.ACTIVE.getCode().equalsIgnoreCase(skill.getStatus())) {
+            SkillAccessResult accessResult = skillAccessValidator.validate(tenantId, skill);
+            if (!accessResult.accessible()) {
                 logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.SKILL.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "Skill 未启用");
-                return failure(toolCall, "Skill 未启用: " + skill.getName());
-            }
-            if (!isSkillInstalledOrOwned(tenantId, skill)) {
-                logService.logExecution(tenantId, agentId, null, toolCall.getCallId(),
-                        SourceTypeEnum.SKILL.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(), null, null, "Skill 未安装或无访问权限");
-                return failure(toolCall, "Skill 未安装或无访问权限: " + skill.getName());
+                        SourceTypeEnum.SKILL.getCode(), toolCode, ToolExecutionStatusEnum.FAILED.getCode(), startAt, LocalDateTime.now(),
+                        Map.of("accessStatus", accessResult.status()), null,
+                        ToolExecutionErrorCode.SKILL_NOT_INSTALLED, accessResult.message());
+                return failure(toolCall, accessResult.message() + ": " + skill.getName());
             }
 
             Map<String, Object> implementation = skill.getImplementation();
@@ -213,17 +211,6 @@ public class SkillToolExecutor implements ToolExecutor {
             log.warn("加载工具配置失败: bindingId={}, error={}", bindingId, e.getMessage());
         }
         return Map.of();
-    }
-
-    private boolean isSkillInstalledOrOwned(String tenantId, Skill skill) {
-        if (StringUtils.hasText(skill.getTenantId()) && skill.getTenantId().equals(tenantId)) {
-            return true;
-        }
-        Long installedCount = skillInstallationMapper.selectCount(new LambdaQueryWrapper<SkillInstallation>()
-                .eq(SkillInstallation::getTenantId, tenantId)
-                .eq(SkillInstallation::getSkillId, skill.getId())
-                .eq(SkillInstallation::getStatus, "installed"));
-        return installedCount != null && installedCount > 0;
     }
 
     private String firstText(Map<String, Object> source, String... keys) {

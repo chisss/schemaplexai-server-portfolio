@@ -2,6 +2,7 @@ package com.schemaplexai.service.workflow.engine;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
@@ -14,6 +15,7 @@ import com.schemaplexai.common.enums.TaskStatusEnum;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
+import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.RoleMapper;
 import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.dao.mapper.UserRoleMapper;
@@ -21,6 +23,7 @@ import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.QualityIssue;
 import com.schemaplexai.model.entity.Role;
 import com.schemaplexai.model.entity.Spec;
@@ -34,6 +37,9 @@ import com.schemaplexai.model.vo.workflow.ReviewSessionVO;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
+import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
+import com.schemaplexai.service.agent.tool.model.ToolCall;
+import com.schemaplexai.service.ai.ImageGenerationService;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import com.schemaplexai.service.quality.gate.QualityGateDecision;
 import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
@@ -97,11 +103,14 @@ public class WorkflowNodeEngine {
     private static final int MAX_WORKFLOW_AGENT_MAX_ROUNDS = 16;
     private static final int MAX_WORKFLOW_AGENT_MAX_TOOL_CALLS_PER_ROUND = 12;
     private static final int WORKFLOW_AGENT_MIN_MAX_MESSAGES = 64;
+    private static final int REQUIRED_IMAGE_PROMPT_MAX_LENGTH = 800;
+    private static final int REQUIRED_IMAGE_CONTENT_SUMMARY_MAX_LENGTH = 360;
 
     private final WorkflowInstanceMapper instanceMapper;
     private final WorkflowNodeExecutionMapper nodeExecutionMapper;
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentMapper agentMapper;
+    private final AiModelMapper aiModelMapper;
     private final SpecMapper specMapper;
     private final RoleMapper roleMapper;
     private final UserRoleMapper userRoleMapper;
@@ -119,6 +128,9 @@ public class WorkflowNodeEngine {
     private final QualityIssueFeedbackService qualityIssueFeedbackService;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
     private final FlowableWorkflowBridge flowableBridge;
+    private final ImageGenerationService imageGenerationService;
+    private final BuiltinToolExecutor builtinToolExecutor;
+    private final ObjectMapper objectMapper;
 
     /**
      * 自注入自身代理，用于让 @Async 注解在同类方法调用时生效（绕过 Spring AOP 自调用限制）
@@ -178,6 +190,35 @@ public class WorkflowNodeEngine {
         if (!nodes.isEmpty()) {
             initNodeExecutions(instance, nodes);
         }
+    }
+
+    /**
+     * 重新驱动当前待执行节点，用于修复本地引擎启动后异步任务未派发的悬挂实例。
+     */
+    public boolean drivePendingCurrentNode(WorkflowInstance instance) {
+        if (instance == null || !StringUtils.hasText(instance.getCurrentNodeId())) {
+            return false;
+        }
+        Map<String, Object> definition = instance.getDefinition();
+        if (definition == null) {
+            return false;
+        }
+        List<Map<String, Object>> nodes = getNodes(definition);
+        List<Map<String, Object>> edges = getEdges(definition);
+        Map<String, Object> nodeDef = findNodeDef(instance.getCurrentNodeId(), nodes);
+        if (nodeDef == null) {
+            log.warn("当前节点定义不存在，无法恢复驱动: instanceId={}, nodeId={}",
+                    instance.getId(), instance.getCurrentNodeId());
+            return false;
+        }
+        WorkflowNodeExecution nodeExecution = findNodeExecution(instance.getId(), instance.getCurrentNodeId());
+        if (nodeExecution == null || !WorkflowInstanceStatusEnum.PENDING.getCode().equals(nodeExecution.getStatus())) {
+            return false;
+        }
+        log.warn("重新驱动当前待执行节点: instanceId={}, nodeId={}, nodeType={}",
+                instance.getId(), instance.getCurrentNodeId(), str(nodeDef, "type"));
+        driveNodeAfterCommit(instance, instance.getCurrentNodeId(), nodes, edges, new HashMap<>());
+        return true;
     }
 
     /**
@@ -549,6 +590,7 @@ public class WorkflowNodeEngine {
                 if (artifactData != null && !artifactData.isEmpty()) {
                     outputData.putAll(artifactData);
                 }
+                ensureRequiredImageGeneration(instance, nodeExec, nodeConfig, outputData, result);
                 syncArtifactVariables(instance, nodeConfig, artifactData);
                 QualityGateDecision qualityGateDecision =
                         builtinQualityAssuranceService.evaluateWorkflowNodeGate(
@@ -583,6 +625,10 @@ public class WorkflowNodeEngine {
                     log.error("Agent节点命中质量闸门失败: instanceId={}, nodeId={}, reason={}",
                             instanceId, nodeId, qualityGateDecision.message());
                     return;
+                }
+                String outputVariableKey = readString(nodeConfig, "outputVariableKey");
+                if (StringUtils.hasText(outputVariableKey) && StringUtils.hasText(result)) {
+                    outputData.put(outputVariableKey, result);
                 }
             }
             completeNodeExecution(nodeExec, outputData);
@@ -1241,12 +1287,26 @@ public class WorkflowNodeEngine {
                 exec.setNodeId(nodeId);
                 exec.setNodeType(nodeType);
                 exec.setNodeLabel(nodeLabel);
-                exec.setStatus(WorkflowInstanceStatusEnum.PENDING.getCode());
+                boolean startNode = isStartNode(nodeId, nodeType);
+                exec.setStatus(startNode
+                        ? WorkflowInstanceStatusEnum.COMPLETED.getCode()
+                        : WorkflowInstanceStatusEnum.PENDING.getCode());
                 exec.setInputData(new HashMap<>());
-                exec.setOutputData(new HashMap<>());
+                exec.setOutputData(startNode
+                        ? Map.of("started", true)
+                        : new HashMap<>());
+                if (startNode) {
+                    LocalDateTime now = LocalDateTime.now();
+                    exec.setStartedAt(now);
+                    exec.setCompletedAt(now);
+                }
                 nodeExecutionMapper.insert(exec);
             }
         }
+    }
+
+    private boolean isStartNode(String nodeId, String nodeType) {
+        return "start".equals(nodeId) || "start".equals(nodeType);
     }
 
     private void onAgentNodeCompletedSafely(String instanceId, String nodeId, String agentExecutionStatus, String result) {
@@ -1392,6 +1452,16 @@ public class WorkflowNodeEngine {
                 ? new HashMap<>(instance.getVariables()) : new HashMap<>();
         Map<String, Object> handoffPayload = resolveHandoffPayload(outputData);
         variables.put(nodeId + "_output", handoffPayload);
+        handoffPayload.forEach((key, value) -> {
+            if (StringUtils.hasText(key) && value != null) {
+                variables.put(key, value);
+            }
+        });
+        Object tracePayload = outputData != null ? outputData.get("tracePayload") : null;
+        if (tracePayload instanceof Map<?, ?> traceMap) {
+            copyWorkflowVariable((Map<String, Object>) traceMap, variables, "illustrationResult");
+            copyWorkflowVariable((Map<String, Object>) traceMap, variables, "imageUrls");
+        }
 
         WorkflowInstance update = new WorkflowInstance();
         update.setId(instance.getId());
@@ -1402,6 +1472,155 @@ public class WorkflowNodeEngine {
         instance.setVariables(variables);
         log.info("保存节点轻量输出: instanceId={}, nodeId={}, handoffChars={}, workflowVariablesChars={}",
                 instance.getId(), nodeId, estimateChars(handoffPayload), estimateChars(variables));
+    }
+
+    private void copyWorkflowVariable(Map<String, Object> source, Map<String, Object> target, String key) {
+        if (source == null || target == null || !StringUtils.hasText(key)) {
+            return;
+        }
+        Object value = source.get(key);
+        if (value != null) {
+            target.put(key, value);
+        }
+    }
+
+    private void ensureRequiredImageGeneration(WorkflowInstance instance, WorkflowNodeExecution nodeExec,
+                                               Map<String, Object> nodeConfig, Map<String, Object> outputData,
+                                               String result) {
+        if (!requiresImageGeneration(nodeConfig) || hasImageUrls(outputData) || hasImageUrls(instance.getVariables())) {
+            return;
+        }
+        AiModel imageModel = resolveRequiredImageModel(instance.getTenantId(), nodeConfig);
+        if (imageModel == null) {
+            outputData.put("requiredToolWarning", "已配置强制生图，但未找到可用生图模型");
+            return;
+        }
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("modelId", imageModel.getId());
+        args.put("prompt", buildRequiredImagePrompt(instance, nodeExec, nodeConfig, result));
+        args.put("size", defaultIfBlank(readString(nodeConfig, "imageSize"), "2K"));
+        args.put("n", 1);
+        ToolCall toolCall = ToolCall.builder()
+                .callId("workflow-required-image-" + nodeExec.getId())
+                .toolCode("ai.image.generate")
+                .arguments(objectMapper.valueToTree(args))
+                .build();
+        var toolResult = builtinToolExecutor.execute(instance.getTenantId(), nodeExec.getAgentExecutionId(), null, toolCall);
+        if (!toolResult.isSuccess()) {
+            outputData.put("requiredToolWarning", "强制生图失败: " + toolResult.getErrorMessage());
+            return;
+        }
+        Map<String, Object> imagePayload = objectMapper.convertValue(toolResult.getResult(), Map.class);
+        outputData.put("requiredTool", "ai.image.generate");
+        outputData.put("imageGeneration", imagePayload);
+        Object imageUrls = imagePayload.get("imageUrls");
+        if (imageUrls != null) {
+            outputData.put("imageUrls", imageUrls);
+            Map<String, Object> tracePayload = outputData.get("tracePayload") instanceof Map<?, ?> raw
+                    ? new LinkedHashMap<>((Map<String, Object>) raw)
+                    : new LinkedHashMap<>();
+            tracePayload.put("imageUrls", imageUrls);
+            tracePayload.put("illustrationResult", imagePayload);
+            outputData.put("tracePayload", tracePayload);
+        }
+    }
+
+    private boolean requiresImageGeneration(Map<String, Object> nodeConfig) {
+        Object requiredTools = nodeConfig != null ? nodeConfig.get("requiredTools") : null;
+        if (requiredTools instanceof List<?> tools) {
+            return tools.stream().anyMatch(item -> "ai.image.generate".equals(String.valueOf(item)));
+        }
+        return "ai.image.generate".equals(readString(nodeConfig, "requiredTool"));
+    }
+
+    private boolean hasImageUrls(Map<String, Object> data) {
+        if (data == null) {
+            return false;
+        }
+        Object urls = data.get("imageUrls");
+        if (urls instanceof List<?> list) {
+            return !list.isEmpty();
+        }
+        if (urls instanceof String text) {
+            return StringUtils.hasText(text);
+        }
+        Object tracePayload = data.get("tracePayload");
+        if (tracePayload instanceof Map<?, ?> traceMap) {
+            return hasImageUrls((Map<String, Object>) traceMap);
+        }
+        return false;
+    }
+
+    private AiModel resolveRequiredImageModel(String tenantId, Map<String, Object> nodeConfig) {
+        String configuredModelId = readString(nodeConfig, "imageModelId");
+        LambdaQueryWrapper<AiModel> wrapper = new LambdaQueryWrapper<AiModel>()
+                .eq(AiModel::getStatus, com.schemaplexai.common.constant.CommonConstant.STATUS_ACTIVE)
+                .and(StringUtils.hasText(tenantId), condition -> condition
+                        .eq(AiModel::getTenantId, tenantId)
+                        .or()
+                        .eq(AiModel::getTenantId, "00000000-0000-0000-0000-000000000000"))
+                .last("LIMIT 20");
+        if (StringUtils.hasText(configuredModelId)) {
+            wrapper.eq(AiModel::getId, configuredModelId);
+        }
+        return aiModelMapper.selectList(wrapper).stream()
+                .filter(imageGenerationService::isImageModel)
+                .filter(model -> !StringUtils.hasText(configuredModelId)
+                        || configuredModelId.equals(model.getId()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private String buildRequiredImagePrompt(WorkflowInstance instance, WorkflowNodeExecution nodeExec,
+                                            Map<String, Object> nodeConfig, String result) {
+        String explicitPrompt = readString(nodeConfig, "imagePrompt");
+        if (StringUtils.hasText(explicitPrompt)) {
+            return limitText(compactImagePromptText(explicitPrompt), REQUIRED_IMAGE_PROMPT_MAX_LENGTH);
+        }
+        String contentSummary = resolveImagePromptSource(instance, result);
+        return "请生成一张商业可用的高质量配图，风格：现代SaaS科技插画，画面干净，主题清晰，适合报告、海报或营销落地页。\n"
+                + "工作流：" + limitText(defaultIfBlank(instance.getName(), ""), 80) + "\n"
+                + "节点：" + limitText(defaultIfBlank(nodeExec.getNodeLabel(), nodeExec.getNodeId()), 40) + "\n"
+                + "内容摘要：" + limitText(compactImagePromptText(contentSummary), REQUIRED_IMAGE_CONTENT_SUMMARY_MAX_LENGTH);
+    }
+
+    private String resolveImagePromptSource(WorkflowInstance instance, String result) {
+        if (instance != null && instance.getVariables() != null) {
+            String originalRequirement = readString(instance.getVariables(), "originalRequirement");
+            if (StringUtils.hasText(originalRequirement)) {
+                return originalRequirement;
+            }
+            String specDescription = readString(instance.getVariables(), "specDescription");
+            if (StringUtils.hasText(specDescription)) {
+                return specDescription;
+            }
+        }
+        return result;
+    }
+
+    private String compactImagePromptText(String value) {
+        if (!StringUtils.hasText(value)) {
+            return "围绕当前业务交付生成一张专业、克制、可商用的主题配图。";
+        }
+        String compacted = value
+                .replaceAll("https?://\\S+", "[图片链接已省略]")
+                .replaceAll("(?i)request[_ -]?id[:：]?\\s*[a-z0-9\\-]+", "")
+                .replaceAll("(?i)(api key|authentication_error|insufficient_quota|invalid_request_error|too many requests)[^。；;\n]*", "")
+                .replaceAll("[{}\\[\\]\\\"]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+        return StringUtils.hasText(compacted) ? compacted : "围绕当前业务交付生成一张专业、克制、可商用的主题配图。";
+    }
+
+    private String defaultIfBlank(String value, String fallback) {
+        return StringUtils.hasText(value) ? value : fallback;
+    }
+
+    private String limitText(String value, int maxLength) {
+        if (!StringUtils.hasText(value) || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength) + "...[截断]";
     }
 
     @SuppressWarnings("unchecked")
@@ -1678,6 +1897,10 @@ public class WorkflowNodeEngine {
         copyIfPresent(tracePayload, handoff, "agentExecutionId");
         copyIfPresent(tracePayload, handoff, "agentModel");
         copyIfPresent(tracePayload, handoff, "runtimeEngine");
+        copyIfPresent(tracePayload, handoff, "imageUrls");
+        copyIfPresent(tracePayload, handoff, "imageGeneration");
+        copyIfPresent(tracePayload, handoff, "illustrationResult");
+        copyIfPresent(tracePayload, handoff, "requiredTool");
         String summary = resolveOutputSummary(tracePayload);
         if (StringUtils.hasText(summary)) {
             handoff.put("summary", summary);

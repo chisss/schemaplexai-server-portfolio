@@ -4,7 +4,9 @@ import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberContextBindingMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
+import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
+import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
@@ -14,10 +16,14 @@ import com.schemaplexai.service.mq.AgentContextPublisher;
 import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
+import java.lang.reflect.Method;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class TeamAgentRuntimeStrategyTest {
 
@@ -149,11 +155,69 @@ class TeamAgentRuntimeStrategyTest {
         assertThat(prompt).contains("本轮必须优先解决上述缺口");
     }
 
+    @Test
+    void shouldUseCustomerDeliveryPromptForLeadWithoutWebResearchBias() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        AgentTeamMember member = new AgentTeamMember();
+        member.setRoleName("内容方案主编");
+        member.setRoleType("lead_agent");
+
+        String prompt = strategy.buildMemberPrompt(
+                """
+                请输出最终交付文档。
+
+                ## 当前流程上下文
+                目标产物: deliveries/blogger/customer-demo.md
+                目标产物标题: SchemaPlexAI 知识内容生产客户演示方案
+                """,
+                member,
+                0,
+                null,
+                Map.of(),
+                null,
+                "## 上游成员已确认事实与证据\n- 已确认博主痛点、栏目结构和交付方向"
+        );
+
+        assertThat(prompt).contains("输出面向客户或业务负责人的最终交付 Markdown");
+        assertThat(prompt).contains("优先复用上游已确认事实、流程上下文和已生成产物");
+        assertThat(prompt).doesNotContain("web.fetch 直接抓取官网首页");
+        assertThat(prompt).doesNotContain("仓库中未发现");
+    }
+
+    @Test
+    void shouldSummarizeChildExecutionTokenUsageForTeamParent() throws Exception {
+        AgentExecutionMapper executionMapper = mock(AgentExecutionMapper.class);
+        AgentExecution first = new AgentExecution();
+        first.setTokenInput(120L);
+        first.setTokenOutput(80L);
+        AgentExecution second = new AgentExecution();
+        second.setTokenInput(30L);
+        second.setTokenOutput(null);
+        when(executionMapper.selectList(any())).thenReturn(List.of(first, second));
+        TeamAgentRuntimeStrategy strategy = createStrategy(executionMapper);
+
+        Method method = TeamAgentRuntimeStrategy.class.getDeclaredMethod("summarizeTeamTokenUsage", String.class);
+        method.setAccessible(true);
+        Object summary = method.invoke(strategy, "parent-exec-1");
+
+        Method inputTokens = summary.getClass().getDeclaredMethod("inputTokens");
+        Method outputTokens = summary.getClass().getDeclaredMethod("outputTokens");
+        inputTokens.setAccessible(true);
+        outputTokens.setAccessible(true);
+        assertThat(inputTokens.invoke(summary)).isEqualTo(150L);
+        assertThat(outputTokens.invoke(summary)).isEqualTo(80L);
+    }
+
     private TeamAgentRuntimeStrategy createStrategy() {
+        return createStrategy(mock(AgentExecutionMapper.class));
+    }
+
+    private TeamAgentRuntimeStrategy createStrategy(AgentExecutionMapper agentExecutionMapper) {
         return new TeamAgentRuntimeStrategy(
-                mock(AgentExecutionMapper.class),
+                agentExecutionMapper,
                 mock(AgentTeamMemberMapper.class),
                 mock(AgentTeamMemberToolBindingMapper.class),
+                mock(BuiltinToolMapper.class),
                 mock(AgentTeamMemberContextBindingMapper.class),
                 mock(ContextItemMapper.class),
                 mock(AgentExecutionEngine.class),
