@@ -69,6 +69,12 @@ public class AgentVO {
     /** Agent能力标签，逗号分隔，对应字典 agent_tag */
     private String agentTag;
 
+    /** 是否系统内置Agent */
+    private Boolean isSystemAgent;
+
+    /** 系统Agent唯一编码 */
+    private String systemAgentCode;
+
     /** 是否内置Agent */
     private boolean builtin;
 

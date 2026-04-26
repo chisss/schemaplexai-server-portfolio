@@ -47,7 +47,8 @@ class BuiltinToolExecutorTest {
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
                 mock(WasmSandboxService.class),
-                mock(ToolExecutionLockService.class)
+                mock(ToolExecutionLockService.class),
+                null
         );
         Method method = BuiltinToolExecutor.class.getDeclaredMethod("truncateCommandOutput", String.class);
         method.setAccessible(true);
@@ -98,7 +99,8 @@ class BuiltinToolExecutorTest {
                     new OkHttpClient(),
                     mock(ToolSecurityValidator.class),
                     mock(WasmSandboxService.class),
-                    mock(ToolExecutionLockService.class)
+                    mock(ToolExecutionLockService.class),
+                    null
             );
             ToolCall toolCall = ToolCall.builder()
                     .callId("call-web-fetch")
@@ -141,7 +143,8 @@ class BuiltinToolExecutorTest {
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
                 mock(WasmSandboxService.class),
-                mock(ToolExecutionLockService.class)
+                mock(ToolExecutionLockService.class),
+                null
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-sys-read")
@@ -175,7 +178,8 @@ class BuiltinToolExecutorTest {
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
                 mock(WasmSandboxService.class),
-                passthroughLockService()
+                passthroughLockService(),
+                null
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-default-workdir")
@@ -221,7 +225,8 @@ class BuiltinToolExecutorTest {
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
                 mock(WasmSandboxService.class),
-                passthroughLockService()
+                passthroughLockService(),
+                null
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-workdir-alias")
@@ -269,7 +274,8 @@ class BuiltinToolExecutorTest {
                 new OkHttpClient(),
                 mock(ToolSecurityValidator.class),
                 mock(WasmSandboxService.class),
-                mock(ToolExecutionLockService.class)
+                mock(ToolExecutionLockService.class),
+                null
         );
         ToolCall toolCall = ToolCall.builder()
                 .callId("call-project-root")

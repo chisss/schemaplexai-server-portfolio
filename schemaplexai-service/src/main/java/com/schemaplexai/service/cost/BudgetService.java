@@ -21,9 +21,15 @@ public interface BudgetService {
 
     BudgetVO update(String id, BudgetUpdateRequest request);
 
+    BudgetVO upsertCurrentBudget(BudgetUpdateRequest request);
+
     void delete(String id);
 
+    BudgetVO getCurrentBudget();
+
     BudgetUsageVO getUsage(String id);
+
+    BudgetUsageVO getCurrentBudgetUsage();
 
     List<BudgetAlertVO> getAlerts(Integer page, Integer size);
 }

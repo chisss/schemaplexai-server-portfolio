@@ -19,6 +19,8 @@ public class NotificationDispatchRequest {
 
     private NotificationMessage message;
 
+    private String tenantId;
+
     private String templateId;
 
     private String templateName;

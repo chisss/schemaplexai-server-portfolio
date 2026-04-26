@@ -7,6 +7,7 @@ import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberContextBindingMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
+import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.entity.Agent;
@@ -66,6 +67,7 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         AgentExecutionMapper agentExecutionMapper = mock(AgentExecutionMapper.class);
         AgentTeamMemberMapper agentTeamMemberMapper = mock(AgentTeamMemberMapper.class);
         AgentTeamMemberToolBindingMapper teamMemberToolBindingMapper = mock(AgentTeamMemberToolBindingMapper.class);
+        BuiltinToolMapper builtinToolMapper = mock(BuiltinToolMapper.class);
         AgentTeamMemberContextBindingMapper teamMemberContextBindingMapper = mock(AgentTeamMemberContextBindingMapper.class);
         ContextItemMapper contextItemMapper = mock(ContextItemMapper.class);
         AgentExecutionEngine agentExecutionEngine = mock(AgentExecutionEngine.class);
@@ -79,6 +81,7 @@ class TeamAgentRuntimeStrategyCheckpointTest {
                 agentExecutionMapper,
                 agentTeamMemberMapper,
                 teamMemberToolBindingMapper,
+                builtinToolMapper,
                 teamMemberContextBindingMapper,
                 contextItemMapper,
                 agentExecutionEngine,

@@ -103,6 +103,18 @@ public class CostController {
         return R.ok(budgetService.create(request));
     }
 
+    @GetMapping("/budget")
+    @Operation(summary = "获取当前租户预算配置")
+    public R<BudgetVO> getCurrentBudget() {
+        return R.ok(budgetService.getCurrentBudget());
+    }
+
+    @PutMapping("/budget")
+    @Operation(summary = "更新当前租户预算配置")
+    public R<BudgetVO> upsertCurrentBudget(@RequestBody BudgetUpdateRequest request) {
+        return R.ok(budgetService.upsertCurrentBudget(request));
+    }
+
     @GetMapping("/budgets")
     @Operation(summary = "分页查询预算")
     public R<PageResult<BudgetVO>> pageBudgets(BudgetQueryRequest request) {
@@ -127,6 +139,12 @@ public class CostController {
     @Operation(summary = "获取预算使用情况")
     public R<BudgetUsageVO> getBudgetUsage(@PathVariable String id) {
         return R.ok(budgetService.getUsage(id));
+    }
+
+    @GetMapping("/budget/usage")
+    @Operation(summary = "获取当前租户预算使用情况")
+    public R<BudgetUsageVO> getCurrentBudgetUsage() {
+        return R.ok(budgetService.getCurrentBudgetUsage());
     }
 
     @GetMapping("/budgets/alerts")

@@ -9,6 +9,7 @@ import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.AesEncryptUtil;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.AiModelMapper;
+import com.schemaplexai.dao.mapper.AiModelGroupItemMapper;
 import com.schemaplexai.dao.mapper.AiModelRouteMapper;
 import com.schemaplexai.dao.mapper.TeamTemplateMapper;
 import com.schemaplexai.model.dto.system.AiModelCreateRequest;
@@ -16,14 +17,18 @@ import com.schemaplexai.model.dto.system.AiModelRouteCreateRequest;
 import com.schemaplexai.model.dto.system.AiModelRouteUpdateRequest;
 import com.schemaplexai.model.dto.system.AiModelUpdateRequest;
 import com.schemaplexai.model.entity.AiModel;
+import com.schemaplexai.model.entity.AiModelGroupItem;
 import com.schemaplexai.model.entity.AiModelRoute;
 import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.vo.system.AiModelRouteVO;
 import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;
+import com.schemaplexai.model.vo.system.RouteAnalysisVO;
 import com.schemaplexai.service.ai.AiModelConfig;
+import com.schemaplexai.service.ai.ModelMetricsTracker;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.config.SystemConfigService;
 import com.schemaplexai.service.event.AiModelConfigChangedEvent;
+import com.schemaplexai.service.monitor.RouteAnalysisService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.MediaType;
@@ -58,10 +63,13 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     private static final int DOUBAO_EMBEDDING_VISION_251215_MAX_QUOTA = 500_000;
 
     private final AiModelMapper aiModelMapper;
+    private final AiModelGroupItemMapper aiModelGroupItemMapper;
     private final AiModelRouteMapper aiModelRouteMapper;
     private final TeamTemplateMapper teamTemplateMapper;
     private final EntityValidator entityValidator;
     private final ApplicationEventPublisher applicationEventPublisher;
+    private final ModelMetricsTracker modelMetricsTracker;
+    private final RouteAnalysisService routeAnalysisService;
 
     private static final String CONNECTIVITY_PROMPT = "Reply with exactly: CONNECTIVITY_OK";
     private static final String EMBEDDING_CONNECTIVITY_INPUT = "SchemaPlexAI embedding connectivity check";
@@ -71,11 +79,13 @@ public class SystemConfigServiceImpl implements SystemConfigService {
 
     @Override
     public List<AiModel> listAiModels() {
-        return aiModelMapper.selectList(
+        List<AiModel> models = aiModelMapper.selectList(
                 new LambdaQueryWrapper<AiModel>()
                         .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
                         .orderByAsc(AiModel::getCreatedAt)
         );
+        enrichRuntimeMetrics(models);
+        return models;
     }
 
     @Override
@@ -89,10 +99,12 @@ public class SystemConfigServiceImpl implements SystemConfigService {
 
     @Override
     public List<AiModel> listAllAiModels() {
-        return aiModelMapper.selectList(
+        List<AiModel> models = aiModelMapper.selectList(
                 new LambdaQueryWrapper<AiModel>()
                         .orderByAsc(AiModel::getCreatedAt)
         );
+        enrichRuntimeMetrics(models);
+        return models;
     }
 
     @Override
@@ -107,6 +119,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         model.setName(request.getName());
         model.setProvider(request.getProvider());
         model.setProviderCode(request.getProviderCode());
+        model.setProtocol(resolveRequestProtocol(request.getProtocol()));
         model.setUseCase(request.getUseCase());
         model.setModelId(request.getModelId());
         model.setApiKeyEncrypted(AesEncryptUtil.encrypt(request.getApiKey()));
@@ -114,6 +127,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         model.setDefaultParams(request.getDefaultParams());
         model.setInputPrice(request.getInputPrice());
         model.setOutputPrice(request.getOutputPrice());
+        model.setImagePrice(request.getImagePrice());
         // 设置默认值
         model.setTimeoutSeconds(request.getTimeoutSeconds() != null
                 ? request.getTimeoutSeconds() : 30);
@@ -124,6 +138,7 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         model.setMaxTokens(request.getMaxTokens() != null
                 ? request.getMaxTokens() : 4096);
         model.setMaxQuotaTokens(request.getMaxQuotaTokens());
+        model.setMultimodal(Boolean.TRUE.equals(request.getMultimodal()));
         model.setStatus(CommonConstant.STATUS_ACTIVE);
 
         aiModelMapper.insert(model);
@@ -159,6 +174,9 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         if (StringUtils.hasText(request.getProviderCode())) {
             updateEntity.setProviderCode(request.getProviderCode());
         }
+        if (StringUtils.hasText(request.getProtocol())) {
+            updateEntity.setProtocol(resolveRequestProtocol(request.getProtocol()));
+        }
         if (request.getUseCase() != null) {
             updateEntity.setUseCase(request.getUseCase());
         }
@@ -181,6 +199,9 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         if (request.getOutputPrice() != null) {
             updateEntity.setOutputPrice(request.getOutputPrice());
         }
+        if (request.getImagePrice() != null) {
+            updateEntity.setImagePrice(request.getImagePrice());
+        }
         if (request.getTimeoutSeconds() != null) {
             updateEntity.setTimeoutSeconds(request.getTimeoutSeconds());
         }
@@ -195,6 +216,9 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         }
         if (request.getMaxQuotaTokens() != null) {
             updateEntity.setMaxQuotaTokens(request.getMaxQuotaTokens());
+        }
+        if (request.getMultimodal() != null) {
+            updateEntity.setMultimodal(request.getMultimodal());
         }
         if (StringUtils.hasText(request.getStatus())) {
             updateEntity.setStatus(request.getStatus());
@@ -213,6 +237,50 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         aiModelMapper.deleteById(id);
         applicationEventPublisher.publishEvent(new AiModelConfigChangedEvent(id));
         log.info("删除AI模型成功: modelId={}", id);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void disableAiModel(String id) {
+        entityValidator.requireExists(aiModelMapper, id, ResultCode.CONFIG_NOT_FOUND);
+        aiModelMapper.update(null, new LambdaUpdateWrapper<AiModel>()
+                .eq(AiModel::getId, id)
+                .set(AiModel::getStatus, CommonConstant.STATUS_INACTIVE));
+        cleanupRouteModelReferences(id);
+        aiModelGroupItemMapper.delete(new LambdaQueryWrapper<AiModelGroupItem>()
+                .eq(AiModelGroupItem::getModelId, id));
+        applicationEventPublisher.publishEvent(new AiModelConfigChangedEvent(id));
+        log.info("停用AI模型并清理引用成功: modelId={}", id);
+    }
+
+    private void cleanupRouteModelReferences(String modelId) {
+        aiModelRouteMapper.update(null, new LambdaUpdateWrapper<AiModelRoute>()
+                .eq(AiModelRoute::getPrimaryModelId, modelId)
+                .set(AiModelRoute::getPrimaryModelId, null));
+        aiModelRouteMapper.update(null, new LambdaUpdateWrapper<AiModelRoute>()
+                .eq(AiModelRoute::getSecondaryModelId, modelId)
+                .set(AiModelRoute::getSecondaryModelId, null));
+        aiModelRouteMapper.update(null, new LambdaUpdateWrapper<AiModelRoute>()
+                .eq(AiModelRoute::getTertiaryModelId, modelId)
+                .set(AiModelRoute::getTertiaryModelId, null));
+        aiModelRouteMapper.update(null, new LambdaUpdateWrapper<AiModelRoute>()
+                .eq(AiModelRoute::getFallbackModelId, modelId)
+                .set(AiModelRoute::getFallbackModelId, null));
+    }
+
+    private String resolveRequestProtocol(String protocol) {
+        if (!StringUtils.hasText(protocol)) {
+            return AiModelConfig.PROTOCOL_OPENAI;
+        }
+        String normalized = protocol.trim().toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case AiModelConfig.PROTOCOL_ANTHROPIC, "anthropic-compatible", "anthropic_compatible" ->
+                    AiModelConfig.PROTOCOL_ANTHROPIC;
+            case AiModelConfig.PROTOCOL_OPENAI, "openai-compatible", "openai_compatible", "chat-completions" ->
+                    AiModelConfig.PROTOCOL_OPENAI;
+            case AiModelConfig.PROTOCOL_GEMINI, "google" -> AiModelConfig.PROTOCOL_GEMINI;
+            default -> AiModelConfig.PROTOCOL_OPENAI;
+        };
     }
 
     // ==================== 路由规则 CRUD ====================
@@ -427,6 +495,11 @@ public class SystemConfigServiceImpl implements SystemConfigService {
 
         saveConnectivityResult(modelId, result);
         return result;
+    }
+
+    @Override
+    public RouteAnalysisVO getRouteAnalysis() {
+        return routeAnalysisService.getAnalysis();
     }
 
     private Request buildHttpRequest(AiModel model, String provider, String protocol, String apiKey) throws Exception {
@@ -674,6 +747,19 @@ public class SystemConfigServiceImpl implements SystemConfigService {
     private String trimError(String msg) {
         if (!StringUtils.hasText(msg)) return null;
         return msg.length() > 500 ? msg.substring(0, 500) : msg;
+    }
+
+    private void enrichRuntimeMetrics(List<AiModel> models) {
+        if (models == null || models.isEmpty()) {
+            return;
+        }
+        for (AiModel model : models) {
+            ModelMetricsTracker.RuntimeMetrics metrics = modelMetricsTracker.loadMetrics(model.getId());
+            model.setRuntimeRequestCount1m(metrics.requestCount1m());
+            model.setRuntimeErrorRate1m(metrics.errorRate1m());
+            model.setRuntimeP95LatencyMs(metrics.p95LatencyMs());
+            model.setRuntimeHealthStatus(metrics.healthStatus());
+        }
     }
 
     private boolean isTimeoutException(IOException ex) {

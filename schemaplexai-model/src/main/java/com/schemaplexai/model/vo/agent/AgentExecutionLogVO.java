@@ -10,6 +10,8 @@ import java.time.LocalDateTime;
 @Data
 public class AgentExecutionLogVO {
 
+    private String logId;
+
     private String logLevel;
 
     private String logType;
@@ -19,6 +21,9 @@ public class AgentExecutionLogVO {
     private String toolName;
 
     private String content;
+
+    /** 日志概要，列表模式优先展示 */
+    private String summary;
 
     private Integer tokenDelta;
 

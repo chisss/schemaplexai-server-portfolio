@@ -190,7 +190,10 @@ public class CostAnalysisServiceImpl implements CostAnalysisService {
                 .filter(StringUtils::hasText)
                 .toList());
         return executions.stream()
-                .map(execution -> toExecutionCostRow(execution, modelMap.get(execution.getAiModel())))
+                .map(execution -> toExecutionCostRow(
+                        execution,
+                        StringUtils.hasText(execution.getAiModel()) ? modelMap.get(execution.getAiModel()) : null
+                ))
                 .toList();
     }
 

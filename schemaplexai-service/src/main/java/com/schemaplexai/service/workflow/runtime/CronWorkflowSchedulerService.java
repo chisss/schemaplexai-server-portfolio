@@ -83,6 +83,10 @@ public class CronWorkflowSchedulerService {
             log.warn("Cron 模板缺少 cronExpression，跳过触发: templateId={}", template.getId());
             return;
         }
+        if (!Boolean.TRUE.equals(config.get("enabled"))) {
+            log.debug("Cron 触发未启用，跳过: templateId={}", template.getId());
+            return;
+        }
         if (!StringUtils.hasText(template.getTenantId())) {
             log.debug("Cron 模板缺少 tenantId，暂不自动触发: templateId={}", template.getId());
             return;

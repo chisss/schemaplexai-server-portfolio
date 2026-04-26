@@ -5,6 +5,7 @@ import com.schemaplexai.common.enums.AgentLoopLogTypeEnum;
 import com.schemaplexai.service.ai.LangChain4jResolution;
 import com.schemaplexai.service.quality.detector.QualityDetector;
 import com.schemaplexai.service.quality.orchestrator.QualityOrchestrator;
+import com.schemaplexai.service.workflow.ArtifactSceneResolver;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -272,21 +273,30 @@ public class AgentLoopCompletionHandler {
 
     private String buildForceCompletionContext(ChatMemory chatMemory, AgentEngineParams params) {
         StringBuilder sb = new StringBuilder();
-        sb.append("请基于以下已收集证据直接输出最终 Markdown，不要再调用工具。\n\n");
-        sb.append("输出约束:\n")
-          .append("- 只允许把证据里明确出现的文件路径、类名、接口、SQL 信息写成\"当前仓库已确认现状\"。\n")
-          .append("- 如果证据只显示目录或文件名存在，只能据此说明\"存在该目录/文件\"，不能推断方法、注解或实现细节。\n")
-          .append("- 最终文档必须区分\"当前仓库已确认现状\"和\"建议改造/待实现项\"。\n")
-          .append("- 证据中没有出现的路径或类名请写\"仓库中未发现\"或\"待确认\"，不要猜测。\n\n");
-
         String taskSummary = extractTaskSummary(chatMemory);
+        boolean customerDeliveryContext = ArtifactSceneResolver.isCustomerDeliveryPrompt(taskSummary);
+        sb.append("请基于以下已收集证据直接输出最终 Markdown，不要再调用工具。\n\n");
+        sb.append("输出约束:\n");
+        if (customerDeliveryContext) {
+            sb.append("- 最终文档必须直接面向客户或业务负责人，优先输出已确认事实、交付方案、交付清单、业务价值和风险边界。\n")
+                    .append("- 不要输出内部仓库审计标题、缺失占位语或回填说明。\n")
+                    .append("- 运行时回填字段如当前未提供，直接省略；未知项统一放入“风险与边界”或“待确认事项”。\n\n");
+        } else {
+            sb.append("- 只允许把证据里明确出现的文件路径、类名、接口、SQL 信息写成\"当前仓库已确认现状\"。\n")
+                    .append("- 如果证据只显示目录或文件名存在，只能据此说明\"存在该目录/文件\"，不能推断方法、注解或实现细节。\n")
+                    .append("- 最终文档必须区分\"当前仓库已确认现状\"和\"建议改造/待实现项\"。\n")
+                    .append("- 证据中没有出现的路径或类名请写\"仓库中未发现\"或\"待确认\"，不要猜测。\n\n");
+        }
+
         if (StringUtils.hasText(taskSummary)) {
             sb.append("任务摘要: ").append(compactText(taskSummary, 220)).append("\n\n");
         }
 
         List<String> evidences = collectFallbackEvidence(chatMemory, params);
         if (evidences.isEmpty()) {
-            sb.append("- 当前没有可用证据，请直接输出一个保守但可交付的 Markdown 结果，并明确待确认项。");
+            sb.append(customerDeliveryContext
+                    ? "- 当前没有可用证据，请直接输出一个保守但可交付的客户方案，并明确风险与待确认事项。"
+                    : "- 当前没有可用证据，请直接输出一个保守但可交付的 Markdown 结果，并明确待确认项。");
         } else {
             sb.append("已收集证据:\n");
             evidences.forEach(e -> sb.append("- ").append(e).append("\n"));

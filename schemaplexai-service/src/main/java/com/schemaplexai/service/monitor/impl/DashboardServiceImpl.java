@@ -16,11 +16,13 @@ import com.schemaplexai.model.vo.monitor.ActiveAgentVO;
 import com.schemaplexai.model.vo.monitor.DashboardVO;
 import com.schemaplexai.model.vo.monitor.SystemHealthVO;
 import com.schemaplexai.model.vo.monitor.TaskQueueVO;
+import com.schemaplexai.service.clickhouse.ClickHouseAnalyticsService;
 import com.schemaplexai.service.monitor.DashboardService;
 import com.sun.management.OperatingSystemMXBean;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -60,6 +62,7 @@ public class DashboardServiceImpl implements DashboardService {
     private final WorkflowNodeExecutionMapper workflowNodeExecutionMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final RabbitTemplate rabbitTemplate;
+    private final ObjectProvider<ClickHouseAnalyticsService> clickHouseAnalyticsServiceProvider;
 
     @Value("${schemaplexai.workspace.root-path:${user.home}/.schemaplexai/workspaces}")
     private String workspaceRootPath;
@@ -171,7 +174,7 @@ public class DashboardServiceImpl implements DashboardService {
         serviceStatus.put("postgresql", checkPostgreSql());
         serviceStatus.put("redis", checkRedis());
         serviceStatus.put("rabbitmq", checkRabbitMq());
-        serviceStatus.put("clickhouse", "unavailable");
+        serviceStatus.put("clickhouse", checkClickHouse());
         health.setServiceStatus(serviceStatus);
         health.setStatus(resolveOverallStatus(serviceStatus, health));
         return health;
@@ -334,6 +337,19 @@ public class DashboardServiceImpl implements DashboardService {
             return Boolean.TRUE.equals(result) ? "up" : "down";
         } catch (Exception ex) {
             log.warn("RabbitMQ 健康检查失败", ex);
+            return "down";
+        }
+    }
+
+    private String checkClickHouse() {
+        ClickHouseAnalyticsService clickHouseAnalyticsService = clickHouseAnalyticsServiceProvider.getIfAvailable();
+        if (clickHouseAnalyticsService == null) {
+            return "disabled";
+        }
+        try {
+            return clickHouseAnalyticsService.isAvailable() ? "up" : "down";
+        } catch (Exception ex) {
+            log.warn("ClickHouse 健康检查失败", ex);
             return "down";
         }
     }

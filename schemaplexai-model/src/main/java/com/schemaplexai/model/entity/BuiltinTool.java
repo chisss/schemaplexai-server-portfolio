@@ -41,6 +41,9 @@ public class BuiltinTool implements Serializable {
     /** 排序号 */
     private Integer sortOrder;
 
+    /** IO 类型: READ / WRITE / READ_WRITE */
+    private String ioType;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 

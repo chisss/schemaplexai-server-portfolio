@@ -34,6 +34,7 @@ public class CostStatisticsTask {
     private final AgentExecutionMapper agentExecutionMapper;
     private final AiModelMapper aiModelMapper;
     private final BudgetMapper budgetMapper;
+    private final ClickHouseCostSyncService clickHouseCostSyncService;
 
     /**
      * 每小时执行一次成本聚合与预算告警检查
@@ -45,61 +46,16 @@ public class CostStatisticsTask {
         log.info("开始执行成本统计聚合任务...");
 
         try {
-            // 1. 汇总过去1小时的 Token 消耗
-            logHourlySummary();
+            // 按游标增量同步 Token 消耗到 ClickHouse
+            clickHouseCostSyncService.syncIncrementalCostData();
 
-            // 2. 检查预算告警
+            // 检查预算告警
             checkBudgetAlerts();
 
             log.info("成本统计聚合任务完成");
         } catch (Exception e) {
             log.error("成本统计聚合任务异常", e);
         }
-    }
-
-    /**
-     * 汇总并记录过去1小时的 Token 消耗数据
-     */
-    private void logHourlySummary() {
-        LocalDateTime end = LocalDateTime.now();
-        LocalDateTime start = end.minusHours(1);
-
-        List<AgentExecution> executions = agentExecutionMapper.selectList(
-                new LambdaQueryWrapper<AgentExecution>()
-                        .ge(AgentExecution::getCreatedAt, start)
-                        .lt(AgentExecution::getCreatedAt, end)
-        );
-
-        if (executions.isEmpty()) {
-            log.info("过去1小时无执行记录");
-            return;
-        }
-
-        // 按模型维度汇总
-        Map<String, AiModel> modelMap = loadModelMap(executions);
-
-        long totalInputTokens = 0;
-        long totalOutputTokens = 0;
-        BigDecimal totalCost = BigDecimal.ZERO;
-
-        for (AgentExecution exec : executions) {
-            long inputTokens = exec.getTokenInput() != null ? exec.getTokenInput() : 0L;
-            long outputTokens = exec.getTokenOutput() != null ? exec.getTokenOutput() : 0L;
-            totalInputTokens += inputTokens;
-            totalOutputTokens += outputTokens;
-
-            AiModel model = modelMap.get(exec.getAiModel());
-            BigDecimal inputPrice = model != null && model.getInputPrice() != null ? model.getInputPrice() : BigDecimal.ZERO;
-            BigDecimal outputPrice = model != null && model.getOutputPrice() != null ? model.getOutputPrice() : BigDecimal.ZERO;
-            BigDecimal cost = inputPrice.multiply(BigDecimal.valueOf(inputTokens))
-                    .add(outputPrice.multiply(BigDecimal.valueOf(outputTokens)))
-                    .divide(BigDecimal.valueOf(1000), 6, RoundingMode.HALF_UP);
-            totalCost = totalCost.add(cost);
-        }
-
-        log.info("过去1小时统计: executions={}, inputTokens={}, outputTokens={}, totalCost={}",
-                executions.size(), totalInputTokens, totalOutputTokens,
-                totalCost.setScale(4, RoundingMode.HALF_UP));
     }
 
     /**

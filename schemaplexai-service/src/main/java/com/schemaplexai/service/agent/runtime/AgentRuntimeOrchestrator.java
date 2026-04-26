@@ -74,6 +74,8 @@ public class AgentRuntimeOrchestrator {
                 .inputContext(execution.getInputContext())
                 .conversationId(execution.getConversationId())
                 .runtimeEngine(runtimeEngine.getCode())
+                .executionMode(execution.getExecutionMode() != null ? execution.getExecutionMode() : "auto")
+                .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
                 .build();
         applyOutputFormatContext(agent.getId(), context);
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);

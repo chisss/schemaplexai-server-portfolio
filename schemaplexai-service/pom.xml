@@ -33,6 +33,15 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.clickhouse</groupId>
+            <artifactId>clickhouse-jdbc</artifactId>
+            <classifier>all</classifier>
+        </dependency>
 
         <!-- Spring Data Redis -->
         <dependency>
@@ -195,7 +204,7 @@
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-embeddings-all-minilm-l6-v2-q</artifactId>
-            <version>${langchain4j.version}</version>
+            <version>${langchain4j.beta.version}</version>
         </dependency>
         <!-- LangChain4j In-Process Embedding BGE-Small-EN-V1.5（ONNX 量化模型，英文优化） -->
         <dependency>
@@ -259,11 +268,6 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>dev.langchain4j</groupId>
-            <artifactId>langchain4j-embeddings-all-minilm-l6-v2-q</artifactId>
-        </dependency>
-
         <!-- QuickJs4j (Wasm 代码沙箱，用于安全执行 LLM 生成的 JS 代码) -->
         <dependency>
             <groupId>io.roastedroot</groupId>

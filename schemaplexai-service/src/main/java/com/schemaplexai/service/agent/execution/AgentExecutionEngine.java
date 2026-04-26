@@ -3,9 +3,11 @@ package com.schemaplexai.service.agent.execution;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.AgentLoopPromptConstant;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
+import com.schemaplexai.common.constant.SystemAgentPromptConstant;
 import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentLoopLogTypeEnum;
+import com.schemaplexai.common.enums.ToolIoTypeEnum;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
@@ -17,15 +19,18 @@ import com.schemaplexai.service.agent.execution.AgentModelInvoker.ModelCallResul
 import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
+import com.schemaplexai.service.agent.hook.AgentHookContext;
+import com.schemaplexai.service.agent.hook.AgentHookExecutor;
+import com.schemaplexai.service.agent.hook.AgentHookType;
 import com.schemaplexai.service.agent.memory.AgentMemoryExtractionService;
 import com.schemaplexai.service.agent.memory.AgentInstructionsAutoService;
+import com.schemaplexai.service.ai.MultimodalMessageBuilder;
 import com.schemaplexai.service.ai.AIModelRouter;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jResolution;
 import com.schemaplexai.service.memory.CompositeChatMemoryStore;
+import com.schemaplexai.service.monitor.AgentTraceService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
-import com.schemaplexai.service.storage.DocumentStorageService;
-import com.schemaplexai.service.util.FileContentExtractor;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -39,12 +44,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -52,6 +57,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 /**
  * Agent 执行引擎 — Agentic Loop 实现（基于 LangChain4j）
@@ -101,11 +110,24 @@ public class AgentExecutionEngine {
     private final AgentLoopCompletionHandler   completionHandler;
     private final AgentLoopQualityChecker      qualityChecker;
     private final AgentLoopShadowReviewService shadowReviewService;
+    private final AgentLoopDetectionService    loopDetectionService;
+    private final ToolOutputMaskingService     toolOutputMaskingService;
+    private final AgentTraceService            agentTraceService;
+    private final AgentHookExecutor            hookExecutor;
+    private final AgentContextBudgetService    agentContextBudgetService;
+    private final MultimodalMessageBuilder     multimodalMessageBuilder;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
-    private final DocumentStorageService       documentStorageService;
-    private final FileContentExtractor         fileContentExtractor;
+    private final ExecutionModeInterceptor     executionModeInterceptor;
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
     private final AgentChatMemoryCompactor     chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport);
+
+    @Qualifier("agentExecutorPool")
+    @Autowired
+    private Executor agentExecutorPool;
+
+    @Qualifier("toolParallelPool")
+    @Autowired
+    private Executor toolParallelPool;
 
     @Lazy
     @Autowired(required = false)
@@ -196,12 +218,14 @@ public class AgentExecutionEngine {
             }
         }
 
-        // 构建 System Prompt
+        // 构建 System Prompt（系统Agent注入执行模式指令）
         String extraContext  = buildExtraContext(ctx);
+        List<String> systemContexts = mergeExecutionModeInstruction(ctx);
         ContextInjector.PromptBuildResult promptBuildResult = contextInjector.buildSystemPromptDetail(
-                agentId, extraContext, tenantId, ctx.getTeamAgentId(), ctx.getAdditionalSystemContexts(), first.config());
+                agentId, extraContext, tenantId, ctx.getTeamAgentId(), systemContexts, first.config());
         String systemPrompt  = promptBuildResult.prompt();
         logSystemPromptBuilt(executionId, agentId, tenantId, promptBuildResult, ctx.getModel(), startMs);
+        persistContextBudgetSnapshot(ctx, promptBuildResult, first.config());
 
         // 初始化 ChatMemory
         String conversationId = resolveConversationId(ctx);
@@ -211,7 +235,7 @@ public class AgentExecutionEngine {
 
         // 添加用户消息（首次执行或恢复执行）
         if (resumeInput == null) {
-            chatMemory.add(UserMessage.from(buildUserMessage(ctx)));
+            chatMemory.add(buildUserMessage(ctx, first.config().isMultimodal()));
         } else {
             addResumeMessage(executionId, agentId, tenantId, chatMemory, resumeInput, startMs);
         }
@@ -269,6 +293,17 @@ public class AgentExecutionEngine {
                 ModelCallResult callResult;
                 try {
                     AiModelConfig activeModelConfig = modelChain.getFirst().config();
+                    // 工具输出遮蔽（在 compactIfNeeded 之前执行，减少 Token 占用）
+                    if (toolOutputMaskingService.shouldMask(chatMemory)) {
+                        ToolOutputMaskingService.MaskingResult maskResult =
+                                toolOutputMaskingService.maskOldToolOutputs(chatMemory, 2);
+                        if (maskResult.applied()) {
+                            agentLogService.appendLog(executionId, agentId, tenantId, "DEBUG",
+                                    AgentLoopLogTypeEnum.TOOL_OUTPUT_MASKED.getCode(), round, null,
+                                    "工具输出遮蔽：压缩 " + maskResult.maskedCount() + " 条，节省 "
+                                            + maskResult.savedChars() + " 字符", null, elapsed(startMs));
+                        }
+                    }
                     AgentChatMemoryCompactor.CompactionResult compactionResult =
                             chatMemoryCompactor.compactIfNeeded(chatMemory, params, activeModelConfig);
                     AgentChatMemoryCompactor.NormalizationResult normalizationResult =
@@ -303,6 +338,32 @@ public class AgentExecutionEngine {
                 List<ToolExecutionRequest> executableRequests = toolHandler.filterExecutable(allRequests, effectiveTools);
                 List<ToolExecutionRequest> rejectedRequests   = allRequests.stream()
                         .filter(r -> !executableRequests.contains(r)).toList();
+
+                // 循环检测（哈希 + 工具序列双层检测）
+                AgentLoopDetectionService.LoopDetectionResult loopResult =
+                        loopDetectionService.check(state, lastContent, allRequests);
+                if (loopResult == AgentLoopDetectionService.LoopDetectionResult.CONFIRMED_LOOP) {
+                    agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                            AgentLoopLogTypeEnum.LOOP_CONFIRMED.getCode(), round, null,
+                            "循环检测确认死循环（哈希+工具序列双重告警），触发强制收敛", null, elapsed(startMs));
+                    state.setForceCompletionRequested(true);
+                    break;
+                }
+                if (loopResult == AgentLoopDetectionService.LoopDetectionResult.WARNING) {
+                    state.setLoopWarningCount(state.getLoopWarningCount() + 1);
+                    agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                            AgentLoopLogTypeEnum.LOOP_WARNING.getCode(), round, null,
+                            "循环检测告警（单层），累计告警次数=" + state.getLoopWarningCount(), null, elapsed(startMs));
+                    // WARNING 累积超过阈值也触发强制收敛
+                    if (state.getLoopWarningCount() >= params.getMaxLoopWarnings()) {
+                        agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                                AgentLoopLogTypeEnum.LOOP_CONFIRMED.getCode(), round, null,
+                                "循环检测告警累积达到阈值(" + params.getMaxLoopWarnings() + ")，触发强制收敛",
+                                null, elapsed(startMs));
+                        state.setForceCompletionRequested(true);
+                        break;
+                    }
+                }
 
                 // 无工具调用分支
                 if (allRequests.isEmpty()) {
@@ -479,11 +540,129 @@ public class AgentExecutionEngine {
                         params.getToolRequestSummaryLimit()
                 );
 
-        // 执行允许的工具
-        for (int i = 0; i < execCount; i++) {
-            ToolExecutionOutcome outcome = toolHandler.executeOne(roundCtx, executableRequests.get(i), compressionOptions);
+        // 并行执行允许的工具（读工具并行，写工具串行）
+        List<ToolExecutionRequest> executableSubList = executableRequests.subList(0, execCount);
+        // 触发 BEFORE_TOOL_EXECUTE Hook（逐个检查，任一阻止则跳过该工具）
+        List<ToolExecutionRequest> approvedRequests = new ArrayList<>();
+        List<ToolExecutionRequest> suggestedRequests = new ArrayList<>();
+        ToolExecutionRequest pausedForApproval = null;
+        for (ToolExecutionRequest req : executableSubList) {
+            AgentHookContext beforeCtx = AgentHookContext.builder()
+                    .executionId(executionId).agentId(agentId).tenantId(tenantId)
+                    .round(round).toolRequest(req).toolCode(req.name()).build();
+            if (!hookExecutor.fire(AgentHookType.BEFORE_TOOL_EXECUTE, beforeCtx, agentId)) {
+                continue;
+            }
+            // 执行模式拦截
+            ToolIoTypeEnum ioType = roundCtx.ioTypeIndex().getOrDefault(req.name(), ToolIoTypeEnum.READ_WRITE);
+            ExecutionModeInterceptor.Decision decision = executionModeInterceptor.evaluate(
+                    ctx.getExecutionMode(), tenantId, agentId, req.name(),
+                    req.arguments(), ioType, ctx.isSystemAgent());
+            if (decision == ExecutionModeInterceptor.Decision.SUGGEST_ONLY) {
+                // 建议模式：仅发送建议事件，不实际执行
+                executionEventStreamService.publishWithPayload(executionId,
+                        AgentExecutionEventTypeEnum.SUGGESTION.getCode(), round,
+                        "建议执行: " + req.name(),
+                        Map.of("toolCode", req.name(), "args", req.arguments() != null ? req.arguments() : "{}"),
+                        startMs);
+                suggestedRequests.add(req);
+                continue;
+            }
+            if (decision == ExecutionModeInterceptor.Decision.REQUIRE_APPROVAL) {
+                // 需要审批：发送审批事件，暂停执行
+                executionEventStreamService.publishWithPayload(executionId,
+                        AgentExecutionEventTypeEnum.APPROVAL_REQUIRED.getCode(), round,
+                        "工具 " + req.name() + " 需要审批",
+                        Map.of("toolCode", req.name(), "args", req.arguments() != null ? req.arguments() : "{}",
+                               "ioType", ioType.getCode(), "executionMode", ctx.getExecutionMode()),
+                        startMs);
+                pausedForApproval = req;
+                break;
+            }
+            // 直接执行
+            executionEventStreamService.publishWithPayload(executionId,
+                    AgentExecutionEventTypeEnum.TOOL_START.getCode(), round,
+                    req.name() + " 开始执行",
+                    Map.of("toolCode", req.name(), "args", req.arguments() != null ? req.arguments() : "{}"),
+                    startMs);
+            approvedRequests.add(req);
+        }
+        // 建议模式：返回建议信息，不实际执行
+        if (!suggestedRequests.isEmpty() && approvedRequests.isEmpty()) {
+            for (ToolExecutionRequest suggested : suggestedRequests) {
+                String suggestMsg = "[建议模式] 工具 " + suggested.name() + " 未执行，仅作为建议展示。参数: " + suggested.arguments();
+                ToolResult suggestResult = ToolResult.builder()
+                        .toolCode(suggested.name()).success(true)
+                        .result(objectMapper.valueToTree(Map.of("suggestion", suggestMsg)))
+                        .build();
+                toolResults.add(suggestResult);
+                chatMemory.add(toolHandler.buildResultMessage(suggested, suggestResult, Map.of(), true, null, compressionOptions));
+            }
+            return null;
+        }
+        // 需要审批：暂停执行
+        if (pausedForApproval != null) {
+            agentLogService.updateExecutionStatus(executionId, STATUS_PAUSED, null, null, null, null);
+            recordAgentTrace(executionId, tenantId, agentId, startMs,
+                    state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_PAUSED);
+            return AgentExecutionResult.builder()
+                    .status(STATUS_PAUSED).outputResult("等待用户审批: " + pausedForApproval.name())
+                    .build();
+        }
+        // 发送并行工具组开始事件（在执行前发送）
+        boolean isParallel = params.isParallelToolExecution() && approvedRequests.size() > 1;
+        if (isParallel) {
+            executionEventStreamService.publishWithPayload(executionId,
+                    AgentExecutionEventTypeEnum.TOOL_PARALLEL_START.getCode(), round,
+                    "并行执行 " + approvedRequests.size() + " 个工具",
+                    Map.of("toolCount", approvedRequests.size(),
+                           "tools", approvedRequests.stream().map(ToolExecutionRequest::name).toList()),
+                    startMs);
+        }
+        List<ToolExecutionOutcome> outcomes;
+        if (isParallel) {
+            outcomes = toolHandler.executeParallel(
+                    roundCtx, approvedRequests, compressionOptions, toolParallelPool,
+                    params.getMaxParallelTools(), roundCtx.ioTypeIndex());
+        } else {
+            outcomes = approvedRequests.stream()
+                    .map(req -> toolHandler.executeOne(roundCtx, req, compressionOptions))
+                    .toList();
+        }
+        // 发送并行工具组完成事件
+        if (isParallel) {
+            executionEventStreamService.publishWithPayload(executionId,
+                    AgentExecutionEventTypeEnum.TOOL_PARALLEL_END.getCode(), round,
+                    "并行工具组执行完成",
+                    Map.of("toolCount", approvedRequests.size(), "elapsedMs", elapsed(startMs)),
+                    startMs);
+        }
+        for (int i = 0; i < outcomes.size(); i++) {
+            ToolExecutionOutcome outcome = outcomes.get(i);
             toolResults.add(outcome.toolResult());
             chatMemory.add(outcome.resultMessage());
+            // 发送 TOOL_END 事件
+            ToolExecutionRequest req = approvedRequests.get(i);
+            executionEventStreamService.publishWithPayload(executionId,
+                    AgentExecutionEventTypeEnum.TOOL_END.getCode(), round,
+                    req.name() + " 执行完成",
+                    Map.of("toolCode", req.name(), "success", outcome.toolResult().isSuccess()),
+                    startMs);
+            agentTraceService.recordToolSpan(
+                    executionId,
+                    tenantId,
+                    agentId,
+                    req.name(),
+                    outcome.startedAt(),
+                    outcome.durationMs(),
+                    outcome.toolResult().isSuccess() ? "SUCCESS" : "FAILED"
+            );
+            // 触发 AFTER_TOOL_EXECUTE Hook
+            AgentHookContext afterCtx = AgentHookContext.builder()
+                    .executionId(executionId).agentId(agentId).tenantId(tenantId)
+                    .round(round).toolRequest(approvedRequests.get(i))
+                    .toolCode(approvedRequests.get(i).name()).toolResult(outcome.toolResult()).build();
+            hookExecutor.fire(AgentHookType.AFTER_TOOL_EXECUTE, afterCtx, agentId);
         }
         // 超限工具返回限流提示
         for (int i = execCount; i < toolCalls.size(); i++) {
@@ -530,6 +709,8 @@ public class AgentExecutionEngine {
                     state.getTotalTokenInput(), state.getTotalTokenOutput(), null);
             executionEventStreamService.publishWithPayload(executionId,
                     AgentExecutionEventTypeEnum.REQUIRE_INPUT.getCode(), round, message, payload, startMs);
+            recordAgentTrace(executionId, tenantId, agentId, startMs,
+                    state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_PAUSED);
             return AgentExecutionResult.builder().status(STATUS_PAUSED).errorMessage(message)
                     .conversationId(conversationId).tokenInput(state.getTotalTokenInput())
                     .tokenOutput(state.getTotalTokenOutput()).rounds(round).build();
@@ -541,6 +722,8 @@ public class AgentExecutionEngine {
                     state.getTotalTokenInput(), state.getTotalTokenOutput(), null);
             executionEventStreamService.publishWithPayload(executionId,
                     AgentExecutionEventTypeEnum.BLOCKED.getCode(), round, message, payload, startMs);
+            recordAgentTrace(executionId, tenantId, agentId, startMs,
+                    state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
             return AgentExecutionResult.builder().status(STATUS_FAILED).errorMessage(message)
                     .conversationId(conversationId).tokenInput(state.getTotalTokenInput())
                     .tokenOutput(state.getTotalTokenOutput()).rounds(round).build();
@@ -564,7 +747,14 @@ public class AgentExecutionEngine {
                 state.setLastContent(revision.content());
                 state.addTokenUsage(revision.tokenInput(), revision.tokenOutput());
             }
-            return buildCompletedResult(executionId, agentId, tenantId, state, startMs, conversationId);
+            AgentExecutionResult result = buildCompletedResult(executionId, agentId, tenantId, state, startMs, conversationId);
+            // 触发 ON_LOOP_COMPLETE Hook
+            hookExecutor.fire(AgentHookType.ON_LOOP_COMPLETE, AgentHookContext.builder()
+                    .executionId(executionId).agentId(agentId).tenantId(tenantId)
+                    .finalContent(state.getLastContent())
+                    .totalTokenInput(state.getTotalTokenInput()).totalTokenOutput(state.getTotalTokenOutput())
+                    .elapsedMs(System.currentTimeMillis() - startMs).build(), agentId);
+            return result;
         }
 
         // 强制收敛
@@ -677,6 +867,8 @@ public class AgentExecutionEngine {
                         "输出安全检查阻断: " + message, null, elapsed(startMs));
                 executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.FAILED.getCode(),
                         state.getLastRound(), "输出安全检查阻断: " + message, startMs);
+                recordAgentTrace(executionId, tenantId, agentId, startMs,
+                        state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
                 return AgentExecutionResult.builder()
                         .status(STATUS_FAILED)
                         .errorMessage("输出安全检查阻断: " + message)
@@ -693,6 +885,8 @@ public class AgentExecutionEngine {
                         "输出安全检查暂停: " + message, null, elapsed(startMs));
                 executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.REQUIRE_INPUT.getCode(),
                         state.getLastRound(), "输出安全检查暂停: " + message, startMs);
+                recordAgentTrace(executionId, tenantId, agentId, startMs,
+                        state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_PAUSED);
                 return AgentExecutionResult.builder()
                         .status(STATUS_PAUSED)
                         .outputResult(sanitized)
@@ -715,8 +909,11 @@ public class AgentExecutionEngine {
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
                 AgentLoopLogTypeEnum.EXECUTION_COMPLETED.getCode(), state.getLastRound(), null,
                 "Agent 执行完成", null, elapsed(startMs));
-        executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.COMPLETED.getCode(),
-                state.getLastRound(), "Agent 执行完成", startMs);
+
+        executionEventStreamService.publishWithPayload(executionId,
+                AgentExecutionEventTypeEnum.COMPLETED.getCode(),
+                state.getLastRound(), "Agent 执行完成",
+                StringUtils.hasText(sanitized) ? Map.of("content", sanitized) : null, startMs);
 
         // 异步触发记忆提取（执行完成后从对话历史中提取记忆）
         if (agentMemoryExtractionService != null && StringUtils.hasText(conversationId)) {
@@ -731,6 +928,8 @@ public class AgentExecutionEngine {
             agentInstructionsAutoService.updateFromMemoriesAsync(tenantId, agentId, executionId);
         }
 
+        recordAgentTrace(executionId, tenantId, agentId, startMs,
+                state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_COMPLETED);
         return AgentExecutionResult.builder()
                 .status(STATUS_COMPLETED)
                 .outputResult(sanitized)
@@ -750,6 +949,8 @@ public class AgentExecutionEngine {
                 AgentLoopLogTypeEnum.EXECUTION_FAILED.getCode(), round, null, errorMessage, null, elapsed(startMs));
         executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.FAILED.getCode(),
                 round, errorMessage, startMs);
+        recordAgentTrace(executionId, tenantId, agentId, startMs,
+                state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
         return AgentExecutionResult.builder()
                 .status(STATUS_FAILED)
                 .errorMessage(errorMessage)
@@ -767,6 +968,7 @@ public class AgentExecutionEngine {
                 AgentLoopLogTypeEnum.EXECUTION_STOPPED.getCode(), round, null, "用户已停止执行", null, elapsed(startMs));
         executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.COMPLETED.getCode(),
                 round, "用户已停止执行", startMs);
+        recordAgentTrace(executionId, tenantId, agentId, startMs, 0L, 0L, STATUS_STOPPED);
         return AgentExecutionResult.builder().status(STATUS_STOPPED).rounds(round).build();
     }
 
@@ -776,7 +978,27 @@ public class AgentExecutionEngine {
         agentLogService.updateExecutionStatus(ctx.getExecutionId(), STATUS_FAILED, errMsg, null, null, null);
         executionEventStreamService.publishSimple(ctx.getExecutionId(), AgentExecutionEventTypeEnum.FAILED.getCode(),
                 0, errMsg, startMs);
+        recordAgentTrace(ctx.getExecutionId(), ctx.getTenantId(), ctx.getAgentId(), startMs, 0L, 0L, STATUS_FAILED);
         return AgentExecutionResult.builder().status(STATUS_FAILED).errorMessage(errMsg).build();
+    }
+
+    private void recordAgentTrace(String traceId,
+                                  String tenantId,
+                                  String agentId,
+                                  long startMs,
+                                  long inputTokens,
+                                  long outputTokens,
+                                  String status) {
+        agentTraceService.recordAgentSpan(
+                traceId,
+                tenantId,
+                agentId,
+                LocalDateTime.ofInstant(Instant.ofEpochMilli(startMs), ZoneId.systemDefault()),
+                elapsed(startMs),
+                inputTokens,
+                outputTokens,
+                status
+        );
     }
 
     // =========================================================================
@@ -839,7 +1061,7 @@ public class AgentExecutionEngine {
                         + ", retrievalSource=" + promptBuildResult.retrievalSource()
                         + ", retrievalHits=" + promptBuildResult.retrievalHitCount(),
                 null, elapsed(startMs));
-        executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.COMPLETED.getCode(),
+        executionEventStreamService.publishSimple(executionId, AgentExecutionEventTypeEnum.CONTEXT_INJECT.getCode(),
                 0, "Agent 执行启动", startMs);
     }
 
@@ -872,7 +1094,8 @@ public class AgentExecutionEngine {
 
     /** 解析模型降级链 */
     private List<LangChain4jResolution> resolveModelChain(AgentExecutionContext ctx) {
-        List<LangChain4jResolution> chain = aiModelRouter.resolveRouteChain(ctx.getModel());
+        String reasoning = ctx.getReasoningStrength() != null ? ctx.getReasoningStrength() : "medium";
+        List<LangChain4jResolution> chain = aiModelRouter.resolveRouteChain(ctx.getModel(), reasoning);
         if (chain == null || chain.isEmpty()) {
             throw new IllegalStateException("无法解析模型配置: model=" + ctx.getModel());
         }
@@ -906,10 +1129,49 @@ public class AgentExecutionEngine {
         if (StringUtils.hasText(ctx.getSkillCode())) {
             additionalContexts.add("技能偏好：用户指定本轮优先调用技能 `" + ctx.getSkillCode().trim() + "`，请优先选择与之匹配的工具。");
         }
+        if (ctx.isSystemAgent()) {
+            additionalContexts.add(SystemAgentPromptConstant.IDENTITY);
+            additionalContexts.add(SystemAgentPromptConstant.getExecutionModePrompt(ctx.getExecutionMode()));
+        }
         ctx.setAdditionalSystemContexts(additionalContexts);
     }
 
-    /** 构建额外上下文字符串（inputPrompt + inputContext + 附件内容 合并） */
+    /**
+     * 合并执行模式指令到 additionalSystemContexts（系统Agent专属）
+     */
+    private List<String> mergeExecutionModeInstruction(AgentExecutionContext ctx) {
+        List<String> base = ctx.getAdditionalSystemContexts();
+        List<String> result = base != null ? new ArrayList<>(base) : new ArrayList<>();
+        if (!ctx.isSystemAgent()) {
+            return result;
+        }
+        String mode = ctx.getExecutionMode();
+        if (!StringUtils.hasText(mode)) {
+            mode = "auto";
+        }
+        String instruction = switch (mode) {
+            case "plan" -> """
+                    ## 执行模式：计划模式 (Plan)
+                    - 只读操作（查询、搜索、分析）可直接执行
+                    - 写操作（创建、修改、删除文件或数据）必须先向用户展示计划，等待审批后再执行
+                    - 每个写操作前发送 APPROVAL_REQUIRED 事件，包含工具名称和操作描述
+                    - 用户批准后执行，拒绝则跳过并说明""";
+            case "suggest" -> """
+                    ## 执行模式：建议模式 (Suggest)
+                    - 分析用户需求并提出详细建议方案
+                    - 不实际执行任何工具调用，仅展示将要执行的操作和预期结果
+                    - 以结构化方式展示建议步骤，便于用户审阅""";
+            default -> """
+                    ## 执行模式：自动模式 (Auto)
+                    - 根据用户指令自主规划和执行任务
+                    - 充分利用可用工具完成目标
+                    - 写操作根据安全策略可能需要用户审批，审批通过后继续执行""";
+        };
+        result.addFirst(instruction);
+        return result;
+    }
+
+    /** 构建额外上下文字符串（inputPrompt + inputContext，不含附件） */
     private String buildExtraContext(AgentExecutionContext ctx) {
         String inputPrompt = ctx.getInputPrompt();
         Map<String, Object> inputContext = ctx.getInputContext();
@@ -921,46 +1183,42 @@ public class AgentExecutionEngine {
             });
             sb.append("\n");
         }
-        String attachmentContext = buildAttachmentContext(ctx.getAttachmentIds());
-        if (StringUtils.hasText(attachmentContext)) {
-            sb.append("附件内容摘要：\n").append(attachmentContext).append("\n");
-        }
         return sb.toString().trim();
     }
 
-    /** 构建用户消息内容 */
-    private String buildUserMessage(AgentExecutionContext ctx) {
-        return buildExtraContext(ctx);
+    private void persistContextBudgetSnapshot(AgentExecutionContext ctx,
+                                              ContextInjector.PromptBuildResult promptBuildResult,
+                                              AiModelConfig modelConfig) {
+        try {
+            AgentExecutionContext budgetContext = AgentExecutionContext.builder()
+                    .executionId(ctx.getExecutionId())
+                    .agentId(ctx.getAgentId())
+                    .tenantId(ctx.getTenantId())
+                    .inputPrompt(ctx.getInputPrompt())
+                    .inputContext(ctx.getInputContext())
+                    .teamAgentId(ctx.getTeamAgentId())
+                    .teamMemberId(ctx.getTeamMemberId())
+                    .teamMemberRoleName(ctx.getTeamMemberRoleName())
+                    .teamMemberRoleType(ctx.getTeamMemberRoleType())
+                    .additionalSystemContexts(List.of(promptBuildResult.prompt()))
+                    .model(modelConfig.getModelId())
+                    .sandboxPolicy(ctx.getSandboxPolicy())
+                    .build();
+            Map<String, Object> snapshot = new java.util.LinkedHashMap<>();
+            snapshot.put("contextBudget", agentContextBudgetService.buildSnapshot(budgetContext, ctx.getSandboxPolicy()));
+            AgentExecution update = new AgentExecution();
+            update.setId(ctx.getExecutionId());
+            update.setSandboxPolicySnapshot(snapshot);
+            agentExecutionMapper.updateById(update);
+        } catch (Exception exception) {
+            log.warn("写入上下文预算快照失败: executionId={}, error={}", ctx.getExecutionId(), exception.getMessage());
+        }
     }
 
-    private String buildAttachmentContext(List<String> attachmentIds) {
-        if (attachmentIds == null || attachmentIds.isEmpty()) {
-            return "";
-        }
-        List<String> contents = new ArrayList<>();
-        for (String attachmentId : attachmentIds) {
-            if (!StringUtils.hasText(attachmentId)) {
-                continue;
-            }
-            String fileName = resolveAttachmentFileName(attachmentId);
-            try (InputStream inputStream = documentStorageService.getObject(
-                    documentStorageService.getDefaultBucket(), attachmentId)) {
-                String content = fileContentExtractor.extract(fileName, inputStream);
-                if (StringUtils.hasText(content)) {
-                    contents.add("### " + fileName + "\n" + content);
-                }
-            } catch (Exception exception) {
-                log.warn("读取附件内容失败: attachmentId={}, error={}", attachmentId, exception.getMessage());
-            }
-        }
-        return String.join("\n\n", contents);
-    }
-
-    private String resolveAttachmentFileName(String attachmentId) {
-        int index = attachmentId.lastIndexOf('/');
-        return index >= 0 && index < attachmentId.length() - 1
-                ? attachmentId.substring(index + 1)
-                : attachmentId;
+    /** 构建用户消息，多模态模型将图片附件转为 ImageContent */
+    private UserMessage buildUserMessage(AgentExecutionContext ctx, boolean multimodal) {
+        String text = buildExtraContext(ctx);
+        return multimodalMessageBuilder.build(text, ctx.getAttachmentIds(), multimodal);
     }
 
     // =========================================================================

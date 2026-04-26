@@ -52,4 +52,16 @@ public class AgentEngineParams {
 
     /** 工具请求摘要截断长度 */
     private final int toolRequestSummaryLimit;
+
+    /** 是否启用并行工具执行（读工具并行，写工具串行） */
+    @Builder.Default
+    private final boolean parallelToolExecution = true;
+
+    /** 并行工具执行最大并发数 */
+    @Builder.Default
+    private final int maxParallelTools = 4;
+
+    /** 循环检测 WARNING 累积触发强制收敛的阈值 */
+    @Builder.Default
+    private final int maxLoopWarnings = 5;
 }

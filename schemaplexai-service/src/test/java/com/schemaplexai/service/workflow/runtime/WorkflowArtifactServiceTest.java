@@ -366,6 +366,54 @@ class WorkflowArtifactServiceTest {
     }
 
     @Test
+    void shouldSkipRuntimeMetadataForCustomerDeliveryArtifact() {
+        SpecMapper specMapper = mock(SpecMapper.class);
+        SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);
+        GitOperationService gitOperationService = mock(GitOperationService.class);
+        ArtifactService artifactService = mockArtifactService();
+
+        WorkflowArtifactService service = newService(specMapper, specVersionHandler, gitOperationService, artifactService);
+
+        WorkflowInstance instance = new WorkflowInstance();
+        instance.setId("wf-delivery");
+        instance.setName("客户交付闭环");
+        instance.setVariables(new HashMap<>());
+
+        WorkflowNodeExecution nodeExecution = new WorkflowNodeExecution();
+        nodeExecution.setNodeId("scene_delivery_team");
+        nodeExecution.setNodeLabel("方案交付");
+
+        Map<String, Object> artifact = service.persistAgentArtifactIfNecessary(
+                instance,
+                nodeExecution,
+                Map.of(
+                        "artifactDocType", "delivery",
+                        "artifactOutputPath", "deliveries/blogger/customer-demo.md",
+                        "artifactTitle", "SchemaPlexAI 知识内容生产客户演示方案"
+                ),
+                """
+                # SchemaPlexAI 知识内容生产客户演示方案
+
+                ## 已确认事实
+
+                - 已完成客户诊断
+                """,
+                Map.of(
+                        "agentModel", "Claude Code Sonnet 4.6",
+                        "agentExecutionId", "exec-delivery",
+                        "runtimeEngine", "team_langgraph4j",
+                        "qualityScore", 95
+                )
+        );
+
+        assertThat(String.valueOf(artifact.get("artifactContent")))
+                .startsWith("# SchemaPlexAI 知识内容生产客户演示方案")
+                .contains("## 已确认事实")
+                .doesNotContain("## 已确认运行时元数据")
+                .doesNotContain("| 工作流实例 ID |");
+    }
+
+    @Test
     void shouldPrependPrimaryTitleWhenArtifactStartsWithSecondaryHeading() {
         SpecMapper specMapper = mock(SpecMapper.class);
         SpecVersionHandler specVersionHandler = mock(SpecVersionHandler.class);

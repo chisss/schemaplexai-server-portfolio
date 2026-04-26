@@ -39,4 +39,7 @@ public class AgentExecuteDTO {
 
     /** 期望输出格式：markdown / plain_text / structured_json */
     private String outputFormat;
+
+    /** 执行模式: auto / plan / suggest（默认 auto） */
+    private String executionMode;
 }

@@ -54,6 +54,9 @@ public class AgentEngineConfigLoader {
     public static final String KEY_FALLBACK_TEXT_LIMIT                = "engine.fallbackTextLimit";
     public static final String KEY_LOG_CONTENT_LIMIT                  = "engine.logContentLimit";
     public static final String KEY_TOOL_REQUEST_SUMMARY_LIMIT         = "engine.toolRequestSummaryLimit";
+    public static final String KEY_PARALLEL_TOOL_EXECUTION            = "engine.parallelToolExecution";
+    public static final String KEY_MAX_PARALLEL_TOOLS                 = "engine.maxParallelTools";
+    public static final String KEY_MAX_LOOP_WARNINGS                  = "engine.maxLoopWarnings";
 
     // ---- 系统默认值 ----
     private static final int  DEFAULT_MAX_ROUNDS                          = 50;
@@ -70,6 +73,9 @@ public class AgentEngineConfigLoader {
     private static final int  DEFAULT_FALLBACK_TEXT_LIMIT                = 320;
     private static final int  DEFAULT_LOG_CONTENT_LIMIT                  = 500;
     private static final int  DEFAULT_TOOL_REQUEST_SUMMARY_LIMIT         = 240;
+    private static final boolean DEFAULT_PARALLEL_TOOL_EXECUTION         = true;
+    private static final int  DEFAULT_MAX_PARALLEL_TOOLS                 = 4;
+    private static final int  DEFAULT_MAX_LOOP_WARNINGS                  = 5;
 
     private final AgentConfigMapper agentConfigMapper;
 
@@ -109,6 +115,9 @@ public class AgentEngineConfigLoader {
                 .fallbackTextLimit(getInt(configMap, KEY_FALLBACK_TEXT_LIMIT, DEFAULT_FALLBACK_TEXT_LIMIT))
                 .logContentLimit(getInt(configMap, KEY_LOG_CONTENT_LIMIT, DEFAULT_LOG_CONTENT_LIMIT))
                 .toolRequestSummaryLimit(getInt(configMap, KEY_TOOL_REQUEST_SUMMARY_LIMIT, DEFAULT_TOOL_REQUEST_SUMMARY_LIMIT))
+                .parallelToolExecution(getBoolean(configMap, KEY_PARALLEL_TOOL_EXECUTION, DEFAULT_PARALLEL_TOOL_EXECUTION))
+                .maxParallelTools(getInt(configMap, KEY_MAX_PARALLEL_TOOLS, DEFAULT_MAX_PARALLEL_TOOLS))
+                .maxLoopWarnings(getInt(configMap, KEY_MAX_LOOP_WARNINGS, DEFAULT_MAX_LOOP_WARNINGS))
                 .build();
     }
 

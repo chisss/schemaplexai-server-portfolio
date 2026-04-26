@@ -15,6 +15,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import com.schemaplexai.common.enums.ToolIoTypeEnum;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -22,6 +24,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.stream.Collectors;
 
 /**
@@ -91,25 +97,26 @@ public class AgentLoopToolHandler {
     public ToolExecutionOutcome executeOne(AgentToolSessionFactory.RoundToolContext roundToolContext,
                                            ToolExecutionRequest request,
                                            ToolResultCompressionOptions options) {
+        LocalDateTime startedAt = LocalDateTime.now();
         dev.langchain4j.service.tool.ToolExecutor executor =
                 roundToolContext.toolServiceContext().toolExecutors().get(request.name());
         if (executor == null) {
             ToolResult failure = buildFailureResult(request.id(), request.name(), "未找到工具执行器: " + request.name());
-            return new ToolExecutionOutcome(failure, buildResultMessage(request, failure, Map.of(), true, null, options));
+            return buildOutcome(request, failure, Map.of(), true, null, options, startedAt);
         }
         try {
             ToolExecutionResult result = executor.executeWithContext(request, roundToolContext.invocationContext());
             ToolResult toolResult = toPlatformResult(request, result);
-            return new ToolExecutionOutcome(toolResult,
-                    buildResultMessage(request, toolResult,
-                            result != null ? result.attributes() : Map.of(),
-                            result != null ? result.isError() : !toolResult.isSuccess(),
-                            result != null ? result.resultText() : null,
-                            options));
+            return buildOutcome(request, toolResult,
+                    result != null ? result.attributes() : Map.of(),
+                    result != null ? result.isError() : !toolResult.isSuccess(),
+                    result != null ? result.resultText() : null,
+                    options,
+                    startedAt);
         } catch (Exception e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             ToolResult failure = buildFailureResult(request.id(), request.name(), "工具执行异常: " + msg);
-            return new ToolExecutionOutcome(failure, buildResultMessage(request, failure, Map.of(), true, null, options));
+            return buildOutcome(request, failure, Map.of(), true, null, options, startedAt);
         }
     }
 
@@ -304,12 +311,122 @@ public class AgentLoopToolHandler {
         }
     }
 
+    /**
+     * 并行执行工具调用（预分区：读工具一次性并行，写工具按原始顺序串行）
+     *
+     * @param ioTypeIndex 工具 IO 类型索引（来自 DB 配置）
+     */
+    public List<ToolExecutionOutcome> executeParallel(
+            AgentToolSessionFactory.RoundToolContext roundCtx,
+            List<ToolExecutionRequest> requests,
+            ToolResultCompressionOptions compressionOpts,
+            Executor parallelExecutor,
+            int maxParallelTools,
+            Map<String, ToolIoTypeEnum> ioTypeIndex) {
+
+        if (requests == null || requests.isEmpty()) return List.of();
+        if (requests.size() == 1) {
+            return List.of(executeOne(roundCtx, requests.get(0), compressionOpts));
+        }
+
+        // 预分区：READ 工具并行，WRITE / READ_WRITE 工具串行
+        List<int[]> readGroup = new ArrayList<>();   // [originalIndex]
+        List<int[]> writeGroup = new ArrayList<>();
+        List<ToolExecutionRequest> readRequests = new ArrayList<>();
+
+        for (int i = 0; i < requests.size(); i++) {
+            ToolExecutionRequest req = requests.get(i);
+            ToolIoTypeEnum ioType = ioTypeIndex != null
+                    ? ioTypeIndex.getOrDefault(req.name(), ToolIoTypeEnum.READ_WRITE)
+                    : ToolIoTypeEnum.READ_WRITE;
+            if (ioType == ToolIoTypeEnum.READ) {
+                readGroup.add(new int[]{i});
+                readRequests.add(req);
+            } else {
+                writeGroup.add(new int[]{i});
+            }
+        }
+
+        ToolExecutionOutcome[] results = new ToolExecutionOutcome[requests.size()];
+
+        // 1. 所有读工具一次性并行提交
+        if (!readRequests.isEmpty()) {
+            List<ToolExecutionOutcome> readResults = runParallel(
+                    roundCtx, readRequests, compressionOpts, parallelExecutor, maxParallelTools);
+            for (int j = 0; j < readGroup.size(); j++) {
+                results[readGroup.get(j)[0]] = readResults.get(j);
+            }
+        }
+
+        // 2. 写工具按原始顺序串行执行
+        for (int[] entry : writeGroup) {
+            results[entry[0]] = executeOne(roundCtx, requests.get(entry[0]), compressionOpts);
+        }
+
+        return List.of(results);
+    }
+
+    private List<ToolExecutionOutcome> runParallel(
+            AgentToolSessionFactory.RoundToolContext roundCtx,
+            List<ToolExecutionRequest> group,
+            ToolResultCompressionOptions opts,
+            Executor executor,
+            int maxParallelTools) {
+        try {
+            if (maxParallelTools > 0 && group.size() > maxParallelTools) {
+                List<ToolExecutionOutcome> batchResults = new ArrayList<>(group.size());
+                for (int i = 0; i < group.size(); i += maxParallelTools) {
+                    List<ToolExecutionRequest> batch = group.subList(i, Math.min(i + maxParallelTools, group.size()));
+                    batchResults.addAll(doRunParallel(roundCtx, batch, opts, executor));
+                }
+                return batchResults;
+            }
+            return doRunParallel(roundCtx, group, opts, executor);
+        } catch (Exception e) {
+            log.warn("[工具并行执行] 并行提交失败，降级为串行执行: {}", e.getMessage());
+            return group.stream()
+                    .map(req -> executeOne(roundCtx, req, opts))
+                    .toList();
+        }
+    }
+
+    private List<ToolExecutionOutcome> doRunParallel(
+            AgentToolSessionFactory.RoundToolContext roundCtx,
+            List<ToolExecutionRequest> group,
+            ToolResultCompressionOptions opts,
+            Executor executor) {
+        List<CompletableFuture<ToolExecutionOutcome>> futures = group.stream()
+                .map(req -> CompletableFuture.supplyAsync(() -> executeOne(roundCtx, req, opts), executor))
+                .toList();
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        return futures.stream().map(CompletableFuture::join).toList();
+    }
+
     private long elapsed(long startMs) {
         return System.currentTimeMillis() - startMs;
     }
 
+    private ToolExecutionOutcome buildOutcome(ToolExecutionRequest request,
+                                              ToolResult toolResult,
+                                              Map<String, Object> attributes,
+                                              boolean isError,
+                                              String resultText,
+                                              ToolResultCompressionOptions options,
+                                              LocalDateTime startedAt) {
+        long durationMs = Math.max(0L, Duration.between(startedAt, LocalDateTime.now()).toMillis());
+        return new ToolExecutionOutcome(
+                toolResult,
+                buildResultMessage(request, toolResult, attributes, isError, resultText, options),
+                startedAt,
+                durationMs
+        );
+    }
+
     /** 工具执行结果封装（工具结果 + ChatMemory 消息） */
-    public record ToolExecutionOutcome(ToolResult toolResult, ToolExecutionResultMessage resultMessage) {}
+    public record ToolExecutionOutcome(ToolResult toolResult,
+                                       ToolExecutionResultMessage resultMessage,
+                                       LocalDateTime startedAt,
+                                       long durationMs) {}
 
     public record ToolResultCompressionOptions(int maxMessageChars, int requestSummaryLimit) {
 

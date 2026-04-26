@@ -25,6 +25,10 @@
         </dependency>
         <dependency>
             <groupId>com.schemaplexai</groupId>
+            <artifactId>schemaplexai-task</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.schemaplexai</groupId>
             <artifactId>schemaplexai-model</artifactId>
         </dependency>
 

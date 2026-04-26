@@ -23,6 +23,9 @@ public class AiModelCreateRequest {
     /** 提供商编码 */
     private String providerCode;
 
+    /** 调用协议 */
+    private String protocol;
+
     /** 模型用途分类 */
     private String useCase;
 
@@ -46,6 +49,9 @@ public class AiModelCreateRequest {
     /** 输出Token单价 */
     private BigDecimal outputPrice;
 
+    /** 生图单张价格 */
+    private BigDecimal imagePrice;
+
     /** 超时时间（秒） */
     private Integer timeoutSeconds;
 
@@ -60,4 +66,7 @@ public class AiModelCreateRequest {
 
     /** 模型累计 Tokens 限额 */
     private Integer maxQuotaTokens;
+
+    /** 是否支持多模态输入 */
+    private Boolean multimodal;
 }

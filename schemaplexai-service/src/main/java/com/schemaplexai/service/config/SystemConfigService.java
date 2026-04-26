@@ -8,6 +8,7 @@ import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.vo.system.AiModelRouteVO;
 import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;
+import com.schemaplexai.model.vo.system.RouteAnalysisVO;
 
 import java.util.List;
 
@@ -45,6 +46,11 @@ public interface SystemConfigService {
      * 删除AI模型
      */
     void deleteAiModel(String id);
+
+    /**
+     * 停用AI模型并清理路由和模型组引用
+     */
+    void disableAiModel(String id);
 
     /**
      * 获取路由规则列表
@@ -85,4 +91,9 @@ public interface SystemConfigService {
      * 测试 AI 模型连通性
      */
     ConnectivityTestResultVO testConnectivity(String modelId);
+
+    /**
+     * 获取模型路由分析视图
+     */
+    RouteAnalysisVO getRouteAnalysis();
 }

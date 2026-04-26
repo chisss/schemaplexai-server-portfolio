@@ -5,13 +5,23 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.schemaplexai.common.enums.AgentLoopLogTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.service.agent.hook.AgentHookContext;
+import com.schemaplexai.service.agent.hook.AgentHookExecutor;
+import com.schemaplexai.service.agent.hook.AgentHookType;
 import com.schemaplexai.service.ai.LangChain4jResolution;
+import com.schemaplexai.service.ai.ModelMetricsTracker;
+import com.schemaplexai.service.monitor.AgentTraceService;
+import com.schemaplexai.service.monitor.RouteAnalysisService;
+import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -29,6 +39,7 @@ import java.util.concurrent.TimeoutException;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class AgentModelInvoker {
 
     private static final int MAX_CONCURRENT_MODEL_CALLS = 50;
@@ -42,6 +53,11 @@ public class AgentModelInvoker {
             .expireAfterWrite(java.time.Duration.ofMinutes(10))
             .maximumSize(200)
             .build();
+
+    private final AgentHookExecutor hookExecutor;
+    private final ModelMetricsTracker modelMetricsTracker;
+    private final RouteAnalysisService routeAnalysisService;
+    private final AgentTraceService agentTraceService;
 
     // =========================================================================
     //  模型链调用（含降级切换）
@@ -62,7 +78,22 @@ public class AgentModelInvoker {
             throw new BusinessException(ResultCode.AGENT_BUSY, "模型调用并发已达上限，请稍后重试");
         }
         try {
-            return doInvokeChainWithRetry(modelChain, request, params, executionId, agentId, tenantId, round, startMs, agentLogService);
+            // 触发 BEFORE_MODEL_CALL Hook
+            AgentHookContext beforeCtx = AgentHookContext.builder()
+                    .executionId(executionId).agentId(agentId).tenantId(tenantId)
+                    .round(round).chatRequest(request).build();
+            hookExecutor.fire(AgentHookType.BEFORE_MODEL_CALL, beforeCtx, agentId);
+
+            ModelCallResult result = doInvokeChainWithRetry(modelChain, request, params,
+                    executionId, agentId, tenantId, round, startMs, agentLogService);
+
+            // 触发 AFTER_MODEL_CALL Hook
+            AgentHookContext afterCtx = AgentHookContext.builder()
+                    .executionId(executionId).agentId(agentId).tenantId(tenantId)
+                    .round(round).chatRequest(request).chatResponse(result.response()).build();
+            hookExecutor.fire(AgentHookType.AFTER_MODEL_CALL, afterCtx, agentId);
+
+            return result;
         } finally {
             MODEL_CALL_SEMAPHORE.release();
         }
@@ -90,6 +121,8 @@ public class AgentModelInvoker {
                 continue;
             }
             attempted = true;
+            LocalDateTime candidateStartedAt = LocalDateTime.now();
+            long candidateStartMs = System.currentTimeMillis();
             try {
                 int maxRetries = isLastCandidate ? resolveMaxRetries(resolution, params) : 0;
                 long timeoutMillis = resolveChainTimeoutMillis(resolution, params, isLastCandidate);
@@ -97,10 +130,53 @@ public class AgentModelInvoker {
                         executionId, agentId, tenantId, round, startMs, agentLogService,
                         maxRetries, timeoutMillis);
                 clearTemporaryUnavailable(resolution);
+                long latencyMs = System.currentTimeMillis() - candidateStartMs;
+                long inputTokens = extractInputTokens(response);
+                long outputTokens = extractOutputTokens(response);
+                BigDecimal cost = calculateCost(resolution, inputTokens, outputTokens);
+                modelMetricsTracker.recordSuccess(configIdOf(resolution), latencyMs, inputTokens, outputTokens, cost);
+                routeAnalysisService.recordDecision(
+                        tenantId,
+                        agentId,
+                        executionId,
+                        configIdOf(resolution),
+                        "fallback_chain",
+                        modelChain.stream().map(this::configIdOf).toList(),
+                        i == 0 ? "primary_selected" : "fallback_selected_" + i,
+                        latencyMs,
+                        inputTokens + outputTokens,
+                        cost
+                );
+                agentTraceService.recordModelSpan(
+                        executionId,
+                        tenantId,
+                        agentId,
+                        providerOf(resolution) + ":" + modelIdOf(resolution),
+                        candidateStartedAt,
+                        latencyMs,
+                        inputTokens,
+                        outputTokens,
+                        cost,
+                        "SUCCESS"
+                );
                 return new ModelCallResult(response, resolution);
             } catch (Exception e) {
                 lastError = e;
                 markTemporaryUnavailable(resolution, e);
+                long latencyMs = System.currentTimeMillis() - candidateStartMs;
+                modelMetricsTracker.recordFailure(configIdOf(resolution), latencyMs);
+                agentTraceService.recordModelSpan(
+                        executionId,
+                        tenantId,
+                        agentId,
+                        providerOf(resolution) + ":" + modelIdOf(resolution),
+                        candidateStartedAt,
+                        latencyMs,
+                        0L,
+                        0L,
+                        BigDecimal.ZERO,
+                        "FAILED"
+                );
                 if (!isLastCandidate) {
                     appendFallbackLog(executionId, agentId, tenantId, round, startMs, agentLogService,
                             "模型调用失败，切换至下一个降级模型: provider=" + resolution.config().getProvider()
@@ -149,7 +225,9 @@ public class AgentModelInvoker {
         long retryIntervalMillis = resolveRetryIntervalMillis(resolution);
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
-                return invokeWithTimeout(resolution, request, timeoutMillis);
+                ChatResponse response = invokeWithTimeout(resolution, request, timeoutMillis);
+                validateResponse(response);
+                return response;
             } catch (Exception e) {
                 lastError = e;
                 if (!isRetryable(e) || attempt > maxRetries) throw e;
@@ -230,11 +308,15 @@ public class AgentModelInvoker {
      * 判断异常是否可重试
      */
     public boolean isRetryable(Exception e) {
-        String msg = e.getMessage();
+        String msg = resolveExMsg(e);
         if (!StringUtils.hasText(msg)) return false;
         String normalized = msg.toLowerCase();
         return containsAny(normalized,
                 "api_error",
+                "eofexception",
+                "socketexception",
+                "connection reset",
+                "socket closed",
                 "unknown error (1000)",
                 "timeout",
                 "超时",
@@ -318,6 +400,8 @@ public class AgentModelInvoker {
                 "forbidden",
                 "unauthorized",
                 "authentication",
+                "empty response",
+                "空响应",
                 "未授权",
                 "鉴权",
                 "认证")) {
@@ -338,6 +422,19 @@ public class AgentModelInvoker {
             return TEMP_UNAVAILABLE_ON_TIMEOUT_MILLIS;
         }
         return 0L;
+    }
+
+    private void validateResponse(ChatResponse response) {
+        AiMessage aiMessage = response != null ? response.aiMessage() : null;
+        if (aiMessage == null) {
+            throw new IllegalStateException("模型返回空响应");
+        }
+        if (aiMessage.hasToolExecutionRequests()) {
+            return;
+        }
+        if (!StringUtils.hasText(aiMessage.text())) {
+            throw new IllegalStateException("模型返回空响应，且未提供可执行工具请求");
+        }
     }
 
     private boolean containsAny(String message, String... keywords) {
@@ -373,6 +470,13 @@ public class AgentModelInvoker {
         return resolution.config().getModelId();
     }
 
+    private String configIdOf(LangChain4jResolution resolution) {
+        if (resolution == null || resolution.config() == null || !StringUtils.hasText(resolution.config().getConfigId())) {
+            return modelIdOf(resolution);
+        }
+        return resolution.config().getConfigId();
+    }
+
     private String resolveExMsg(Exception e) {
         return e != null && StringUtils.hasText(e.getMessage()) ? e.getMessage()
                 : e != null ? e.getClass().getSimpleName() : "unknown";
@@ -387,7 +491,7 @@ public class AgentModelInvoker {
         int modelRetries = resolution != null && resolution.config() != null
                 ? Math.max(resolution.config().getRetryCount(), 0)
                 : 0;
-        return Math.max(paramRetries, modelRetries);
+        return Math.max(2, Math.max(paramRetries, modelRetries));
     }
 
     private long resolveRetryIntervalMillis(LangChain4jResolution resolution) {
@@ -396,6 +500,29 @@ public class AgentModelInvoker {
         }
         int retryIntervalSeconds = Math.max(resolution.config().getRetryIntervalSeconds(), 1);
         return TimeUnit.SECONDS.toMillis(retryIntervalSeconds);
+    }
+
+    private long extractInputTokens(ChatResponse response) {
+        return response != null && response.metadata() != null && response.metadata().tokenUsage() != null
+                ? response.metadata().tokenUsage().inputTokenCount()
+                : 0L;
+    }
+
+    private long extractOutputTokens(ChatResponse response) {
+        return response != null && response.metadata() != null && response.metadata().tokenUsage() != null
+                ? response.metadata().tokenUsage().outputTokenCount()
+                : 0L;
+    }
+
+    private BigDecimal calculateCost(LangChain4jResolution resolution, long inputTokens, long outputTokens) {
+        if (resolution == null || resolution.config() == null) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal inputPrice = resolution.config().getInputPrice() == null ? BigDecimal.ZERO : resolution.config().getInputPrice();
+        BigDecimal outputPrice = resolution.config().getOutputPrice() == null ? BigDecimal.ZERO : resolution.config().getOutputPrice();
+        return inputPrice.multiply(BigDecimal.valueOf(inputTokens))
+                .add(outputPrice.multiply(BigDecimal.valueOf(outputTokens)))
+                .divide(BigDecimal.valueOf(1000), 6, java.math.RoundingMode.HALF_UP);
     }
 
     /** 模型调用结果封装 */

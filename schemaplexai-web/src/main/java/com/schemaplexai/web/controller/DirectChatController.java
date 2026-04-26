@@ -12,8 +12,10 @@ import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.ChatMessageEntity;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jModelFactory;
-import com.schemaplexai.service.storage.DocumentStorageService;
-import com.schemaplexai.service.util.FileContentExtractor;
+import com.schemaplexai.service.ai.ImageGenerationService;
+import com.schemaplexai.service.ai.MultimodalMessageBuilder;
+import com.schemaplexai.service.chat.DirectChatStreamRequest;
+import com.schemaplexai.service.chat.DirectChatStreamService;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -27,13 +29,14 @@ import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.InputStream;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -52,8 +55,9 @@ public class DirectChatController {
     private final AiModelMapper aiModelMapper;
     private final ChatMessageMapper chatMessageMapper;
     private final LangChain4jModelFactory modelFactory;
-    private final DocumentStorageService documentStorageService;
-    private final FileContentExtractor fileContentExtractor;
+    private final DirectChatStreamService directChatStreamService;
+    private final MultimodalMessageBuilder multimodalMessageBuilder;
+    private final ImageGenerationService imageGenerationService;
 
     @PostMapping("/direct")
     @Operation(summary = "直接调用模型进行对话")
@@ -80,9 +84,11 @@ public class DirectChatController {
         if (StringUtils.hasText(runtimeInstruction)) {
             messages.add(SystemMessage.from(runtimeInstruction));
         }
-        messages.add(UserMessage.from(request.getUserMessage().trim()));
+        AiModelConfig modelConfig = AiModelConfig.from(aiModel);
+        messages.add(multimodalMessageBuilder.build(
+                request.getUserMessage().trim(), request.getAttachmentIds(), modelConfig.isMultimodal()));
 
-        ChatResponse response = modelFactory.getOrCreate(AiModelConfig.from(aiModel))
+        ChatResponse response = modelFactory.getOrCreate(modelConfig)
                 .chat(ChatRequest.builder().messages(messages).build());
         String reply = response.aiMessage() != null ? response.aiMessage().text() : "";
 
@@ -96,6 +102,19 @@ public class DirectChatController {
         );
 
         return R.ok(new DirectChatResponse(conversationId, aiModel.getId(), aiModel.getName(), reply, LocalDateTime.now()));
+    }
+
+    @PostMapping(value = "/direct/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "流式直接调用模型进行对话")
+    public SseEmitter directChatStream(@Valid @RequestBody DirectChatStreamRequest request) {
+        return directChatStreamService.streamChat(request);
+    }
+
+    @PostMapping("/images/generations")
+    @Operation(summary = "调用生图模型生成图片")
+    public R<ImageGenerationService.ImageGenerationResult> generateImage(
+            @Valid @RequestBody ImageGenerationService.ImageGenerationRequest request) {
+        return R.ok(imageGenerationService.generate(request));
     }
 
     private List<ChatMessageEntity> loadHistoryEntities(String conversationId) {
@@ -137,41 +156,7 @@ public class DirectChatController {
                 }
             }
         }
-        String attachmentSummary = buildAttachmentSummary(request.getAttachmentIds());
-        if (StringUtils.hasText(attachmentSummary)) {
-            sections.add("附件参考内容：\n" + attachmentSummary);
-        }
         return String.join("\n\n", sections).trim();
-    }
-
-    private String buildAttachmentSummary(List<String> attachmentIds) {
-        if (attachmentIds == null || attachmentIds.isEmpty()) {
-            return "";
-        }
-        List<String> sections = new ArrayList<>();
-        for (String attachmentId : attachmentIds) {
-            if (!StringUtils.hasText(attachmentId)) {
-                continue;
-            }
-            String fileName = resolveFileName(attachmentId);
-            try (InputStream inputStream = documentStorageService.getObject(
-                    documentStorageService.getDefaultBucket(), attachmentId)) {
-                String content = fileContentExtractor.extract(fileName, inputStream);
-                if (StringUtils.hasText(content)) {
-                    sections.add("### " + fileName + "\n" + content);
-                }
-            } catch (Exception exception) {
-                log.warn("读取直聊附件失败: attachmentId={}, error={}", attachmentId, exception.getMessage());
-            }
-        }
-        return String.join("\n\n", sections);
-    }
-
-    private String resolveFileName(String attachmentId) {
-        int index = attachmentId.lastIndexOf('/');
-        return index >= 0 && index < attachmentId.length() - 1
-                ? attachmentId.substring(index + 1)
-                : attachmentId;
     }
 
     private void persistConversation(String conversationId,

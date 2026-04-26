@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.enums.SourceTypeEnum;
+import com.schemaplexai.common.enums.ToolIoTypeEnum;
 import com.schemaplexai.dao.mapper.AgentToolBindingMapper;
 import com.schemaplexai.dao.mapper.ApiGatewayMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
@@ -15,6 +16,7 @@ import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.entity.Skill;
 import com.schemaplexai.service.ai.LangChain4jToolSpecProvider;
+import com.schemaplexai.service.ai.ToolNameNormalizer;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.tool.executor.ApiGatewayToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
@@ -94,6 +96,7 @@ public class AgentToolSessionFactory {
         LinkedHashMap<String, ToolSpecification> availableTools = new LinkedHashMap<>();
         LinkedHashMap<String, dev.langchain4j.service.tool.ToolExecutor> executors = new LinkedHashMap<>();
         LinkedHashMap<String, List<ExecutableSkillTool>> lazyLoadedSkillTools = new LinkedHashMap<>();
+        LinkedHashMap<String, ToolIoTypeEnum> ioTypeIndex = new LinkedHashMap<>();
         List<AutoCloseable> closeables = new ArrayList<>();
 
         InvocationContext invocationContext = buildInvocationContext(ctx, conversationId, 0);
@@ -104,7 +107,12 @@ public class AgentToolSessionFactory {
 
         String skillPromptBlock = mergeSkillProviders(ctx, bindings, providerRequest, availableTools, executors, lazyLoadedSkillTools);
         mergeDirectMcpProviders(bindings, providerRequest, availableTools, executors, closeables);
-        mergeLocalBindings(ctx, bindings, availableTools, executors);
+        mergeLocalBindings(ctx, bindings, availableTools, executors, ioTypeIndex);
+
+        // MCP 和 Skill 工具默认 READ_WRITE
+        for (String toolName : availableTools.keySet()) {
+            ioTypeIndex.putIfAbsent(toolName, ToolIoTypeEnum.READ_WRITE);
+        }
 
         List<ToolSpecification> toolSpecifications = new ArrayList<>(availableTools.values());
         ToolServiceContext baseContext = ToolServiceContext.builder()
@@ -113,7 +121,7 @@ public class AgentToolSessionFactory {
                 .effectiveTools(toolSpecifications)
                 .toolExecutors(executors)
                 .build();
-        return new AgentToolSession(baseContext, toolSearchService, ctx, conversationId, skillPromptBlock, closeables, lazyLoadedSkillTools);
+        return new AgentToolSession(baseContext, toolSearchService, ctx, conversationId, skillPromptBlock, closeables, lazyLoadedSkillTools, ioTypeIndex);
     }
 
     private String mergeSkillProviders(AgentExecutionContext ctx,
@@ -246,7 +254,8 @@ public class AgentToolSessionFactory {
     private void mergeLocalBindings(AgentExecutionContext ctx,
                                     List<AgentToolBinding> bindings,
                                     Map<String, ToolSpecification> availableTools,
-                                    Map<String, dev.langchain4j.service.tool.ToolExecutor> executors) {
+                                    Map<String, dev.langchain4j.service.tool.ToolExecutor> executors,
+                                    Map<String, ToolIoTypeEnum> ioTypeIndex) {
         for (AgentToolBinding binding : bindings) {
             String sourceType = normalizeSourceType(binding.getSourceType());
             if (SourceTypeEnum.MCP.getCode().equals(sourceType)
@@ -262,6 +271,7 @@ public class AgentToolSessionFactory {
                     ? SearchBehavior.ALWAYS_VISIBLE
                     : SearchBehavior.SEARCHABLE;
             ToolSpecification specification = toolSpecProvider.toToolSpecification(definition, searchBehavior);
+            ioTypeIndex.putIfAbsent(specification.name(), definition.getIoType());
             availableTools.putIfAbsent(specification.name(), specification);
 
             com.schemaplexai.service.agent.tool.executor.ToolExecutor delegate;
@@ -300,6 +310,9 @@ public class AgentToolSessionFactory {
                     .inputSchema(parseBuiltinSchema(builtinTool))
                     .sourceType(sourceType)
                     .userVisible(true)
+                    .ioType(builtinTool != null && StringUtils.hasText(builtinTool.getIoType())
+                            ? ToolIoTypeEnum.fromCode(builtinTool.getIoType())
+                            : ToolIoTypeEnum.READ_WRITE)
                     .build();
         }
         if (SourceTypeEnum.SKILL.getCode().equals(sourceType) && StringUtils.hasText(binding.getSourceRefId())) {
@@ -515,8 +528,15 @@ public class AgentToolSessionFactory {
             return;
         }
         providerResult.tools().forEach((toolSpecification, toolExecutor) -> {
-            availableTools.putIfAbsent(toolSpecification.name(), toolSpecification);
-            executors.putIfAbsent(toolSpecification.name(), toolExecutor);
+            ToolSpecification normalizedSpecification = ToolNameNormalizer.normalizeSpecification(toolSpecification);
+            String originalToolName = toolSpecification.name();
+            String normalizedToolName = normalizedSpecification != null ? normalizedSpecification.name() : originalToolName;
+            dev.langchain4j.service.tool.ToolExecutor normalizedExecutor =
+                    normalizedToolName != null && normalizedToolName.equals(originalToolName)
+                            ? toolExecutor
+                            : new AliasedToolExecutor(toolExecutor, originalToolName);
+            availableTools.putIfAbsent(normalizedToolName, normalizedSpecification);
+            executors.putIfAbsent(normalizedToolName, normalizedExecutor);
         });
     }
 
@@ -614,6 +634,7 @@ public class AgentToolSessionFactory {
         private final String skillPromptBlock;
         private final List<AutoCloseable> closeables;
         private final Map<String, List<ExecutableSkillTool>> lazyLoadedSkillTools;
+        private final Map<String, ToolIoTypeEnum> ioTypeIndex;
 
         public RoundToolContext buildRoundContext(ChatMemory chatMemory, int round) {
             InvocationContext invocationContext = InvocationContext.builder()
@@ -631,7 +652,7 @@ public class AgentToolSessionFactory {
                     .build();
             ToolServiceContext effectiveContext = toolSearchService.adjust(baseContext, chatMemory, invocationContext);
             effectiveContext = mergeActivatedSkillTools(effectiveContext, chatMemory);
-            return new RoundToolContext(effectiveContext, invocationContext);
+            return new RoundToolContext(effectiveContext, invocationContext, ioTypeIndex);
         }
 
         public String augmentSystemPrompt(String systemPrompt) {
@@ -708,7 +729,8 @@ public class AgentToolSessionFactory {
     }
 
     public record RoundToolContext(ToolServiceContext toolServiceContext,
-                                   InvocationContext invocationContext) {
+                                   InvocationContext invocationContext,
+                                   Map<String, ToolIoTypeEnum> ioTypeIndex) {
     }
 
     private record ExecutableSkillTool(String skillName,
@@ -766,6 +788,34 @@ public class AgentToolSessionFactory {
                 log.debug("解析技能激活参数失败: {}", exception.getMessage());
             }
             return null;
+        }
+    }
+
+    @RequiredArgsConstructor
+    private static class AliasedToolExecutor implements dev.langchain4j.service.tool.ToolExecutor {
+
+        private final dev.langchain4j.service.tool.ToolExecutor delegate;
+        private final String actualToolName;
+
+        @Override
+        public ToolExecutionResult executeWithContext(ToolExecutionRequest request, InvocationContext invocationContext) {
+            return delegate.executeWithContext(rewriteRequest(request), invocationContext);
+        }
+
+        @Override
+        public String execute(ToolExecutionRequest request, Object memoryId) {
+            return delegate.execute(rewriteRequest(request), memoryId);
+        }
+
+        private ToolExecutionRequest rewriteRequest(ToolExecutionRequest request) {
+            if (request == null || !StringUtils.hasText(actualToolName)) {
+                return request;
+            }
+            return ToolExecutionRequest.builder()
+                    .id(request.id())
+                    .name(actualToolName)
+                    .arguments(request.arguments())
+                    .build();
         }
     }
 }

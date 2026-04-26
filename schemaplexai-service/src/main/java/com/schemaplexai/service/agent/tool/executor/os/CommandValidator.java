@@ -23,7 +23,9 @@ public class CommandValidator {
         Map<String, Object> safeArgs = args == null ? Map.of() : args;
         return switch (toolCode) {
             case "sys.read", "sys.stat", "sys.rm", "sys.mkdir" -> validatePathArg(safeArgs, "path");
-            case "sys.ls" -> !safeArgs.containsKey("path") || validatePath(asText(safeArgs.get("path")));
+            case "sys.ls" -> !safeArgs.containsKey("path")
+                    || !StringUtils.hasText(asText(safeArgs.get("path")))
+                    || validatePath(asText(safeArgs.get("path")));
             case "sys.write", "sys.edit" -> validatePathArg(safeArgs, "path") && validateContentArg(safeArgs, "content");
             case "sys.glob", "sys.grep" -> validatePatternArg(safeArgs, "pattern")
                     && (!safeArgs.containsKey("path") || validatePath(asText(safeArgs.get("path"))));
