@@ -24,6 +24,12 @@ public class AgentExecutionContext {
     /** 租户 ID */
     private String tenantId;
 
+    /** 当前执行所属用户ID */
+    private String userId;
+
+    /** 项目ID，可用于项目级用户记忆隔离 */
+    private String projectId;
+
     /** 用户输入的任务描述 */
     private String inputPrompt;
 
@@ -68,6 +74,12 @@ public class AgentExecutionContext {
 
     /** 会话标识（前端传入或自动生成，支持多轮对话） */
     private String conversationId;
+
+    /** 临时对话不读取也不写入用户记忆 */
+    private boolean temporaryChat;
+
+    /** 是否允许本次执行写入用户记忆，null 表示跟随用户设置 */
+    private Boolean memoryWriteEnabled;
 
     /** 附件对象 ID 列表 */
     private List<String> attachmentIds;

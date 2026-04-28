@@ -67,6 +67,7 @@ public class AgentRuntimeOrchestrator {
                 .executionId(execution.getId())
                 .agentId(execution.getAgentId())
                 .tenantId(execution.getTenantId())
+                .userId(execution.getCreatedBy())
                 .inputPrompt(execution.getInputPrompt())
                 .model(execution.getAiModel())
                 .agentModelType(agent.getAiModelType())
@@ -76,6 +77,8 @@ public class AgentRuntimeOrchestrator {
                 .runtimeEngine(runtimeEngine.getCode())
                 .executionMode(execution.getExecutionMode() != null ? execution.getExecutionMode() : "auto")
                 .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
+                .temporaryChat(Boolean.TRUE.equals(input.getTemporaryChat()))
+                .memoryWriteEnabled(input.getMemoryWriteEnabled())
                 .build();
         applyOutputFormatContext(agent.getId(), context);
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
@@ -111,6 +114,7 @@ public class AgentRuntimeOrchestrator {
                     .executionId(execution.getId())
                     .agentId(agent.getId())
                     .tenantId(execution.getTenantId())
+                    .userId(execution.getCreatedBy())
                     .inputPrompt(dto.getPrompt())
                     .model(execution.getAiModel())
                     .agentModelType(agent.getAiModelType())
@@ -122,6 +126,8 @@ public class AgentRuntimeOrchestrator {
                     .skillCode(dto.getSkillCode())
                     .outputFormat(dto.getOutputFormat())
                     .stream(Boolean.TRUE.equals(dto.getStream()))
+                    .temporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()))
+                    .memoryWriteEnabled(dto.getMemoryWriteEnabled())
                     .build()).get(90, TimeUnit.SECONDS);
         } catch (TimeoutException exception) {
             AgentExecution update = new AgentExecution();

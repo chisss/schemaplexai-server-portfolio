@@ -1,6 +1,7 @@
 package com.schemaplexai.service.vector.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.model.entity.AiModel;
@@ -19,8 +20,9 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.ResponseBody;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -39,6 +41,7 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 @Service
+@Primary
 @ConditionalOnProperty(prefix = "ai.embedding", name = "provider", havingValue = "openai", matchIfMissing = true)
 public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
 
@@ -47,21 +50,16 @@ public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
 
     private final AiModelMapper aiModelMapper;
     private final RagConfigService ragConfigService;
-    private final InProcessEmbeddingServiceImpl inProcessFallback;
+    private final ObjectProvider<InProcessEmbeddingServiceImpl> inProcessFallbackProvider;
     private final ConcurrentHashMap<String, EmbeddingModel> modelCache = new ConcurrentHashMap<>();
-    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Autowired
-    public OpenAiEmbeddingServiceImpl(AiModelMapper aiModelMapper, RagConfigService ragConfigService) {
-        this(aiModelMapper, ragConfigService, new InProcessEmbeddingServiceImpl());
-    }
-
-    OpenAiEmbeddingServiceImpl(AiModelMapper aiModelMapper,
-                               RagConfigService ragConfigService,
-                               InProcessEmbeddingServiceImpl inProcessFallback) {
+    public OpenAiEmbeddingServiceImpl(AiModelMapper aiModelMapper,
+                                      RagConfigService ragConfigService,
+                                      ObjectProvider<InProcessEmbeddingServiceImpl> inProcessFallbackProvider) {
         this.aiModelMapper = aiModelMapper;
         this.ragConfigService = ragConfigService;
-        this.inProcessFallback = inProcessFallback;
+        this.inProcessFallbackProvider = inProcessFallbackProvider;
     }
 
     @Override
@@ -69,7 +67,7 @@ public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
         RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
         if (settings != null && settings.isBuiltinEmbedding()) {
             BuiltinEmbeddingModel builtinModel = BuiltinEmbeddingModel.fromModelId(settings.getBuiltinEmbeddingModelId());
-            return inProcessFallback.embed(text, builtinModel);
+            return inProcessFallback().embed(text, builtinModel);
         }
         AiModelConfig config = resolveEmbeddingModelConfig(tenantId);
         boolean strictMode = settings != null
@@ -83,7 +81,7 @@ public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
                 throw new IllegalStateException(message);
             }
             log.warn("未找到可用的 Embedding 模型配置(apiKey/baseUrl/modelId)，降级到本地内嵌模型: tenantId={}", tenantId);
-            return inProcessFallback.embed(tenantId, text);
+            return inProcessFallback().embed(tenantId, text);
         }
         try {
             if (isDoubaoMultimodalEmbedding(config)) {
@@ -98,8 +96,12 @@ public class OpenAiEmbeddingServiceImpl implements EmbeddingService {
                         tenantId, config.getModelId(), e.getMessage()), e);
             }
             log.warn("Embedding API 调用失败，降级到本地内嵌模型: tenantId={}, error={}", tenantId, e.getMessage());
-            return inProcessFallback.embed(tenantId, text);
+            return inProcessFallback().embed(tenantId, text);
         }
+    }
+
+    private InProcessEmbeddingServiceImpl inProcessFallback() {
+        return inProcessFallbackProvider.getObject();
     }
 
     @Override

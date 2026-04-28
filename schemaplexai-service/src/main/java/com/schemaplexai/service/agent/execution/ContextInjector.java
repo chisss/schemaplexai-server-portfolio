@@ -11,6 +11,8 @@ import com.schemaplexai.model.entity.ContextItem;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.context.ContextCacheService;
 import com.schemaplexai.service.memory.rag.RagContentRetrieverFactory;
+import com.schemaplexai.service.user.UserMemoryInjectionService;
+import com.schemaplexai.service.user.UserMemoryPromptPart;
 import com.schemaplexai.service.vector.MilvusVectorService;
 import com.schemaplexai.service.vector.ScoringService;
 import dev.langchain4j.rag.content.Content;
@@ -88,6 +90,11 @@ public class ContextInjector {
     @Autowired(required = false)
     private com.schemaplexai.service.agent.memory.AgentMemoryExtractionService agentMemoryService;
 
+    /** 用户长期记忆服务（用户画像与偏好） */
+    @Lazy
+    @Autowired(required = false)
+    private UserMemoryInjectionService userMemoryInjectionService;
+
     // =========================================================================
     //  公开方法
     // =========================================================================
@@ -129,6 +136,20 @@ public class ContextInjector {
                                                      String tenantId, String teamAgentId,
                                                      List<String> additionalSystemContexts,
                                                      AiModelConfig modelConfig) {
+        return buildSystemPromptDetail(agentId, extraContext, tenantId, teamAgentId,
+                additionalSystemContexts, modelConfig, null, null, false);
+    }
+
+    /**
+     * 返回带用户记忆观测指标的 System Prompt 构建结果。
+     */
+    public PromptBuildResult buildSystemPromptDetail(String agentId, String extraContext,
+                                                     String tenantId, String teamAgentId,
+                                                     List<String> additionalSystemContexts,
+                                                     AiModelConfig modelConfig,
+                                                     String userId,
+                                                     String projectId,
+                                                     boolean temporaryChat) {
         boolean hasSemanticContext = StringUtils.hasText(tenantId) && StringUtils.hasText(extraContext);
         boolean hasTeamContext = StringUtils.hasText(teamAgentId);
         boolean hasRuntimeContext = additionalSystemContexts != null && !additionalSystemContexts.isEmpty();
@@ -156,7 +177,8 @@ public class ContextInjector {
             }
         }
 
-        DynamicPromptPart dynamicPart = buildDynamicPart(agentId, tenantId, teamAgentId, extraContext, budget);
+        DynamicPromptPart dynamicPart = buildDynamicPart(agentId, tenantId, teamAgentId, extraContext,
+                userId, projectId, temporaryChat, budget);
         String runtimePart = buildRuntimeSystemPart(additionalSystemContexts, budget.l3BudgetChars());
 
         StringBuilder promptBuilder = new StringBuilder(staticPart);
@@ -179,7 +201,9 @@ public class ContextInjector {
                 dynamicPart.retrievalHitCount(),
                 dynamicPart.retrievalRawChars(),
                 dynamicPart.retrievalCompressedChars(),
-                budget.totalPromptBudgetChars()
+                budget.totalPromptBudgetChars(),
+                dynamicPart.userMemoryStaticCount(),
+                dynamicPart.userMemoryContextualCount()
         );
     }
 
@@ -229,12 +253,16 @@ public class ContextInjector {
      */
     private DynamicPromptPart buildDynamicPart(String agentId, String tenantId,
                                                String teamAgentId, String extraContext,
+                                               String userId, String projectId,
+                                               boolean temporaryChat,
                                                PromptBudgetPlanner.PromptBudget budget) {
         List<String> sections = new ArrayList<>();
         String retrievalSource = "empty";
         int retrievalHitCount = 0;
         int retrievalRawChars = 0;
         int retrievalCompressedChars = 0;
+        int userMemoryStaticCount = 0;
+        int userMemoryContextualCount = 0;
 
         // L2.5: 语义检索（优先使用 LangChain4J ContentRetriever，fallback 到原始 Milvus）
         if (StringUtils.hasText(tenantId) && StringUtils.hasText(extraContext)) {
@@ -264,6 +292,24 @@ public class ContextInjector {
             }
         }
 
+        // L_user: 用户画像与偏好（按用户隔离，不能进入 Agent 静态缓存）
+        if (userMemoryInjectionService != null && StringUtils.hasText(tenantId) && StringUtils.hasText(userId)) {
+            try {
+                UserMemoryPromptPart userMemoryPart = userMemoryInjectionService.buildPromptPart(
+                        tenantId, userId, agentId, projectId, extraContext, temporaryChat);
+                if (StringUtils.hasText(userMemoryPart.staticPrompt())) {
+                    sections.add(compressText(userMemoryPart.staticPrompt(), 1200));
+                    userMemoryStaticCount = userMemoryPart.staticCount();
+                }
+                if (StringUtils.hasText(userMemoryPart.contextualPrompt())) {
+                    sections.add(compressText(userMemoryPart.contextualPrompt(), 1200));
+                    userMemoryContextualCount = userMemoryPart.contextualCount();
+                }
+            } catch (Exception e) {
+                log.debug("用户记忆注入跳过: userId={}, agentId={}, error={}", userId, agentId, e.getMessage());
+            }
+        }
+
         // L_memory: Agent 长期记忆（跨会话知识积累）
         if (agentMemoryService != null && StringUtils.hasText(tenantId)) {
             try {
@@ -288,7 +334,8 @@ public class ContextInjector {
         }
 
         return new DynamicPromptPart(String.join("\n\n---\n\n", sections),
-                retrievalSource, retrievalHitCount, retrievalRawChars, retrievalCompressedChars);
+                retrievalSource, retrievalHitCount, retrievalRawChars, retrievalCompressedChars,
+                userMemoryStaticCount, userMemoryContextualCount);
     }
 
     private String buildRuntimeSystemPart(List<String> additionalSystemContexts, int runtimeBudget) {
@@ -616,14 +663,18 @@ public class ContextInjector {
                                     int retrievalHitCount,
                                     int retrievalRawChars,
                                     int retrievalCompressedChars,
-                                    int promptBudgetChars) {
+                                    int promptBudgetChars,
+                                    int userMemoryStaticCount,
+                                    int userMemoryContextualCount) {
     }
 
     private record DynamicPromptPart(String prompt,
                                      String retrievalSource,
                                      int retrievalHitCount,
                                      int retrievalRawChars,
-                                     int retrievalCompressedChars) {
+                                     int retrievalCompressedChars,
+                                     int userMemoryStaticCount,
+                                     int userMemoryContextualCount) {
     }
 
     private record RetrievalResult(String source, List<String> contents) {

@@ -5,6 +5,7 @@ import com.schemaplexai.service.rag.RagConfigService;
 import com.schemaplexai.service.rag.RagRuntimeSettings;
 import com.schemaplexai.service.vector.impl.InProcessEmbeddingServiceImpl.BuiltinEmbeddingModel;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -19,6 +20,7 @@ class OpenAiEmbeddingServiceImplTest {
         AiModelMapper aiModelMapper = mock(AiModelMapper.class);
         RagConfigService ragConfigService = mock(RagConfigService.class);
         InProcessEmbeddingServiceImpl inProcessFallback = mock(InProcessEmbeddingServiceImpl.class);
+        ObjectProvider<InProcessEmbeddingServiceImpl> fallbackProvider = mock(ObjectProvider.class);
 
         when(ragConfigService.resolveSettings("tenant-1")).thenReturn(RagRuntimeSettings.builder()
                 .tenantId("tenant-1")
@@ -29,11 +31,12 @@ class OpenAiEmbeddingServiceImplTest {
                 .build());
         when(inProcessFallback.embed("hello rag", BuiltinEmbeddingModel.BGE_SMALL_EN))
                 .thenReturn(new float[]{0.12F, 0.34F});
+        when(fallbackProvider.getObject()).thenReturn(inProcessFallback);
 
         OpenAiEmbeddingServiceImpl service = new OpenAiEmbeddingServiceImpl(
                 aiModelMapper,
                 ragConfigService,
-                inProcessFallback
+                fallbackProvider
         );
 
         float[] vector = service.embed("tenant-1", "hello rag");
@@ -48,6 +51,7 @@ class OpenAiEmbeddingServiceImplTest {
         AiModelMapper aiModelMapper = mock(AiModelMapper.class);
         RagConfigService ragConfigService = mock(RagConfigService.class);
         InProcessEmbeddingServiceImpl inProcessFallback = mock(InProcessEmbeddingServiceImpl.class);
+        ObjectProvider<InProcessEmbeddingServiceImpl> fallbackProvider = mock(ObjectProvider.class);
 
         when(ragConfigService.resolveSettings("tenant-1")).thenReturn(RagRuntimeSettings.builder()
                 .tenantId("tenant-1")
@@ -60,7 +64,7 @@ class OpenAiEmbeddingServiceImplTest {
         OpenAiEmbeddingServiceImpl service = new OpenAiEmbeddingServiceImpl(
                 aiModelMapper,
                 ragConfigService,
-                inProcessFallback
+                fallbackProvider
         );
 
         assertThat(service.dimension("tenant-1")).isEqualTo(BuiltinEmbeddingModel.BGE_SMALL_EN.getDimension());

@@ -42,4 +42,10 @@ public class AgentExecuteDTO {
 
     /** 执行模式: auto / plan / suggest（默认 auto） */
     private String executionMode;
+
+    /** 临时对话：不读取也不写入用户记忆 */
+    private Boolean temporaryChat = false;
+
+    /** 本次是否允许写入用户记忆，默认跟随用户设置 */
+    private Boolean memoryWriteEnabled;
 }

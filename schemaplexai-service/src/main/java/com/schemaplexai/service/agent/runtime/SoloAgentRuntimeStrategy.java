@@ -39,6 +39,7 @@ public class SoloAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .executionId(execution.getId())
                 .agentId(execution.getAgentId())
                 .tenantId(execution.getTenantId())
+                .userId(execution.getCreatedBy())
                 .inputPrompt(execution.getInputPrompt())
                 .model(execution.getAiModel())
                 .agentModelType(agent.getAiModelType())
@@ -46,6 +47,8 @@ public class SoloAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .inputContext(execution.getInputContext())
                 .conversationId(execution.getConversationId())
                 .runtimeEngine(execution.getRuntimeEngine())
+                .temporaryChat(Boolean.TRUE.equals(input.getTemporaryChat()))
+                .memoryWriteEnabled(input.getMemoryWriteEnabled())
                 .build();
         context.setSandboxPolicy(sandboxPolicyResolver.resolve(agent, context));
         return agentExecutionEngine.resume(context, input);

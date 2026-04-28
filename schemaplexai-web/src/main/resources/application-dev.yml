@@ -17,7 +17,9 @@ spring:
   sql:
     init:
       mode: always
-      schema-locations: classpath:db/schema/security-compliance.sql
+      schema-locations:
+        - classpath:db/schema/security-compliance.sql
+        - classpath:db/schema/user-memory.sql
   servlet:
     multipart:
       max-file-size: 100MB    # 单个文件最大大小
