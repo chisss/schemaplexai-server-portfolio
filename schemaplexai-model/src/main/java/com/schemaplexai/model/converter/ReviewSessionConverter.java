@@ -17,6 +17,12 @@ public interface ReviewSessionConverter {
 
     @Mapping(target = "comments", ignore = true)
     @Mapping(target = "summary", ignore = true)
+    @Mapping(target = "specName", ignore = true)
+    @Mapping(target = "workflowNodeLabel", ignore = true)
+    @Mapping(target = "ownerName", ignore = true)
+    @Mapping(target = "approverId", ignore = true)
+    @Mapping(target = "approverName", ignore = true)
+    @Mapping(target = "approverAt", ignore = true)
     ReviewSessionVO toVO(ReviewSession session);
 
     List<ReviewSessionVO> toVOList(List<ReviewSession> sessions);

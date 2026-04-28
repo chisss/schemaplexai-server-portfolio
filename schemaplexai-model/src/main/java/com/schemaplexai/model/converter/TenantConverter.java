@@ -27,6 +27,10 @@ public interface TenantConverter {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "status", expression = "java(CommonConstant.STATUS_ACTIVE)")
     @Mapping(target = "config", ignore = true)
+    @Mapping(target = "industry", ignore = true)
+    @Mapping(target = "scenarios", ignore = true)
+    @Mapping(target = "enabledCapabilities", ignore = true)
+    @Mapping(target = "initStatus", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
     @Mapping(target = "updatedAt", ignore = true)
     Tenant fromCreateRequest(TenantCreateRequest request);

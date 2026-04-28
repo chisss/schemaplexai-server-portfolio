@@ -20,6 +20,14 @@ import java.util.List;
         imports = {CommonConstant.class})
 public interface ContextEntityConverter {
 
+    @Mapping(target = "itemCount", ignore = true)
+    @Mapping(target = "totalTokens", ignore = true)
+    @Mapping(target = "vectorized", ignore = true)
+    @Mapping(target = "vectorStatus", ignore = true)
+    @Mapping(target = "vectorChunkCount", ignore = true)
+    @Mapping(target = "knowledgeDocumentCount", ignore = true)
+    @Mapping(target = "vectorUpdatedAt", ignore = true)
+    @Mapping(target = "relations", ignore = true)
     ContextVO toVO(ContextEntity entity);
 
     List<ContextVO> toVOList(List<ContextEntity> entities);

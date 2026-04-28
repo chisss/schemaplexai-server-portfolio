@@ -3,6 +3,7 @@ package com.schemaplexai.model.converter;
 import com.schemaplexai.model.entity.KnowledgeDocument;
 import com.schemaplexai.model.vo.knowledge.KnowledgeDocumentVO;
 import org.mapstruct.Mapper;
+import org.mapstruct.Mapping;
 import org.mapstruct.ReportingPolicy;
 
 import java.util.List;
@@ -13,6 +14,7 @@ import java.util.List;
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE)
 public interface KnowledgeDocumentConverter {
 
+    @Mapping(target = "createdByName", ignore = true)
     KnowledgeDocumentVO toVO(KnowledgeDocument entity);
 
     List<KnowledgeDocumentVO> toVOList(List<KnowledgeDocument> entities);
