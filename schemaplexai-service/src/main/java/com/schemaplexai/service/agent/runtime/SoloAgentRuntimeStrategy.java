@@ -10,6 +10,7 @@ import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -47,6 +48,8 @@ public class SoloAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .inputContext(execution.getInputContext())
                 .conversationId(execution.getConversationId())
                 .runtimeEngine(execution.getRuntimeEngine())
+                .executionMode(StringUtils.hasText(execution.getExecutionMode()) ? execution.getExecutionMode() : "auto")
+                .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
                 .temporaryChat(Boolean.TRUE.equals(input.getTemporaryChat()))
                 .memoryWriteEnabled(input.getMemoryWriteEnabled())
                 .build();

@@ -79,6 +79,7 @@ import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.AgentTeamMemberToolBinding;
 import com.schemaplexai.model.entity.ApiGateway;
 import com.schemaplexai.model.entity.ChatMessageEntity;
+import com.schemaplexai.model.entity.PendingToolApproval;
 import com.schemaplexai.model.vo.agent.AgentConfigVO;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
 import com.schemaplexai.model.vo.agent.AgentExecuteResultVO;
@@ -96,6 +97,7 @@ import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
 import com.schemaplexai.service.agent.AgentService;
+import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.agent.validator.AgentValidator;
 import com.schemaplexai.service.common.EntityValidator;
@@ -119,6 +121,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -173,6 +176,7 @@ public class AgentServiceImpl implements AgentService {
     private final ExecutionEventStreamService executionEventStreamService;
     private final SecurityRuntimeGuardService securityRuntimeGuardService;
     private final ToolApprovalAmendmentService toolApprovalAmendmentService;
+    private final PendingToolApprovalService pendingToolApprovalService;
     private final SystemAgentService systemAgentService;
 
     @Override
@@ -1535,24 +1539,31 @@ public class AgentServiceImpl implements AgentService {
         String decision = dto.getApprovalDecision();
         String executionId = execution.getId();
         String tenantId = agent.getTenantId();
+        PendingToolApproval approval = decidePendingApproval(executionId, dto);
+        String toolCode = resolveApprovalToolCode(dto, approval);
+        String toolCommand = resolveApprovalToolCommand(dto, approval);
+        if ("edit".equals(decision) && approval == null) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "修改参数审批需要有效的待审批记录");
+        }
 
         switch (decision) {
-            case "approve", "approve_always" -> {
-                if ("approve_always".equals(decision) && StringUtils.hasText(dto.getToolCode())) {
+            case "approve", "approve_always", "edit" -> {
+                if ("approve_always".equals(decision) && StringUtils.hasText(toolCode)) {
                     toolApprovalAmendmentService.createAmendment(
-                            tenantId, agent.getId(), dto.getToolCode(),
-                            dto.getToolCommand(), SecurityUtil.getCurrentUserId(),
+                            tenantId, agent.getId(), toolCode,
+                            toolCommand, SecurityUtil.getCurrentUserId(),
                             AmendmentScopeEnum.AGENT, null);
-                    log.info("渐进信任: 工具[{}]已设为始终批准", dto.getToolCode());
+                    log.info("渐进信任: 工具[{}]已设为始终批准", toolCode);
                 }
                 executionEventStreamService.publish(AgentExecutionEvent.builder()
                         .eventType(AgentExecutionEventTypeEnum.APPROVAL_GRANTED.getCode())
                         .executionId(executionId)
-                        .message("用户已批准工具: " + dto.getToolCode())
+                        .message("用户已批准工具: " + toolCode)
+                        .payload(buildApprovalEventPayload(approval, toolCode, decision))
                         .timestamp(Instant.now())
                         .build());
                 if (!StringUtils.hasText(dto.getMessage())) {
-                    dto.setMessage("用户已批准执行工具: " + dto.getToolCode());
+                    dto.setMessage("用户已批准执行工具: " + toolCode);
                 }
                 agentRuntimeOrchestrator.resume(executionId, dto);
             }
@@ -1560,17 +1571,68 @@ public class AgentServiceImpl implements AgentService {
                 executionEventStreamService.publish(AgentExecutionEvent.builder()
                         .eventType(AgentExecutionEventTypeEnum.APPROVAL_DENIED.getCode())
                         .executionId(executionId)
-                        .message("用户已拒绝工具: " + dto.getToolCode())
+                        .message("用户已拒绝工具: " + toolCode)
+                        .payload(buildApprovalEventPayload(approval, toolCode, decision))
                         .timestamp(Instant.now())
                         .build());
                 if (!StringUtils.hasText(dto.getMessage())) {
-                    dto.setMessage("用户已拒绝执行工具: " + dto.getToolCode() + "，请调整方案继续。");
+                    dto.setMessage("用户已拒绝执行工具: " + toolCode + "，请调整方案继续。");
                 }
                 agentRuntimeOrchestrator.resume(executionId, dto);
             }
             default -> throw new BusinessException(ResultCode.BAD_REQUEST,
                     "无效的审批决策: " + decision);
         }
+    }
+
+    private PendingToolApproval decidePendingApproval(String executionId, AgentExecutionInputDTO dto) {
+        try {
+            Optional<PendingToolApproval> pendingOpt;
+            if (StringUtils.hasText(dto.getApprovalId())) {
+                pendingOpt = pendingToolApprovalService.findById(dto.getApprovalId());
+                if (pendingOpt.isEmpty()) {
+                    throw new BusinessException(ResultCode.BAD_REQUEST, "待审批工具调用不存在: " + dto.getApprovalId());
+                }
+            } else {
+                pendingOpt = pendingToolApprovalService.findActivePending(executionId);
+            }
+            if (pendingOpt.isEmpty()) {
+                return null;
+            }
+            PendingToolApproval pending = pendingOpt.get();
+            dto.setApprovalId(pending.getId());
+            PendingToolApproval decided = pendingToolApprovalService.decide(
+                    pending.getId(), dto, SecurityUtil.getCurrentUserId());
+            dto.setToolCode(resolveApprovalToolCode(dto, decided));
+            dto.setToolCommand(resolveApprovalToolCommand(dto, decided));
+            return decided;
+        } catch (IllegalArgumentException exception) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, exception.getMessage());
+        }
+    }
+
+    private String resolveApprovalToolCode(AgentExecutionInputDTO dto, PendingToolApproval approval) {
+        if (approval != null && StringUtils.hasText(approval.getToolCode())) {
+            return approval.getToolCode();
+        }
+        return dto.getToolCode();
+    }
+
+    private String resolveApprovalToolCommand(AgentExecutionInputDTO dto, PendingToolApproval approval) {
+        if (approval != null && StringUtils.hasText(approval.getToolArgumentsText())) {
+            return approval.getToolArgumentsText();
+        }
+        return dto.getToolCommand();
+    }
+
+    private Map<String, Object> buildApprovalEventPayload(PendingToolApproval approval,
+                                                          String toolCode,
+                                                          String decision) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("approvalId", approval != null ? approval.getId() : null);
+        payload.put("toolCode", toolCode);
+        payload.put("decision", decision);
+        return payload;
     }
 
     @Override

@@ -4,9 +4,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
+import com.schemaplexai.common.enums.ToolIoTypeEnum;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
+import com.schemaplexai.model.entity.PendingToolApproval;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
+import com.schemaplexai.service.agent.execution.approval.CreatePendingToolApprovalCommand;
+import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
+import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicyResolver;
+import com.schemaplexai.service.agent.execution.policy.ExecutionModePromptContributor;
+import com.schemaplexai.service.agent.execution.policy.ToolExecutionGate;
+import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
+import com.schemaplexai.service.agent.tool.ToolApprovalAmendmentService;
 import com.schemaplexai.service.agent.hook.AgentHookExecutor;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jResolution;
@@ -20,15 +29,19 @@ import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.service.tool.ToolExecutionResult;
+import dev.langchain4j.service.tool.ToolServiceContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.ObjectProvider;
+import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -824,6 +837,121 @@ class AgentExecutionEngineTest {
         assertThat(engine.shouldWriteUserMemory(context)).isFalse();
     }
 
+    @Test
+    void shouldPersistPendingApprovalBeforePausingToolExecution() {
+        PendingToolApprovalService pendingService = mock(PendingToolApprovalService.class);
+        PendingToolApproval saved = new PendingToolApproval();
+        saved.setId("approval-1");
+        when(pendingService.createPending(any(CreatePendingToolApprovalCommand.class))).thenReturn(saved);
+        AgentExecutionEngine engine = buildMinimalEngine(null, null, null, pendingService);
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("exec-1")
+                .executionMode("plan")
+                .build();
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call-1")
+                .name("sys.write")
+                .arguments("{\"path\":\"README.md\"}")
+                .build();
+
+        PendingToolApproval approval = engine.createPendingApprovalForTool(
+                context, request, ToolIoTypeEnum.WRITE, 3, "conv-1");
+
+        ArgumentCaptor<CreatePendingToolApprovalCommand> captor =
+                ArgumentCaptor.forClass(CreatePendingToolApprovalCommand.class);
+        verify(pendingService).createPending(captor.capture());
+        CreatePendingToolApprovalCommand command = captor.getValue();
+        assertThat(approval.getId()).isEqualTo("approval-1");
+        assertThat(command.getTenantId()).isEqualTo("tenant-1");
+        assertThat(command.getAgentId()).isEqualTo("agent-1");
+        assertThat(command.getExecutionId()).isEqualTo("exec-1");
+        assertThat(command.getConversationId()).isEqualTo("conv-1");
+        assertThat(command.getRoundNum()).isEqualTo(3);
+        assertThat(command.getExecutionMode()).isEqualTo("plan");
+        assertThat(command.getIoType()).isEqualTo(ToolIoTypeEnum.WRITE);
+        assertThat(command.getToolRequest()).isSameAs(request);
+    }
+
+    @Test
+    void shouldExecuteApprovedPendingToolCallBeforeContinuingLoop() {
+        PendingToolApproval approval = pendingApproval(PendingToolApprovalService.STATUS_APPROVED);
+        ToolExecutionRequest rebuilt = ToolExecutionRequest.builder()
+                .id("call-1")
+                .name("sys.write")
+                .arguments("{\"path\":\"README.md\"}")
+                .build();
+        PendingToolApprovalService pendingService = mock(PendingToolApprovalService.class);
+        when(pendingService.isApproved(approval)).thenReturn(true);
+        when(pendingService.rebuildToolRequest(approval)).thenReturn(rebuilt);
+        AgentExecutionEngine engine = buildMinimalEngine(mock(AgentLogService.class),
+                mock(ExecutionEventStreamService.class), null, pendingService);
+        ChatMemory chatMemory = mock(ChatMemory.class);
+        dev.langchain4j.service.tool.ToolExecutor executor = mock(dev.langchain4j.service.tool.ToolExecutor.class);
+        when(executor.executeWithContext(any(), any())).thenReturn(ToolExecutionResult.builder()
+                .isError(false)
+                .resultText("{\"ok\":true}")
+                .build());
+
+        AgentExecutionResult result = engine.applyPendingApprovalDecision(
+                AgentExecutionContext.builder().executionId("exec-1").agentId("agent-1").tenantId("tenant-1").build(),
+                roundToolContext("sys.write", executor),
+                chatMemory,
+                new AgentExecutionInputDTO(),
+                approval,
+                AgentEngineParams.builder().maxToolResultMessageLength(12000).toolRequestSummaryLimit(800).build(),
+                100L,
+                "conv-1",
+                new AgentLoopState());
+
+        assertThat(result).isNull();
+        verify(executor).executeWithContext(eq(rebuilt), any());
+        verify(chatMemory).add(argThat((ChatMessage message) ->
+                message instanceof ToolExecutionResultMessage resultMessage
+                        && resultMessage.id().equals("call-1")
+                        && resultMessage.toolName().equals("sys.write")
+                        && resultMessage.text().contains("{\"ok\":true}")));
+    }
+
+    @Test
+    void shouldWriteDeniedPendingToolObservationWithoutExecutingTool() {
+        PendingToolApproval approval = pendingApproval(PendingToolApprovalService.STATUS_DENIED);
+        approval.setDecisionReason("不希望修改文件");
+        ToolExecutionRequest rebuilt = ToolExecutionRequest.builder()
+                .id("call-1")
+                .name("sys.write")
+                .arguments("{\"path\":\"README.md\"}")
+                .build();
+        PendingToolApprovalService pendingService = mock(PendingToolApprovalService.class);
+        when(pendingService.isApproved(approval)).thenReturn(false);
+        when(pendingService.isDenied(approval)).thenReturn(true);
+        when(pendingService.rebuildToolRequest(approval)).thenReturn(rebuilt);
+        AgentExecutionEngine engine = buildMinimalEngine(mock(AgentLogService.class),
+                mock(ExecutionEventStreamService.class), null, pendingService);
+        ChatMemory chatMemory = mock(ChatMemory.class);
+        dev.langchain4j.service.tool.ToolExecutor executor = mock(dev.langchain4j.service.tool.ToolExecutor.class);
+
+        AgentExecutionResult result = engine.applyPendingApprovalDecision(
+                AgentExecutionContext.builder().executionId("exec-1").agentId("agent-1").tenantId("tenant-1").build(),
+                roundToolContext("sys.write", executor),
+                chatMemory,
+                new AgentExecutionInputDTO(),
+                approval,
+                AgentEngineParams.builder().maxToolResultMessageLength(12000).toolRequestSummaryLimit(800).build(),
+                100L,
+                "conv-1",
+                new AgentLoopState());
+
+        assertThat(result).isNull();
+        verify(executor, never()).executeWithContext(any(), any());
+        verify(chatMemory).add(argThat((ChatMessage message) ->
+                message instanceof ToolExecutionResultMessage resultMessage
+                        && resultMessage.id().equals("call-1")
+                        && resultMessage.text().contains("用户拒绝执行该工具")
+                        && resultMessage.text().contains("不希望修改文件")));
+    }
+
     // =========================================================================
     //  辅助方法
     // =========================================================================
@@ -831,6 +959,14 @@ class AgentExecutionEngineTest {
     private AgentExecutionEngine buildMinimalEngine(AgentLogService agentLogService,
                                                      ExecutionEventStreamService eventStreamService,
                                                      QualityOrchestrator qualityOrchestrator) {
+        return buildMinimalEngine(agentLogService, eventStreamService, qualityOrchestrator,
+                mock(PendingToolApprovalService.class));
+    }
+
+    private AgentExecutionEngine buildMinimalEngine(AgentLogService agentLogService,
+                                                     ExecutionEventStreamService eventStreamService,
+                                                     QualityOrchestrator qualityOrchestrator,
+                                                     PendingToolApprovalService pendingToolApprovalService) {
         AgentLoopQualityChecker checker = new AgentLoopQualityChecker(qualityOrchestrator);
         AgentLoopShadowReviewService shadowReviewService = new AgentLoopShadowReviewService(checker, Runnable::run);
         AgentLoopCompletionHandler completionHandler = new AgentLoopCompletionHandler(null, checker, qualityOrchestrator);
@@ -842,7 +978,41 @@ class AgentExecutionEngineTest {
                 modelInvoker, toolHandler, completionHandler, checker, shadowReviewService, null,
                 null, mock(AgentTraceService.class), new AgentHookExecutor(List.of(), null),
                 mock(AgentContextBudgetService.class), mock(MultimodalMessageBuilder.class),
-                mock(ObjectProvider.class), mock(ExecutionModeInterceptor.class));
+                mock(ObjectProvider.class), new ToolExecutionGate(mock(ToolApprovalAmendmentService.class)),
+                new ExecutionModePolicyResolver(), new ExecutionModePromptContributor(), pendingToolApprovalService);
+    }
+
+    private AgentToolSessionFactory.RoundToolContext roundToolContext(
+            String toolName,
+            dev.langchain4j.service.tool.ToolExecutor executor) {
+        ToolSpecification specification = ToolSpecification.builder()
+                .name(toolName)
+                .description("测试工具")
+                .build();
+        ToolServiceContext toolServiceContext = ToolServiceContext.builder()
+                .availableTools(List.of(specification))
+                .toolSpecifications(List.of(specification))
+                .effectiveTools(List.of(specification))
+                .toolExecutors(Map.of(toolName, executor))
+                .build();
+        return new AgentToolSessionFactory.RoundToolContext(
+                toolServiceContext, null, Map.of(toolName, ToolIoTypeEnum.WRITE));
+    }
+
+    private PendingToolApproval pendingApproval(String status) {
+        PendingToolApproval approval = new PendingToolApproval();
+        approval.setId("approval-1");
+        approval.setTenantId("tenant-1");
+        approval.setAgentId("agent-1");
+        approval.setExecutionId("exec-1");
+        approval.setConversationId("conv-1");
+        approval.setRoundNum(2);
+        approval.setToolCallId("call-1");
+        approval.setToolCode("sys.write");
+        approval.setToolName("sys.write");
+        approval.setToolArgumentsText("{\"path\":\"README.md\"}");
+        approval.setDecisionStatus(status);
+        return approval;
     }
 
     private AgentModelInvoker buildModelInvoker() {
