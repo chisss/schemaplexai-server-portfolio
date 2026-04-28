@@ -7,15 +7,25 @@ import com.schemaplexai.common.constant.SystemAgentPromptConstant;
 import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentLoopLogTypeEnum;
+import com.schemaplexai.common.enums.ToolExecutionDecisionEnum;
 import com.schemaplexai.common.enums.ToolIoTypeEnum;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.model.entity.PendingToolApproval;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.CompletionRevisionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
 import com.schemaplexai.service.agent.execution.AgentLoopToolHandler.ToolExecutionOutcome;
 import com.schemaplexai.service.agent.execution.AgentModelInvoker.ModelCallResult;
+import com.schemaplexai.service.agent.execution.approval.CreatePendingToolApprovalCommand;
+import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
+import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
+import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicyResolver;
+import com.schemaplexai.service.agent.execution.policy.ExecutionModePromptContributor;
+import com.schemaplexai.service.agent.execution.policy.ToolExecutionGate;
+import com.schemaplexai.service.agent.execution.policy.ToolExecutionGateDecision;
+import com.schemaplexai.service.agent.execution.policy.ToolExecutionGateRequest;
 import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
@@ -53,9 +63,11 @@ import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -118,7 +130,10 @@ public class AgentExecutionEngine {
     private final AgentContextBudgetService    agentContextBudgetService;
     private final MultimodalMessageBuilder     multimodalMessageBuilder;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
-    private final ExecutionModeInterceptor     executionModeInterceptor;
+    private final ToolExecutionGate            toolExecutionGate;
+    private final ExecutionModePolicyResolver  executionModePolicyResolver;
+    private final ExecutionModePromptContributor executionModePromptContributor;
+    private final PendingToolApprovalService   pendingToolApprovalService;
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
     private final AgentChatMemoryCompactor     chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport);
 
@@ -244,7 +259,7 @@ public class AgentExecutionEngine {
         // 添加用户消息（首次执行或恢复执行）
         if (resumeInput == null) {
             chatMemory.add(buildUserMessage(ctx, first.config().isMultimodal()));
-        } else {
+        } else if (!isApprovalResume(resumeInput)) {
             addResumeMessage(executionId, agentId, tenantId, chatMemory, resumeInput, startMs);
         }
         log.info("ChatMemory 初始化完成: conversationId={}, 历史消息数={}", conversationId, chatMemory.messages().size());
@@ -253,7 +268,7 @@ public class AgentExecutionEngine {
                 "chainSize=" + modelChain.size() + ", provider=" + first.config().getProvider()
                         + ", modelId=" + first.config().getModelId(), null, elapsed(startMs));
 
-        return runAgenticLoop(ctx, systemPrompt, chatMemory, modelChain, params, startMs, conversationId);
+        return runAgenticLoop(ctx, systemPrompt, chatMemory, modelChain, params, startMs, conversationId, resumeInput);
     }
 
     // =========================================================================
@@ -269,7 +284,8 @@ public class AgentExecutionEngine {
                                                  List<LangChain4jResolution> modelChain,
                                                  AgentEngineParams params,
                                                  long startMs,
-                                                 String conversationId) {
+                                                 String conversationId,
+                                                 AgentExecutionInputDTO resumeInput) {
         String executionId = ctx.getExecutionId();
         String agentId     = ctx.getAgentId();
         String tenantId    = ctx.getTenantId();
@@ -278,6 +294,11 @@ public class AgentExecutionEngine {
 
         try (AgentToolSessionFactory.AgentToolSession toolSession = agentToolSessionFactory.openSession(ctx, conversationId)) {
             String effectiveSystemPrompt = toolSession.augmentSystemPrompt(systemPrompt);
+            AgentExecutionResult approvalResumeResult = consumePendingApprovalIfPresent(
+                    ctx, toolSession, chatMemory, resumeInput, params, state, startMs, conversationId);
+            if (approvalResumeResult != null) {
+                return approvalResumeResult;
+            }
 
             for (int round = 1; round <= maxLoopRounds; round++) {
                 state.setLastRound(round);
@@ -563,29 +584,49 @@ public class AgentExecutionEngine {
             }
             // 执行模式拦截
             ToolIoTypeEnum ioType = roundCtx.ioTypeIndex().getOrDefault(req.name(), ToolIoTypeEnum.READ_WRITE);
-            ExecutionModeInterceptor.Decision decision = executionModeInterceptor.evaluate(
-                    ctx.getExecutionMode(), tenantId, agentId, req.name(),
-                    req.arguments(), ioType, ctx.isSystemAgent());
-            if (decision == ExecutionModeInterceptor.Decision.SUGGEST_ONLY) {
+            ToolExecutionGateDecision decision = toolExecutionGate.evaluate(ToolExecutionGateRequest.builder()
+                    .tenantId(tenantId)
+                    .agentId(agentId)
+                    .executionId(executionId)
+                    .conversationId(ctx.getConversationId())
+                    .round(round)
+                    .policy(resolveExecutionModePolicy(ctx))
+                    .toolRequest(req)
+                    .ioType(ioType)
+                    .systemAgent(ctx.isSystemAgent())
+                    .build());
+            if (decision.getDecision() == ToolExecutionDecisionEnum.SUGGEST_ONLY) {
                 // 建议模式：仅发送建议事件，不实际执行
+                Map<String, Object> previewPayload = buildSuggestPreviewPayload(req);
                 executionEventStreamService.publishWithPayload(executionId,
                         AgentExecutionEventTypeEnum.SUGGESTION.getCode(), round,
                         "建议执行: " + req.name(),
-                        Map.of("toolCode", req.name(), "args", req.arguments() != null ? req.arguments() : "{}"),
+                        previewPayload,
                         startMs);
                 suggestedRequests.add(req);
                 continue;
             }
-            if (decision == ExecutionModeInterceptor.Decision.REQUIRE_APPROVAL) {
+            if (decision.getDecision() == ToolExecutionDecisionEnum.PAUSE_APPROVAL) {
+                PendingToolApproval approval = createPendingApprovalForTool(ctx, req, ioType, round, conversationId);
                 // 需要审批：发送审批事件，暂停执行
                 executionEventStreamService.publishWithPayload(executionId,
                         AgentExecutionEventTypeEnum.APPROVAL_REQUIRED.getCode(), round,
                         "工具 " + req.name() + " 需要审批",
-                        Map.of("toolCode", req.name(), "args", req.arguments() != null ? req.arguments() : "{}",
-                               "ioType", ioType.getCode(), "executionMode", ctx.getExecutionMode()),
+                        buildApprovalRequiredPayload(approval, req, ioType, ctx.getExecutionMode()),
                         startMs);
                 pausedForApproval = req;
                 break;
+            }
+            if (decision.getDecision() == ToolExecutionDecisionEnum.DENY) {
+                ToolResult rejectedResult = toolHandler.buildRejectedResult(req);
+                toolResults.add(rejectedResult);
+                chatMemory.add(toolHandler.buildResultMessage(req, rejectedResult, Map.of(), true, null, compressionOptions));
+                executionEventStreamService.publishWithPayload(executionId,
+                        AgentExecutionEventTypeEnum.TOOL_RESULT.getCode(), round,
+                        req.name() + " 被执行策略拒绝",
+                        Map.of("toolCode", req.name(), "reason", decision.getReason()),
+                        startMs);
+                continue;
             }
             // 直接执行
             executionEventStreamService.publishWithPayload(executionId,
@@ -601,7 +642,7 @@ public class AgentExecutionEngine {
                 String suggestMsg = "[建议模式] 工具 " + suggested.name() + " 未执行，仅作为建议展示。参数: " + suggested.arguments();
                 ToolResult suggestResult = ToolResult.builder()
                         .toolCode(suggested.name()).success(true)
-                        .result(objectMapper.valueToTree(Map.of("suggestion", suggestMsg)))
+                        .result(objectMapper.valueToTree(buildSuggestPreviewPayload(suggested, suggestMsg)))
                         .build();
                 toolResults.add(suggestResult);
                 chatMemory.add(toolHandler.buildResultMessage(suggested, suggestResult, Map.of(), true, null, compressionOptions));
@@ -693,6 +734,201 @@ public class AgentExecutionEngine {
 
         return resolveSecurityInterrupt(ctx, executionId, agentId, tenantId, round,
                 toolResults, state, startMs, conversationId);
+    }
+
+    private AgentExecutionResult consumePendingApprovalIfPresent(AgentExecutionContext ctx,
+                                                                 AgentToolSessionFactory.AgentToolSession toolSession,
+                                                                 ChatMemory chatMemory,
+                                                                 AgentExecutionInputDTO input,
+                                                                 AgentEngineParams params,
+                                                                 AgentLoopState state,
+                                                                 long startMs,
+                                                                 String conversationId) {
+        if (!isApprovalResume(input)) {
+            return null;
+        }
+        String executionId = ctx.getExecutionId();
+        String agentId = ctx.getAgentId();
+        String tenantId = ctx.getTenantId();
+        if (!StringUtils.hasText(input.getApprovalId())) {
+            log.warn("审批恢复缺少 approvalId，降级为普通人工输入: executionId={}", executionId);
+            addResumeMessage(executionId, agentId, tenantId, chatMemory, input, startMs);
+            return null;
+        }
+        Optional<PendingToolApproval> approvalOpt = pendingToolApprovalService.findById(input.getApprovalId());
+        if (approvalOpt.isEmpty()) {
+            log.warn("审批恢复未找到待审批记录，降级为普通人工输入: executionId={}, approvalId={}",
+                    executionId, input.getApprovalId());
+            addResumeMessage(executionId, agentId, tenantId, chatMemory, input, startMs);
+            return null;
+        }
+        PendingToolApproval approval = approvalOpt.get();
+        int round = approval.getRoundNum() != null ? approval.getRoundNum() : 0;
+        AgentToolSessionFactory.RoundToolContext roundCtx = toolSession.buildRoundContext(chatMemory, round);
+        AgentExecutionResult interrupted = applyPendingApprovalDecision(
+                ctx, roundCtx, chatMemory, input, approval, params, startMs, conversationId, state);
+        if (interrupted == null && StringUtils.hasText(input.getMessage())) {
+            addResumeMessage(executionId, agentId, tenantId, chatMemory, input, startMs);
+        }
+        return interrupted;
+    }
+
+    AgentExecutionResult applyPendingApprovalDecision(AgentExecutionContext ctx,
+                                                      AgentToolSessionFactory.RoundToolContext roundCtx,
+                                                      ChatMemory chatMemory,
+                                                      AgentExecutionInputDTO input,
+                                                      PendingToolApproval approval,
+                                                      AgentEngineParams params,
+                                                      long startMs,
+                                                      String conversationId,
+                                                      AgentLoopState state) {
+        if (approval == null) {
+            return null;
+        }
+        String executionId = ctx.getExecutionId();
+        String agentId = ctx.getAgentId();
+        String tenantId = ctx.getTenantId();
+        int round = approval.getRoundNum() != null ? approval.getRoundNum() : 0;
+        ToolExecutionRequest request = pendingToolApprovalService.rebuildToolRequest(approval);
+        AgentLoopToolHandler.ToolResultCompressionOptions compressionOptions =
+                new AgentLoopToolHandler.ToolResultCompressionOptions(
+                        params.getMaxToolResultMessageLength(),
+                        params.getToolRequestSummaryLimit()
+                );
+
+        if (pendingToolApprovalService.isApproved(approval)) {
+            ToolExecutionOutcome outcome = toolHandler.executeOne(roundCtx, request, compressionOptions);
+            chatMemory.add(outcome.resultMessage());
+            publishApprovalResumeEvent(executionId, round, approval, outcome.toolResult().isSuccess(), true, startMs);
+            agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
+                    AgentLoopLogTypeEnum.TOOL_RESULT.getCode(), round, request.name(),
+                    "审批通过后执行待审批工具，approvalId=" + approval.getId(), null, elapsed(startMs));
+            agentTraceService.recordToolSpan(
+                    executionId,
+                    tenantId,
+                    agentId,
+                    request.name(),
+                    outcome.startedAt(),
+                    outcome.durationMs(),
+                    outcome.toolResult().isSuccess() ? "SUCCESS" : "FAILED"
+            );
+            return resolveSecurityInterrupt(ctx, executionId, agentId, tenantId, round,
+                    List.of(outcome.toolResult()), state, startMs, conversationId);
+        }
+
+        if (pendingToolApprovalService.isDenied(approval)) {
+            ToolResult deniedResult = buildDeniedByUserResult(request, approval);
+            chatMemory.add(toolHandler.buildResultMessage(
+                    request, deniedResult, Map.of("approvalId", approval.getId()), true,
+                    null, compressionOptions));
+            publishApprovalResumeEvent(executionId, round, approval, false, false, startMs);
+            agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
+                    AgentLoopLogTypeEnum.TOOL_RESULT.getCode(), round, request.name(),
+                    "用户拒绝待审批工具，approvalId=" + approval.getId(), null, elapsed(startMs));
+            return null;
+        }
+
+        log.warn("待审批记录状态不可恢复: executionId={}, approvalId={}, status={}",
+                executionId, approval.getId(), approval.getDecisionStatus());
+        return null;
+    }
+
+    PendingToolApproval createPendingApprovalForTool(AgentExecutionContext ctx,
+                                                     ToolExecutionRequest request,
+                                                     ToolIoTypeEnum ioType,
+                                                     int round,
+                                                     String conversationId) {
+        PendingToolApproval approval = pendingToolApprovalService.createPending(CreatePendingToolApprovalCommand.builder()
+                .tenantId(ctx.getTenantId())
+                .agentId(ctx.getAgentId())
+                .executionId(ctx.getExecutionId())
+                .conversationId(conversationId)
+                .roundNum(round)
+                .executionMode(StringUtils.hasText(ctx.getExecutionMode()) ? ctx.getExecutionMode() : "auto")
+                .ioType(ioType)
+                .riskLevel("MEDIUM")
+                .toolRequest(request)
+                .build());
+        log.info("已创建待审批工具调用: executionId={}, approvalId={}, toolCode={}, ioType={}",
+                ctx.getExecutionId(), approval.getId(), request.name(), ioType != null ? ioType.getCode() : null);
+        return approval;
+    }
+
+    private ToolResult buildDeniedByUserResult(ToolExecutionRequest request, PendingToolApproval approval) {
+        String reason = StringUtils.hasText(approval.getDecisionReason()) ? approval.getDecisionReason() : "用户未提供原因";
+        String message = "用户拒绝执行该工具，请调整方案继续。原因: " + reason;
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", false);
+        payload.put("executed", false);
+        payload.put("controlAction", "DENIED_BY_USER");
+        payload.put("message", message);
+        payload.put("reason", reason);
+        payload.put("approvalId", approval.getId());
+        return ToolResult.builder()
+                .callId(request.id())
+                .toolCode(request.name())
+                .success(false)
+                .result(objectMapper.valueToTree(payload))
+                .errorMessage(message)
+                .controlAction("DENIED_BY_USER")
+                .build();
+    }
+
+    private void publishApprovalResumeEvent(String executionId,
+                                            int round,
+                                            PendingToolApproval approval,
+                                            boolean success,
+                                            boolean executed,
+                                            long startMs) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("approvalId", approval.getId());
+        payload.put("toolCode", approval.getToolCode());
+        payload.put("decision", approval.getDecision());
+        payload.put("decisionStatus", approval.getDecisionStatus());
+        payload.put("executed", executed);
+        payload.put("success", success);
+        executionEventStreamService.publishWithPayload(executionId,
+                AgentExecutionEventTypeEnum.TOOL_APPROVAL_RESUMED.getCode(), round,
+                executed ? "审批后已执行工具: " + approval.getToolCode() : "审批后跳过工具: " + approval.getToolCode(),
+                payload, startMs);
+    }
+
+    private Map<String, Object> buildApprovalRequiredPayload(PendingToolApproval approval,
+                                                             ToolExecutionRequest request,
+                                                             ToolIoTypeEnum ioType,
+                                                             String executionMode) {
+        String arguments = request.arguments() != null ? request.arguments() : "{}";
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("approvalId", approval != null ? approval.getId() : null);
+        payload.put("toolCode", request.name());
+        payload.put("args", arguments);
+        payload.put("command", arguments);
+        payload.put("ioType", ioType != null ? ioType.getCode() : ToolIoTypeEnum.READ_WRITE.getCode());
+        payload.put("executionMode", StringUtils.hasText(executionMode) ? executionMode : "auto");
+        payload.put("riskLevel", approval != null && StringUtils.hasText(approval.getRiskLevel())
+                ? approval.getRiskLevel() : "MEDIUM");
+        payload.put("allowedDecisions", List.of("approve", "approve_always", "deny", "edit"));
+        return payload;
+    }
+
+    private Map<String, Object> buildSuggestPreviewPayload(ToolExecutionRequest request) {
+        return buildSuggestPreviewPayload(request, "建议模式下未执行真实工具，仅展示候选操作。");
+    }
+
+    private Map<String, Object> buildSuggestPreviewPayload(ToolExecutionRequest request, String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("executed", false);
+        payload.put("mode", "suggest");
+        payload.put("toolCode", request.name());
+        payload.put("args", request.arguments() != null ? request.arguments() : "{}");
+        payload.put("arguments", request.arguments() != null ? request.arguments() : "{}");
+        payload.put("message", message);
+        return payload;
+    }
+
+    private boolean isApprovalResume(AgentExecutionInputDTO input) {
+        return input != null
+                && (StringUtils.hasText(input.getApprovalId()) || StringUtils.hasText(input.getApprovalDecision()));
     }
 
     /**
@@ -1166,7 +1402,6 @@ public class AgentExecutionEngine {
         }
         if (ctx.isSystemAgent()) {
             additionalContexts.add(SystemAgentPromptConstant.IDENTITY);
-            additionalContexts.add(SystemAgentPromptConstant.getExecutionModePrompt(ctx.getExecutionMode()));
         }
         ctx.setAdditionalSystemContexts(additionalContexts);
     }
@@ -1180,30 +1415,18 @@ public class AgentExecutionEngine {
         if (!ctx.isSystemAgent()) {
             return result;
         }
-        String mode = ctx.getExecutionMode();
-        if (!StringUtils.hasText(mode)) {
-            mode = "auto";
-        }
-        String instruction = switch (mode) {
-            case "plan" -> """
-                    ## 执行模式：计划模式 (Plan)
-                    - 只读操作（查询、搜索、分析）可直接执行
-                    - 写操作（创建、修改、删除文件或数据）必须先向用户展示计划，等待审批后再执行
-                    - 每个写操作前发送 APPROVAL_REQUIRED 事件，包含工具名称和操作描述
-                    - 用户批准后执行，拒绝则跳过并说明""";
-            case "suggest" -> """
-                    ## 执行模式：建议模式 (Suggest)
-                    - 分析用户需求并提出详细建议方案
-                    - 不实际执行任何工具调用，仅展示将要执行的操作和预期结果
-                    - 以结构化方式展示建议步骤，便于用户审阅""";
-            default -> """
-                    ## 执行模式：自动模式 (Auto)
-                    - 根据用户指令自主规划和执行任务
-                    - 充分利用可用工具完成目标
-                    - 写操作根据安全策略可能需要用户审批，审批通过后继续执行""";
-        };
-        result.addFirst(instruction);
+        ExecutionModePolicy policy = resolveExecutionModePolicy(ctx);
+        result.addFirst(executionModePromptContributor.buildPrompt(policy));
         return result;
+    }
+
+    private ExecutionModePolicy resolveExecutionModePolicy(AgentExecutionContext ctx) {
+        ExecutionModePolicy policy = ctx.getExecutionModePolicy();
+        if (policy == null) {
+            policy = executionModePolicyResolver.resolve(ctx, null);
+            ctx.setExecutionModePolicy(policy);
+        }
+        return policy;
     }
 
     /** 构建额外上下文字符串（inputPrompt + inputContext，不含附件） */

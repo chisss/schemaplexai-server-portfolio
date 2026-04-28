@@ -32,6 +32,7 @@ class SoloAgentRuntimeStrategyTest {
         Agent agent = new Agent();
         agent.setAiModelType("chat");
         agent.setAiModelGroupId("group-1");
+        agent.setIsSystemAgent(true);
 
         AgentExecution execution = new AgentExecution();
         execution.setId("exec-1");
@@ -42,6 +43,7 @@ class SoloAgentRuntimeStrategyTest {
         execution.setInputContext(Map.of("spec", "solo-resume"));
         execution.setConversationId("conv-1");
         execution.setRuntimeEngine("solo_langchain4j");
+        execution.setExecutionMode("plan");
 
         AgentExecutionInputDTO input = new AgentExecutionInputDTO();
         input.setMessage("管理员已确认继续");
@@ -65,6 +67,8 @@ class SoloAgentRuntimeStrategyTest {
         assertThat(context.getTenantId()).isEqualTo("tenant-1");
         assertThat(context.getConversationId()).isEqualTo("conv-1");
         assertThat(context.getRuntimeEngine()).isEqualTo("solo_langchain4j");
+        assertThat(context.getExecutionMode()).isEqualTo("plan");
+        assertThat(context.isSystemAgent()).isTrue();
         assertThat(context.getSandboxPolicy()).isSameAs(sandboxPolicy);
     }
 }

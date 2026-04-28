@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
 import lombok.Builder;
 import lombok.Data;
 
@@ -115,4 +116,7 @@ public class AgentExecutionContext {
     /** 是否系统内置Agent */
     @Builder.Default
     private boolean systemAgent = false;
+
+    /** 执行模式运行时策略 */
+    private ExecutionModePolicy executionModePolicy;
 }

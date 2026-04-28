@@ -14,7 +14,7 @@ public class AgentExecutionInputDTO {
     /** 用户输入文本 */
     private String message;
 
-    /** 审批决策: approve / deny / approve_always（审批场景使用） */
+    /** 审批决策: approve / deny / approve_always / edit（审批场景使用） */
     private String approvalDecision;
 
     /** 审批关联的工具编码（审批场景使用） */
@@ -22,6 +22,15 @@ public class AgentExecutionInputDTO {
 
     /** 审批关联的工具命令/参数摘要（approve_always 时用于匹配模式） */
     private String toolCommand;
+
+    /** 待审批工具调用 ID */
+    private String approvalId;
+
+    /** 编辑后的工具参数（approvalDecision=edit 时使用） */
+    private Map<String, Object> editedArguments;
+
+    /** 审批或拒绝原因 */
+    private String decisionReason;
 
     /** 扩展参数（可选） */
     private Map<String, Object> options;
