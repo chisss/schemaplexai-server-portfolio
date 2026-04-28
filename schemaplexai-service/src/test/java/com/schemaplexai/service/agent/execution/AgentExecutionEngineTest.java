@@ -805,6 +805,25 @@ class AgentExecutionEngineTest {
         assertThat(result).contains("不要重复已完成部分");
     }
 
+    @Test
+    void shouldRespectUserMemoryWriteSwitch() {
+        AgentExecutionEngine engine = buildMinimalEngine(null, null, null);
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .userId("user-1")
+                .memoryWriteEnabled(false)
+                .build();
+
+        assertThat(engine.shouldWriteUserMemory(context)).isFalse();
+
+        context.setMemoryWriteEnabled(null);
+        assertThat(engine.shouldWriteUserMemory(context)).isTrue();
+
+        context.setMemoryWriteEnabled(true);
+        context.setTemporaryChat(true);
+        assertThat(engine.shouldWriteUserMemory(context)).isFalse();
+    }
+
     // =========================================================================
     //  辅助方法
     // =========================================================================

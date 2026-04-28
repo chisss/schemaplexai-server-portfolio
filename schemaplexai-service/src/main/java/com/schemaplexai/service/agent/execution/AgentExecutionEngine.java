@@ -31,6 +31,7 @@ import com.schemaplexai.service.ai.LangChain4jResolution;
 import com.schemaplexai.service.memory.CompositeChatMemoryStore;
 import com.schemaplexai.service.monitor.AgentTraceService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
+import com.schemaplexai.service.user.impl.UserMemoryExtractionService;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -137,6 +138,10 @@ public class AgentExecutionEngine {
     @Autowired(required = false)
     private AgentInstructionsAutoService agentInstructionsAutoService;
 
+    @Lazy
+    @Autowired(required = false)
+    private UserMemoryExtractionService userMemoryExtractionService;
+
     // =========================================================================
     //  公开入口
     // =========================================================================
@@ -194,6 +199,8 @@ public class AgentExecutionEngine {
         String executionId = ctx.getExecutionId();
         String agentId     = ctx.getAgentId();
         String tenantId    = ctx.getTenantId();
+        String userId      = resolveUserId(ctx, executionId);
+        ctx.setUserId(userId);
 
         // 加载执行参数（数据库配置优先，ctx 中的值次之，最后回退默认值）
         AgentEngineParams params = engineConfigLoader.load(agentId, ctx);
@@ -222,7 +229,8 @@ public class AgentExecutionEngine {
         String extraContext  = buildExtraContext(ctx);
         List<String> systemContexts = mergeExecutionModeInstruction(ctx);
         ContextInjector.PromptBuildResult promptBuildResult = contextInjector.buildSystemPromptDetail(
-                agentId, extraContext, tenantId, ctx.getTeamAgentId(), systemContexts, first.config());
+                agentId, extraContext, tenantId, ctx.getTeamAgentId(), systemContexts, first.config(),
+                userId, ctx.getProjectId(), ctx.isTemporaryChat());
         String systemPrompt  = promptBuildResult.prompt();
         logSystemPromptBuilt(executionId, agentId, tenantId, promptBuildResult, ctx.getModel(), startMs);
         persistContextBudgetSnapshot(ctx, promptBuildResult, first.config());
@@ -916,10 +924,18 @@ public class AgentExecutionEngine {
                 StringUtils.hasText(sanitized) ? Map.of("content", sanitized) : null, startMs);
 
         // 异步触发记忆提取（执行完成后从对话历史中提取记忆）
-        if (agentMemoryExtractionService != null && StringUtils.hasText(conversationId)) {
+        boolean shouldExtractAgentMemory = agentMemoryExtractionService != null;
+        boolean shouldExtractUserMemory = userMemoryExtractionService != null && shouldWriteUserMemory(ctx);
+        if ((shouldExtractAgentMemory || shouldExtractUserMemory) && StringUtils.hasText(conversationId)) {
             List<ChatMessage> history = compositeChatMemoryStore.getMessages(conversationId);
             if (history != null && !history.isEmpty()) {
-                agentMemoryExtractionService.extractMemoriesAsync(tenantId, agentId, executionId, history);
+                if (shouldExtractAgentMemory) {
+                    agentMemoryExtractionService.extractMemoriesAsync(tenantId, agentId, executionId, history);
+                }
+                if (shouldExtractUserMemory) {
+                    userMemoryExtractionService.extractMemoriesAsync(
+                            tenantId, ctx.getUserId(), agentId, executionId, conversationId, history, ctx.isTemporaryChat());
+                }
             }
         }
 
@@ -958,6 +974,13 @@ public class AgentExecutionEngine {
                 .tokenOutput(state.getTotalTokenOutput())
                 .rounds(round)
                 .build();
+    }
+
+    boolean shouldWriteUserMemory(AgentExecutionContext ctx) {
+        return ctx != null
+                && !ctx.isTemporaryChat()
+                && StringUtils.hasText(ctx.getUserId())
+                && !Boolean.FALSE.equals(ctx.getMemoryWriteEnabled());
     }
 
     /** 构建用户停止结果并更新执行状态 */
@@ -1082,6 +1105,18 @@ public class AgentExecutionEngine {
     /** 解析或生成 conversationId */
     private String resolveConversationId(AgentExecutionContext ctx) {
         return StringUtils.hasText(ctx.getConversationId()) ? ctx.getConversationId() : UUID.randomUUID().toString();
+    }
+
+    /** 解析当前执行所属用户，异步执行时不能依赖 ThreadLocal。 */
+    private String resolveUserId(AgentExecutionContext ctx, String executionId) {
+        if (StringUtils.hasText(ctx.getUserId())) {
+            return ctx.getUserId();
+        }
+        if (!StringUtils.hasText(executionId)) {
+            return null;
+        }
+        AgentExecution execution = agentExecutionMapper.selectById(executionId);
+        return execution != null ? execution.getCreatedBy() : null;
     }
 
     /** 将 conversationId 持久化到执行记录 */

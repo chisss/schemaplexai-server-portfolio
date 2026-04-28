@@ -40,8 +40,6 @@ import dev.langchain4j.service.tool.ToolProviderRequest;
 import dev.langchain4j.service.tool.ToolProviderResult;
 import dev.langchain4j.service.tool.ToolExecutionResult;
 import dev.langchain4j.service.tool.ToolServiceContext;
-import dev.langchain4j.service.tool.search.ToolSearchService;
-import dev.langchain4j.service.tool.search.simple.SimpleToolSearchStrategy;
 import dev.langchain4j.skills.ActivateSkillToolConfig;
 import dev.langchain4j.skills.DefaultSkill;
 import dev.langchain4j.skills.ReadResourceToolConfig;
@@ -89,7 +87,7 @@ public class AgentToolSessionFactory {
     private final LangChain4jToolSpecProvider toolSpecProvider;
     private final LangChain4jMcpClientFactory mcpClientFactory;
 
-    private final ToolSearchService toolSearchService = new ToolSearchService(SimpleToolSearchStrategy.builder().build());
+    private final LangChainToolSearchAdapter toolSearchAdapter = new LangChainToolSearchAdapter();
 
     public AgentToolSession openSession(AgentExecutionContext ctx, String conversationId) {
         List<AgentToolBinding> bindings = resolveBindings(ctx.getTenantId(), ctx.getAgentId(), ctx.getOverrideToolBindings());
@@ -121,7 +119,7 @@ public class AgentToolSessionFactory {
                 .effectiveTools(toolSpecifications)
                 .toolExecutors(executors)
                 .build();
-        return new AgentToolSession(baseContext, toolSearchService, ctx, conversationId, skillPromptBlock, closeables, lazyLoadedSkillTools, ioTypeIndex);
+        return new AgentToolSession(baseContext, toolSearchAdapter, ctx, conversationId, skillPromptBlock, closeables, lazyLoadedSkillTools, ioTypeIndex);
     }
 
     private String mergeSkillProviders(AgentExecutionContext ctx,
@@ -628,7 +626,7 @@ public class AgentToolSessionFactory {
     public static class AgentToolSession implements AutoCloseable {
 
         private final ToolServiceContext baseContext;
-        private final ToolSearchService toolSearchService;
+        private final LangChainToolSearchAdapter toolSearchAdapter;
         private final AgentExecutionContext executionContext;
         private final String conversationId;
         private final String skillPromptBlock;
@@ -650,7 +648,7 @@ public class AgentToolSessionFactory {
                     )))
                     .timestamp(Instant.now())
                     .build();
-            ToolServiceContext effectiveContext = toolSearchService.adjust(baseContext, chatMemory, invocationContext);
+            ToolServiceContext effectiveContext = toolSearchAdapter.adjust(baseContext, chatMemory, invocationContext);
             effectiveContext = mergeActivatedSkillTools(effectiveContext, chatMemory);
             return new RoundToolContext(effectiveContext, invocationContext, ioTypeIndex);
         }

@@ -1,0 +1,12 @@
+package com.schemaplexai.dao.mapper;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.schemaplexai.model.entity.UserMemory;
+import org.apache.ibatis.annotations.Mapper;
+
+/**
+ * 用户记忆 Mapper
+ */
+@Mapper
+public interface UserMemoryMapper extends BaseMapper<UserMemory> {
+}

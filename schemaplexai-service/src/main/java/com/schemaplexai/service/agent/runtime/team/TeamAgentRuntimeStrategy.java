@@ -35,13 +35,14 @@ import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
+import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeStrategy;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import com.schemaplexai.service.workflow.ArtifactSceneResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompileConfig;
-import org.bsc.langgraph4j.GraphInput;
+import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.StateGraph;
 import org.bsc.langgraph4j.checkpoint.PostgresSaver;
@@ -60,6 +61,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -129,9 +131,10 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     private final AgentExecutionEngine agentExecutionEngine;
     private final AgentLogService agentLogService;
     private final AgentLoopQualityChecker qualityChecker;
-    private final com.schemaplexai.service.agent.execution.ExecutionEventStreamService executionEventStreamService;
+    private final ExecutionEventStreamService executionEventStreamService;
     private final AgentContextPublisher agentContextPublisher;
     private final DataSource dataSource;
+    private final LangGraphTeamRuntimeAdapter langGraphRuntimeAdapter = new LangGraphTeamRuntimeAdapter();
 
     @Value("${spring.datasource.url:}")
     private String datasourceUrl;
@@ -184,11 +187,14 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     .executionId(execution.getId())
                     .agentId(execution.getAgentId())
                     .tenantId(execution.getTenantId())
+                    .userId(execution.getCreatedBy())
                     .inputPrompt(execution.getInputPrompt())
                     .inputContext(execution.getInputContext())
                     .model(execution.getAiModel())
                     .conversationId(execution.getConversationId())
                     .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
+                    .temporaryChat(Boolean.TRUE.equals(input.getTemporaryChat()))
+                    .memoryWriteEnabled(input.getMemoryWriteEnabled())
                     .build();
             return CompletableFuture.completedFuture(run(agent, execution, context, input));
         } catch (Exception exception) {
@@ -221,11 +227,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
 
         StateGraph<TeamGraphState> graphDefinition = buildGraph(agent, execution, context, members);
         PostgresSaver saver = buildSaver(graphDefinition);
-        CompileConfig compileConfig = CompileConfig.builder()
-                .checkpointSaver(saver)
-                .interruptBefore(TeamGraphConstants.NODE_AWAIT_INPUT)
-                .releaseThread(false)
-                .build();
+        CompileConfig compileConfig = langGraphRuntimeAdapter.buildCompileConfig(saver);
         var compiledGraph = graphDefinition.compile(compileConfig);
         var runnableConfig = RunnableConfig.builder()
                 .threadId(threadId)
@@ -237,7 +239,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         TeamGraphState state = resolveGraphState(finalState, compiledGraph, runnableConfig, context);
         AgentExecutionResult result = finalizeExecution(execution, state);
         if (!AgentExecutionStatusEnum.PAUSED.getCode().equals(result.getStatus())) {
-            releaseCheckpoint(compileConfig, runnableConfig);
+            langGraphRuntimeAdapter.releaseCheckpoint(compileConfig, runnableConfig);
         }
         return result;
     }
@@ -454,6 +456,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .executionId(childExecution.getId())
                 .agentId(agent.getId())
                 .tenantId(parentExecution.getTenantId())
+                .userId(parentContext.getUserId())
                 .parentExecutionId(parentExecution.getId())
                 .teamAgentId(agent.getId())
                 .teamMemberId(member.getId())
@@ -474,6 +477,8 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .additionalSystemContexts(loadMemberSystemContexts(member))
                 .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
                 .stream(false)
+                .temporaryChat(parentContext.isTemporaryChat())
+                .memoryWriteEnabled(parentContext.getMemoryWriteEnabled())
                 .build();
         if (!StringUtils.hasText(member.getModelOverride())) {
             childContext.setAgentModelType(parentContext.getAgentModelType());
@@ -1058,38 +1063,24 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         return false;
     }
 
-    private java.util.Optional<TeamGraphState> resumeGraph(org.bsc.langgraph4j.CompiledGraph<TeamGraphState> compiledGraph,
-                                                           RunnableConfig runnableConfig,
-                                                           AgentExecution execution,
-                                                           AgentExecutionInputDTO resumeInput) throws Exception {
-        RunnableConfig updatedConfig = compiledGraph.updateState(
-                runnableConfig,
-                Map.of(
-                        TeamGraphConstants.STATE_USER_INPUT, resumeInput.getMessage(),
-                        TeamGraphConstants.STATE_USER_OPTIONS, resumeInput.getOptions() == null ? Map.of() : resumeInput.getOptions()
-                )
-        );
+    private Optional<TeamGraphState> resumeGraph(CompiledGraph<TeamGraphState> compiledGraph,
+                                                 RunnableConfig runnableConfig,
+                                                 AgentExecution execution,
+                                                 AgentExecutionInputDTO resumeInput) throws Exception {
         publishParentEvent(execution, AgentExecutionEventTypeEnum.USER_INPUT, "收到人工输入，继续执行 Team Graph", null);
         publishParentEvent(execution, AgentExecutionEventTypeEnum.RESUMED, "Team Agent 恢复编排执行", null);
-        return compiledGraph.invoke(GraphInput.resume(), updatedConfig);
+        return langGraphRuntimeAdapter.resume(compiledGraph, runnableConfig, resumeInput.getMessage(), resumeInput.getOptions());
     }
 
-    private TeamGraphState resolveGraphState(java.util.Optional<TeamGraphState> finalState,
-                                             org.bsc.langgraph4j.CompiledGraph<TeamGraphState> compiledGraph,
+    private TeamGraphState resolveGraphState(Optional<TeamGraphState> finalState,
+                                             CompiledGraph<TeamGraphState> compiledGraph,
                                              RunnableConfig runnableConfig,
                                              AgentExecutionContext context) {
         if (finalState.isPresent()) {
             return finalState.get();
         }
-        return compiledGraph.lastStateOf(runnableConfig)
-                .map(snapshot -> snapshot.state())
+        return langGraphRuntimeAdapter.lastStateOf(compiledGraph, runnableConfig)
                 .orElseGet(() -> new TeamGraphState(buildInitialState(context)));
-    }
-
-    private void releaseCheckpoint(CompileConfig compileConfig, RunnableConfig runnableConfig) throws Exception {
-        if (compileConfig.checkpointSaver().isPresent()) {
-            compileConfig.checkpointSaver().get().release(runnableConfig);
-        }
     }
 
     private Map<String, Object> buildInitialState(AgentExecutionContext context) {

@@ -25,4 +25,10 @@ public class AgentExecutionInputDTO {
 
     /** 扩展参数（可选） */
     private Map<String, Object> options;
+
+    /** 临时对话：不读取也不写入用户记忆 */
+    private Boolean temporaryChat = false;
+
+    /** 本轮是否允许写入用户记忆 */
+    private Boolean memoryWriteEnabled;
 }

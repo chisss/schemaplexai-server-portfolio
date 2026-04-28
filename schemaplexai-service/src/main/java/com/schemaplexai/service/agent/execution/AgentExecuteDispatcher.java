@@ -97,6 +97,7 @@ public class AgentExecuteDispatcher {
                 .executionId(execution.getId())
                 .agentId(execution.getAgentId())
                 .tenantId(execution.getTenantId())
+                .userId(execution.getCreatedBy())
                 .inputPrompt(execution.getInputPrompt())
                 .inputContext(execution.getInputContext())
                 .model(execution.getAiModel())

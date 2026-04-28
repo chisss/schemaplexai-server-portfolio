@@ -8,6 +8,8 @@ import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextItem;
 import com.schemaplexai.service.context.ContextCacheService;
 import com.schemaplexai.service.memory.rag.RagContentRetrieverFactory;
+import com.schemaplexai.service.user.UserMemoryInjectionService;
+import com.schemaplexai.service.user.UserMemoryPromptPart;
 import com.schemaplexai.service.vector.MilvusVectorService;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.rag.content.Content;
@@ -146,6 +148,38 @@ class ContextInjectorTest {
         assertThat(prompt).contains("Milvus 命中片段 A");
         assertThat(prompt).contains("Milvus 命中片段 B");
         verify(milvusVectorService).searchSimilarContext("tenant-1", List.of("ctx-1"), "请继续补齐上下文", 5);
+    }
+
+    @Test
+    void shouldIncludeUserMemoryWhenUserIdProvided() throws Exception {
+        AgentContextBindingMapper agentContextBindingMapper = mock(AgentContextBindingMapper.class);
+        ContextCacheService contextCacheService = mock(ContextCacheService.class);
+        UserMemoryInjectionService userMemoryInjectionService = mock(UserMemoryInjectionService.class);
+        when(contextCacheService.getAgentPrompt("agent-1")).thenReturn("## 静态指令");
+        when(agentContextBindingMapper.selectList(any())).thenReturn(List.of());
+        when(userMemoryInjectionService.buildPromptPart(
+                "tenant-1", "user-1", "agent-1", null, "请继续", false))
+                .thenReturn(new UserMemoryPromptPart(
+                        "## 用户画像与偏好\n- [PREFERENCE|USER_AGENT|EXPLICIT] 用户偏好中文输出",
+                        "",
+                        1,
+                        0));
+
+        ContextInjector injector = new ContextInjector(
+                agentContextBindingMapper,
+                mock(ContextEntityMapper.class),
+                mock(ContextItemMapper.class),
+                contextCacheService
+        );
+        setField(injector, "userMemoryInjectionService", userMemoryInjectionService);
+
+        ContextInjector.PromptBuildResult result = injector.buildSystemPromptDetail(
+                "agent-1", "请继续", "tenant-1", null, null, null,
+                "user-1", null, false);
+
+        assertThat(result.prompt()).contains("## 用户画像与偏好");
+        assertThat(result.prompt()).contains("用户偏好中文输出");
+        assertThat(result.userMemoryStaticCount()).isEqualTo(1);
     }
 
     private void setField(Object target, String fieldName, Object value) throws Exception {

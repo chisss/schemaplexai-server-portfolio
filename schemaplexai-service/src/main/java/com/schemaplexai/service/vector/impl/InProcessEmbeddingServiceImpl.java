@@ -8,7 +8,7 @@ import dev.langchain4j.model.embedding.onnx.bgesmallenv15q.BgeSmallEnV15Quantize
 import dev.langchain4j.model.output.Response;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.util.Locale;
@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Slf4j
 @Service
-@ConditionalOnProperty(prefix = "ai.embedding", name = "provider", havingValue = "in-process")
+@Lazy
 public class InProcessEmbeddingServiceImpl implements EmbeddingService {
 
     /** 内置 ONNX 向量模型枚举 */
@@ -62,24 +62,20 @@ public class InProcessEmbeddingServiceImpl implements EmbeddingService {
         }
     }
 
-    /** 默认模型（降级兜底用） */
-    private final EmbeddingModel defaultModel;
-    private final int defaultDimension;
+    /** 默认模型（降级兜底用），首次使用时再初始化，避免应用启动阶段加载 ONNX 失败 */
+    private volatile EmbeddingModel defaultModel;
+    private volatile Integer defaultDimension;
 
     /** 按模型类型缓存已初始化的模型实例 */
     private final Map<BuiltinEmbeddingModel, EmbeddingModel> modelCache = new ConcurrentHashMap<>();
 
     public InProcessEmbeddingServiceImpl() {
-        log.info("初始化本地内嵌 Embedding 模型: AllMiniLmL6V2Quantized (ONNX)");
-        this.defaultModel = new AllMiniLmL6V2QuantizedEmbeddingModel();
-        this.defaultDimension = this.defaultModel.embed("dim").content().vector().length;
-        this.modelCache.put(BuiltinEmbeddingModel.ALL_MINI_LM, this.defaultModel);
-        log.info("本地内嵌 Embedding 模型初始化完成, dimension={}", this.defaultDimension);
+        log.info("本地内嵌 Embedding 模型启用懒加载: AllMiniLmL6V2Quantized (ONNX)");
     }
 
     @Override
     public float[] embed(String tenantId, String text) {
-        Response<Embedding> response = defaultModel.embed(text == null ? "" : text);
+        Response<Embedding> response = defaultModel().embed(text == null ? "" : text);
         return response.content().vector();
     }
 
@@ -94,6 +90,11 @@ public class InProcessEmbeddingServiceImpl implements EmbeddingService {
 
     @Override
     public int dimension(String tenantId) {
+        Integer dimension = defaultDimension;
+        if (dimension != null) {
+            return dimension;
+        }
+        defaultModel();
         return defaultDimension;
     }
 
@@ -105,6 +106,9 @@ public class InProcessEmbeddingServiceImpl implements EmbeddingService {
     }
 
     private EmbeddingModel getOrCreateModel(BuiltinEmbeddingModel modelType) {
+        if (BuiltinEmbeddingModel.ALL_MINI_LM.equals(modelType)) {
+            return defaultModel();
+        }
         return modelCache.computeIfAbsent(modelType, type -> {
             log.info("初始化内置 Embedding 模型: {} ({})", type.getModelId(), type.getDescription());
             return switch (type) {
@@ -112,5 +116,22 @@ public class InProcessEmbeddingServiceImpl implements EmbeddingService {
                 case BGE_SMALL_EN -> new BgeSmallEnV15QuantizedEmbeddingModel();
             };
         });
+    }
+
+    private EmbeddingModel defaultModel() {
+        EmbeddingModel model = defaultModel;
+        if (model != null) {
+            return model;
+        }
+        synchronized (this) {
+            if (defaultModel == null) {
+                log.info("初始化本地内嵌 Embedding 模型: AllMiniLmL6V2Quantized (ONNX)");
+                defaultModel = new AllMiniLmL6V2QuantizedEmbeddingModel();
+                defaultDimension = defaultModel.embed("dim").content().vector().length;
+                modelCache.put(BuiltinEmbeddingModel.ALL_MINI_LM, defaultModel);
+                log.info("本地内嵌 Embedding 模型初始化完成, dimension={}", defaultDimension);
+            }
+            return defaultModel;
+        }
     }
 }

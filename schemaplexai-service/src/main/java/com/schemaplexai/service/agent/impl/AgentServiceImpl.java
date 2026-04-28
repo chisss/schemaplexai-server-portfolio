@@ -1365,6 +1365,7 @@ public class AgentServiceImpl implements AgentService {
                 .executionId(execution.getId())
                 .agentId(agentId)
                 .tenantId(SecurityUtil.getCurrentTenantId())
+                .userId(SecurityUtil.getCurrentUserId())
                 .inputPrompt(dto.getPrompt())
                 .model(execution.getAiModel())
                 .agentModelType(agent.getAiModelType())
@@ -1378,6 +1379,8 @@ public class AgentServiceImpl implements AgentService {
                 .stream(Boolean.TRUE.equals(dto.getStream()))
                 .executionMode(execution.getExecutionMode())
                 .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
+                .temporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()))
+                .memoryWriteEnabled(dto.getMemoryWriteEnabled())
                 .build());
 
         log.info("Agent执行任务已入队: agentId={}, executionId={}", agentId, execution.getId());
