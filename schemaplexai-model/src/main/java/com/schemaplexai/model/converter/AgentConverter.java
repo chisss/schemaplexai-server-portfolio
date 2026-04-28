@@ -45,5 +45,7 @@ public interface AgentConverter {
     @Mapping(target = "updatedBy", ignore = true)
     @Mapping(target = "updatedAt", ignore = true)
     @Mapping(target = "deleted", ignore = true)
+    @Mapping(target = "isSystemAgent", ignore = true)
+    @Mapping(target = "systemAgentCode", ignore = true)
     Agent fromCreateRequest(AgentCreateRequest request);
 }

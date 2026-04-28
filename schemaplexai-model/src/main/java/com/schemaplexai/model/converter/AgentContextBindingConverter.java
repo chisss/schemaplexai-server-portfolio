@@ -3,6 +3,7 @@ package com.schemaplexai.model.converter;
 import com.schemaplexai.model.entity.AgentContextBinding;
 import com.schemaplexai.model.vo.agent.AgentContextBindingVO;
 import org.mapstruct.Mapper;
+import org.mapstruct.Mapping;
 import org.mapstruct.ReportingPolicy;
 
 import java.util.List;
@@ -13,6 +14,7 @@ import java.util.List;
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE)
 public interface AgentContextBindingConverter {
 
+    @Mapping(target = "contextName", ignore = true)
     AgentContextBindingVO toVO(AgentContextBinding binding);
 
     List<AgentContextBindingVO> toVOList(List<AgentContextBinding> bindings);

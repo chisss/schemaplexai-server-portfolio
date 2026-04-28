@@ -755,7 +755,7 @@ public class AgentExecutionEngine {
                 state.setLastContent(revision.content());
                 state.addTokenUsage(revision.tokenInput(), revision.tokenOutput());
             }
-            AgentExecutionResult result = buildCompletedResult(executionId, agentId, tenantId, state, startMs, conversationId);
+            AgentExecutionResult result = buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
             // 触发 ON_LOOP_COMPLETE Hook
             hookExecutor.fire(AgentHookType.ON_LOOP_COMPLETE, AgentHookContext.builder()
                     .executionId(executionId).agentId(agentId).tenantId(tenantId)
@@ -789,7 +789,7 @@ public class AgentExecutionEngine {
             state.addTokenUsage(revision.tokenInput(), revision.tokenOutput());
             if (revision.roundsUsed() > 0) forceRound = revision.finalRound();
 
-            return buildCompletedResult(executionId, agentId, tenantId, state, startMs, conversationId);
+            return buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
         } catch (Exception forceEx) {
             if (completionHandler.hasCompletionEvidence(chatMemory)) {
                 String degraded = completionHandler.buildDegraded(ctx, chatMemory, state.getLastRound(), null, forceEx, params);
@@ -799,7 +799,7 @@ public class AgentExecutionEngine {
                 chatMemory.add(UserMessage.from(AgentLoopPromptConstant.FORCE_COMPLETION));
                 chatMemory.add(AiMessage.from(degraded));
                 state.setLastContent(degraded);
-                return buildCompletedResult(executionId, agentId, tenantId, state, startMs, conversationId);
+                return buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
             }
             String errMsg = (state.isForceCompletionRequested() ? "模型返回空响应，且强制收敛失败: " : "超出最大执行轮次，且强制收敛失败: ")
                     + resolveExMsg(forceEx);
@@ -837,7 +837,7 @@ public class AgentExecutionEngine {
             chatMemory.add(UserMessage.from(AgentLoopPromptConstant.FORCE_COMPLETION));
             chatMemory.add(AiMessage.from(content));
             state.setLastContent(content);
-            return buildCompletedResult(executionId, agentId, tenantId, state, startMs, conversationId);
+            return buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
         } catch (Exception forceEx) {
             if (!completionHandler.hasCompletionEvidence(chatMemory)) return null;
             String degraded = completionHandler.buildDegraded(ctx, chatMemory, round, e, forceEx, params);
@@ -847,7 +847,7 @@ public class AgentExecutionEngine {
             agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
                     AgentLoopLogTypeEnum.DEGRADED_COMPLETION.getCode(), round, null,
                     "模型调用与强制收敛均失败，基于已收集证据输出降级结论", null, elapsed(startMs));
-            return buildCompletedResult(executionId, agentId, tenantId, state, startMs, conversationId);
+            return buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
         }
     }
 
@@ -856,7 +856,7 @@ public class AgentExecutionEngine {
     // =========================================================================
 
     /** 构建正常完成结果，清洗输出并更新执行状态 */
-    private AgentExecutionResult buildCompletedResult(String executionId, String agentId, String tenantId,
+    private AgentExecutionResult buildCompletedResult(AgentExecutionContext ctx, String executionId, String agentId, String tenantId,
                                                        AgentLoopState state, long startMs, String conversationId) {
         String sanitized = qualityChecker.sanitize(state.getLastContent());
         state.setLastContent(sanitized);

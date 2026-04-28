@@ -15,6 +15,7 @@ import java.util.List;
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE, imports = {CommonConstant.class})
 public interface BudgetConverter {
 
+    @Mapping(target = "targetName", ignore = true)
     BudgetVO toVO(Budget entity);
     List<BudgetVO> toVOList(List<Budget> entities);
 

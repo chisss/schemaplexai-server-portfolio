@@ -23,6 +23,10 @@ public interface SpecConverter {
      * Spec -> SpecVO（documents 需要额外加载）
      */
     @Mapping(target = "documents", ignore = true)
+    @Mapping(target = "ownerName", ignore = true)
+    @Mapping(target = "createdByName", ignore = true)
+    @Mapping(target = "workflowName", ignore = true)
+    @Mapping(target = "primaryArtifact", ignore = true)
     SpecVO toVO(Spec spec);
 
     List<SpecVO> toVOList(List<Spec> specs);

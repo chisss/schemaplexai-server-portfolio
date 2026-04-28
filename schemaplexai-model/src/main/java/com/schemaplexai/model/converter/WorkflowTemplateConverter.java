@@ -22,8 +22,13 @@ public interface WorkflowTemplateConverter {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
     @Mapping(target = "isBuiltin", constant = "false")
+    @Mapping(target = "status", ignore = true)
+    @Mapping(target = "triggerType", ignore = true)
+    @Mapping(target = "processDefinitionId", ignore = true)
     @Mapping(target = "createdBy", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
+    @Mapping(target = "updatedBy", ignore = true)
     @Mapping(target = "updatedAt", ignore = true)
+    @Mapping(target = "deleted", ignore = true)
     WorkflowTemplate fromCreateRequest(WorkflowTemplateCreateRequest request);
 }

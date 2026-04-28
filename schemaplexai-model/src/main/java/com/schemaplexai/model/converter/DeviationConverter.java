@@ -18,6 +18,8 @@ public interface DeviationConverter {
     @Mapping(target = "severityLabel", ignore = true)
     @Mapping(target = "statusLabel", ignore = true)
     @Mapping(target = "resolvedByName", ignore = true)
+    @Mapping(target = "workspaceId", ignore = true)
+    @Mapping(target = "projectName", ignore = true)
     DeviationVO toVO(QualityDeviation entity);
 
     List<DeviationVO> toVOList(List<QualityDeviation> entities);

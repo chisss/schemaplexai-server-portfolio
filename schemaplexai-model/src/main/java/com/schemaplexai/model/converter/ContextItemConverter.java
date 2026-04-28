@@ -15,6 +15,10 @@ import java.util.List;
 @Mapper(componentModel = "spring", unmappedSourcePolicy = ReportingPolicy.IGNORE)
 public interface ContextItemConverter {
 
+    @Mapping(target = "isAgentInstructions", ignore = true)
+    @Mapping(target = "vectorStatus", ignore = true)
+    @Mapping(target = "vectorUpdatedAt", ignore = true)
+    @Mapping(target = "chunkCount", ignore = true)
     ContextItemVO toVO(ContextItem item);
 
     List<ContextItemVO> toVOList(List<ContextItem> items);

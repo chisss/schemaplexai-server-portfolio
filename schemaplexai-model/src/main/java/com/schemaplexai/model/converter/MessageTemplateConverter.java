@@ -17,6 +17,7 @@ import java.util.List;
         imports = {CommonConstant.class})
 public interface MessageTemplateConverter {
 
+    @Mapping(target = "createdByName", ignore = true)
     MessageTemplateVO toVO(MessageTemplate entity);
 
     List<MessageTemplateVO> toVOList(List<MessageTemplate> entities);
