@@ -21,6 +21,8 @@ import com.schemaplexai.model.vo.database.DatabaseQueryResultVO;
 import com.schemaplexai.model.vo.database.DatabaseSourceTestVO;
 import com.schemaplexai.model.vo.database.DatabaseSourceVO;
 import com.schemaplexai.service.database.DatabaseSourceService;
+import com.schemaplexai.service.database.credential.DatabaseCredentialMaterializer;
+import com.schemaplexai.service.database.credential.DatabaseCredentialVault;
 import com.schemaplexai.service.integration.mcp.DatabaseMcpPresetResolver;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import com.schemaplexai.service.mcp.McpServerService;
@@ -75,6 +77,7 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
     private final McpServerService mcpServerService;
     private final McpClientService mcpClientService;
     private final DatabaseMcpPresetResolver databaseMcpPresetResolver;
+    private final DatabaseCredentialVault databaseCredentialVault;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -121,7 +124,9 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
         createRequest.setHeaders(defaultMap(request.getHeaders()));
         createRequest.setServerType(McpServerTypeEnum.DATABASE.getCode());
         createRequest.setPresetCode(blankToNull(request.getPresetCode()));
-        createRequest.setConnectionConfig(buildConnectionConfig(request, null));
+        Map<String, Object> connectionConfig = buildConnectionConfig(request, null);
+        String secretRef = persistCredential(null, request, connectionConfig);
+        createRequest.setConnectionConfig(toPersistedConnectionConfig(connectionConfig, secretRef));
         createRequest.setTransportConfig(buildTransportConfig(request, null));
         var created = mcpServerService.create(createRequest);
         return toDatabaseSourceVO(requireDatabaseSource(created.getId()));
@@ -142,7 +147,10 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
         updateRequest.setHeaders(request.getHeaders() == null ? existing.getHeaders() : request.getHeaders());
         updateRequest.setServerType(McpServerTypeEnum.DATABASE.getCode());
         updateRequest.setPresetCode(blankToNull(request.getPresetCode()));
-        updateRequest.setConnectionConfig(buildConnectionConfig(request, existing));
+        Map<String, Object> connectionConfig = buildConnectionConfig(request, existing);
+        String currentSecretRef = readString(existing.getConnectionConfig(), DatabaseCredentialMaterializer.SECRET_REF_KEY);
+        String secretRef = persistCredential(currentSecretRef, request, connectionConfig);
+        updateRequest.setConnectionConfig(toPersistedConnectionConfig(connectionConfig, secretRef));
         updateRequest.setTransportConfig(buildTransportConfig(request, existing));
         updateRequest.setStatus(existing.getStatus());
         mcpServerService.update(id, updateRequest);
@@ -153,8 +161,10 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void delete(String id) {
-        requireDatabaseSource(id);
+        McpServer source = requireDatabaseSource(id);
         mcpServerService.delete(id);
+        databaseCredentialVault.delete(readString(
+                source.getConnectionConfig(), DatabaseCredentialMaterializer.SECRET_REF_KEY));
     }
 
     @Override
@@ -275,7 +285,8 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
         vo.setDatabase(readString(connectionConfig, "database"));
         vo.setSchema(readString(connectionConfig, "schema"));
         vo.setUsername(readString(connectionConfig, "username"));
-        vo.setPasswordConfigured(StringUtils.hasText(readString(connectionConfig, "password")));
+        vo.setPasswordConfigured(StringUtils.hasText(readString(connectionConfig, "password"))
+                || StringUtils.hasText(readString(connectionConfig, DatabaseCredentialMaterializer.SECRET_REF_KEY)));
         vo.setConnectionUri(maskConnectionUri(readString(connectionConfig, "connectionUri")));
         vo.setSslMode(readString(connectionConfig, "sslMode"));
         vo.setReadOnly(readBoolean(connectionConfig, "readOnly"));
@@ -409,6 +420,35 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
         }
 
         return transportConfig;
+    }
+
+    private String persistCredential(String currentSecretRef,
+                                     DatabaseSourceSaveRequest request,
+                                     Map<String, Object> connectionConfig) {
+        boolean submittedCredential = StringUtils.hasText(request.getPassword())
+                || StringUtils.hasText(request.getConnectionUri());
+        boolean legacyCredential = !StringUtils.hasText(currentSecretRef)
+                && (StringUtils.hasText(readString(connectionConfig, "password"))
+                || StringUtils.hasText(readString(connectionConfig, "connectionUri")));
+        if (!submittedCredential && !legacyCredential) {
+            return currentSecretRef;
+        }
+
+        Map<String, Object> credential = new LinkedHashMap<>();
+        putIfText(credential, "password", readString(connectionConfig, "password"));
+        putIfText(credential, "connectionUri", readString(connectionConfig, "connectionUri"));
+        return databaseCredentialVault.save(currentSecretRef, credential);
+    }
+
+    private Map<String, Object> toPersistedConnectionConfig(Map<String, Object> connectionConfig,
+                                                            String secretRef) {
+        Map<String, Object> persisted = new LinkedHashMap<>(connectionConfig);
+        persisted.remove("password");
+        persisted.remove("connectionUri");
+        if (StringUtils.hasText(secretRef)) {
+            persisted.put(DatabaseCredentialMaterializer.SECRET_REF_KEY, secretRef);
+        }
+        return persisted;
     }
 
     private Map<String, Object> resolveAuthConfigForUpdate(DatabaseSourceSaveRequest request, McpServer existing) {

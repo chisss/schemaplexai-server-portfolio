@@ -5,6 +5,7 @@ import com.schemaplexai.common.enums.McpTransportTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.model.entity.McpServer;
+import com.schemaplexai.service.database.credential.DatabaseCredentialMaterializer;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -89,7 +90,8 @@ public class DatabaseMcpPresetResolver {
     private void validatePostgresql(McpServer server) {
         Map<String, Object> connectionConfig = safeMap(server.getConnectionConfig());
         String connectionUri = firstText(connectionConfig, "connectionUri", "connectionUrl", "url", "jdbcUrl");
-        if (StringUtils.hasText(connectionUri)) {
+        if (StringUtils.hasText(connectionUri)
+                || StringUtils.hasText(firstText(connectionConfig, DatabaseCredentialMaterializer.SECRET_REF_KEY))) {
             return;
         }
         if (!StringUtils.hasText(firstText(connectionConfig, "database", "databaseName", "dbName"))) {

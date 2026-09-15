@@ -4,6 +4,7 @@ import com.schemaplexai.common.enums.McpTransportTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.model.entity.McpServer;
+import com.schemaplexai.service.database.credential.DatabaseCredentialMaterializer;
 import dev.langchain4j.mcp.client.DefaultMcpClient;
 import dev.langchain4j.mcp.client.McpClient;
 import dev.langchain4j.mcp.client.McpHeadersSupplier;
@@ -36,17 +37,19 @@ public class LangChain4jMcpClientFactory {
     private static final Duration DEFAULT_RESOURCE_TIMEOUT = Duration.ofSeconds(30);
 
     private final DatabaseMcpPresetResolver databaseMcpPresetResolver;
+    private final DatabaseCredentialMaterializer databaseCredentialMaterializer;
 
     public McpClient create(McpServer server) {
         if (server == null) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "MCP Server 配置不能为空");
         }
+        McpServer runtimeServer = databaseCredentialMaterializer.materialize(server);
         return DefaultMcpClient.builder()
                 .key(server.getId())
                 .clientName("SchemaPlexAI")
                 .clientVersion("1.0.0")
                 .protocolVersion("2024-11-05")
-                .transport(buildTransport(server))
+                .transport(buildTransport(runtimeServer))
                 .initializationTimeout(DEFAULT_INITIALIZATION_TIMEOUT)
                 .toolExecutionTimeout(DEFAULT_TOOL_TIMEOUT)
                 .resourcesTimeout(DEFAULT_RESOURCE_TIMEOUT)

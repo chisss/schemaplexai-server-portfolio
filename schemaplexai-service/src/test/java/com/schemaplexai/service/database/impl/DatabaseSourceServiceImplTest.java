@@ -8,7 +8,11 @@ import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.McpServerMapper;
 import com.schemaplexai.model.dto.database.DatabaseSourceQueryRequest;
+import com.schemaplexai.model.dto.database.DatabaseSourceSaveRequest;
+import com.schemaplexai.model.dto.mcp.McpServerCreateRequest;
 import com.schemaplexai.model.entity.McpServer;
+import com.schemaplexai.model.vo.mcp.McpServerVO;
+import com.schemaplexai.service.database.credential.DatabaseCredentialVault;
 import com.schemaplexai.service.integration.mcp.DatabaseMcpPresetResolver;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import com.schemaplexai.service.mcp.McpServerService;
@@ -29,11 +33,14 @@ import static org.mockito.Mockito.when;
 class DatabaseSourceServiceImplTest {
 
     private final McpServerMapper mcpServerMapper = mock(McpServerMapper.class);
+    private final McpServerService mcpServerService = mock(McpServerService.class);
+    private final DatabaseCredentialVault credentialVault = mock(DatabaseCredentialVault.class);
     private final DatabaseSourceServiceImpl service = new DatabaseSourceServiceImpl(
             mcpServerMapper,
-            mock(McpServerService.class),
+            mcpServerService,
             mock(McpClientService.class),
             new DatabaseMcpPresetResolver(),
+            credentialVault,
             new ObjectMapper()
     );
 
@@ -80,6 +87,37 @@ class DatabaseSourceServiceImplTest {
         ArgumentCaptor<LambdaQueryWrapper<McpServer>> captor = wrapperCaptor();
         verify(mcpServerMapper).selectList(captor.capture());
         assertThat(captor.getValue()).isNotNull();
+    }
+
+    @Test
+    void shouldPersistSecretRefWithoutPlainCredential() {
+        SecurityUtil.setCurrentTenantId("tenant-1");
+        DatabaseSourceSaveRequest request = new DatabaseSourceSaveRequest();
+        request.setName("orders");
+        request.setDatabaseType("postgresql");
+        request.setPresetCode("postgresql");
+        request.setDatabase("orders");
+        request.setUsername("readonly");
+        request.setPassword("plain-secret");
+        when(credentialVault.save(any(), any())).thenReturn("secret-1");
+
+        McpServerVO created = new McpServerVO();
+        created.setId("source-1");
+        when(mcpServerService.create(any())).thenReturn(created);
+        McpServer stored = new McpServer();
+        stored.setId("source-1");
+        stored.setTenantId("tenant-1");
+        stored.setServerType(McpServerTypeEnum.DATABASE.getCode());
+        stored.setConnectionConfig(java.util.Map.of("secretRef", "secret-1"));
+        when(mcpServerMapper.selectOne(any())).thenReturn(stored);
+
+        service.create(request);
+
+        ArgumentCaptor<McpServerCreateRequest> captor = ArgumentCaptor.forClass(McpServerCreateRequest.class);
+        verify(mcpServerService).create(captor.capture());
+        assertThat(captor.getValue().getConnectionConfig())
+                .containsEntry("secretRef", "secret-1")
+                .doesNotContainKeys("password", "connectionUri");
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
