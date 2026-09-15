@@ -13,6 +13,7 @@ import com.schemaplexai.model.dto.mcp.McpServerCreateRequest;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.vo.mcp.McpServerVO;
 import com.schemaplexai.service.database.credential.DatabaseCredentialVault;
+import com.schemaplexai.service.database.security.SqlReadOnlyGuard;
 import com.schemaplexai.service.integration.mcp.DatabaseMcpPresetResolver;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import com.schemaplexai.service.mcp.McpServerService;
@@ -41,6 +42,7 @@ class DatabaseSourceServiceImplTest {
             mock(McpClientService.class),
             new DatabaseMcpPresetResolver(),
             credentialVault,
+            new SqlReadOnlyGuard(),
             new ObjectMapper()
     );
 

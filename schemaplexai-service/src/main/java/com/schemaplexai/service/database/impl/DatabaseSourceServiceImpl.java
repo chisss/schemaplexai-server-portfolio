@@ -23,6 +23,7 @@ import com.schemaplexai.model.vo.database.DatabaseSourceVO;
 import com.schemaplexai.service.database.DatabaseSourceService;
 import com.schemaplexai.service.database.credential.DatabaseCredentialMaterializer;
 import com.schemaplexai.service.database.credential.DatabaseCredentialVault;
+import com.schemaplexai.service.database.security.SqlReadOnlyGuard;
 import com.schemaplexai.service.integration.mcp.DatabaseMcpPresetResolver;
 import com.schemaplexai.service.integration.mcp.McpClientService;
 import com.schemaplexai.service.mcp.McpServerService;
@@ -41,7 +42,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -51,11 +51,6 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class DatabaseSourceServiceImpl implements DatabaseSourceService {
-
-    private static final Pattern WRITE_SQL_PATTERN = Pattern.compile(
-            "\\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|merge|replace)\\b",
-            Pattern.CASE_INSENSITIVE
-    );
 
     private static final List<String> QUERY_TOOL_NAME_PRIORITY = List.of(
             "query",
@@ -78,6 +73,7 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
     private final McpClientService mcpClientService;
     private final DatabaseMcpPresetResolver databaseMcpPresetResolver;
     private final DatabaseCredentialVault databaseCredentialVault;
+    private final SqlReadOnlyGuard sqlReadOnlyGuard;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -207,7 +203,7 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
     public DatabaseQueryResultVO executeQuery(String id, DatabaseQueryExecuteRequest request) {
         McpServer server = requireDatabaseSource(id);
         String sql = normalizeSql(request.getSql());
-        validateReadOnlySql(sql);
+        sqlReadOnlyGuard.validate(sql);
 
         List<Map<String, Object>> tools = extractTools(server);
         if (tools.isEmpty()) {
@@ -456,24 +452,6 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
             return request.getAuthConfig();
         }
         return existing.getAuthConfig();
-    }
-
-    private void validateReadOnlySql(String sql) {
-        if (!StringUtils.hasText(sql)) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "SQL不能为空");
-        }
-        String normalized = sql.trim().toLowerCase(Locale.ROOT);
-        if (!(normalized.startsWith("select")
-                || normalized.startsWith("with")
-                || normalized.startsWith("explain")
-                || normalized.startsWith("show")
-                || normalized.startsWith("describe")
-                || normalized.startsWith("desc"))) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "当前仅允许执行只读 SQL");
-        }
-        if (WRITE_SQL_PATTERN.matcher(normalized).find()) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "检测到写操作关键字，已拒绝执行");
-        }
     }
 
     private String normalizeSql(String sql) {
