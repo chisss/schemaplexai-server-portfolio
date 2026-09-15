@@ -9,6 +9,7 @@ import com.schemaplexai.common.enums.McpTransportTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.McpServerMapper;
 import com.schemaplexai.model.dto.database.DatabaseQueryExecuteRequest;
 import com.schemaplexai.model.dto.database.DatabaseSourceQueryRequest;
@@ -19,7 +20,6 @@ import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.model.vo.database.DatabaseQueryResultVO;
 import com.schemaplexai.model.vo.database.DatabaseSourceTestVO;
 import com.schemaplexai.model.vo.database.DatabaseSourceVO;
-import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.database.DatabaseSourceService;
 import com.schemaplexai.service.integration.mcp.DatabaseMcpPresetResolver;
 import com.schemaplexai.service.integration.mcp.McpClientService;
@@ -75,13 +75,13 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
     private final McpServerService mcpServerService;
     private final McpClientService mcpClientService;
     private final DatabaseMcpPresetResolver databaseMcpPresetResolver;
-    private final EntityValidator entityValidator;
     private final ObjectMapper objectMapper;
 
     @Override
     public PageResult<DatabaseSourceVO> page(DatabaseSourceQueryRequest request) {
         List<McpServer> entities = mcpServerMapper.selectList(
                 new LambdaQueryWrapper<McpServer>()
+                        .eq(McpServer::getTenantId, requireTenantId())
                         .eq(McpServer::getServerType, McpServerTypeEnum.DATABASE.getCode())
                         .orderByDesc(McpServer::getCreatedAt)
         );
@@ -232,11 +232,25 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
     }
 
     private McpServer requireDatabaseSource(String id) {
-        McpServer entity = entityValidator.requireExists(mcpServerMapper, id, ResultCode.MCP_SERVER_NOT_FOUND);
-        if (!McpServerTypeEnum.DATABASE.getCode().equalsIgnoreCase(entity.getServerType())) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "目标记录不是数据库数据源");
+        McpServer entity = mcpServerMapper.selectOne(
+                new LambdaQueryWrapper<McpServer>()
+                        .eq(McpServer::getId, id)
+                        .eq(McpServer::getTenantId, requireTenantId())
+                        .eq(McpServer::getServerType, McpServerTypeEnum.DATABASE.getCode())
+                        .last("LIMIT 1")
+        );
+        if (entity == null) {
+            throw new BusinessException(ResultCode.MCP_SERVER_NOT_FOUND);
         }
         return entity;
+    }
+
+    private String requireTenantId() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "租户上下文缺失");
+        }
+        return tenantId.trim();
     }
 
     private DatabaseSourceVO toDatabaseSourceVO(McpServer entity) {
