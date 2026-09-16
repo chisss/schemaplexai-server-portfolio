@@ -51,6 +51,7 @@
         <langchain4j.beta.version>1.13.1-beta23</langchain4j.beta.version>
         <langgraph4j.version>1.8.13</langgraph4j.version>
         <quickjs4j.version>0.0.6</quickjs4j.version>
+        <jena.version>6.2.0</jena.version>
     </properties>
 
     <dependencyManagement>
@@ -224,6 +225,15 @@
                 <groupId>io.roastedroot</groupId>
                 <artifactId>quickjs4j</artifactId>
                 <version>${quickjs4j.version}</version>
+            </dependency>
+
+            <!-- Apache Jena 语义存储与 SHACL -->
+            <dependency>
+                <groupId>org.apache.jena</groupId>
+                <artifactId>jena-bom</artifactId>
+                <version>${jena.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
