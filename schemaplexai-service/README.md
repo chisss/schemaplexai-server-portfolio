@@ -24,6 +24,14 @@
 - `infrastructure.database` 适配 MyBatis，并通过 tenant + revision 条件执行读写；
 - PostgreSQL 迁移见工作区 `sql/54_semantic_catalog.sql`。
 
-Controller、SHACL、发布编排和 Query IR 按后端设计文档继续接入。
+Schema 快照链路复用租户数据库 MCP 数据源：
+
+- PostgreSQL、MySQL 读取 `information_schema` 与约束、索引元数据；
+- ClickHouse 读取 `system.tables`、`system.columns`、引擎与分区键；
+- MongoDB 只调用集合、结构和索引白名单操作，受限采样仅保留字段类型分布；
+- 规范化结构排序后计算 SHA-256 fingerprint，相同租户、数据源和 fingerprint 幂等复用；
+- `SchemaScanApplicationService` 提供扫描和快照历史应用接口，HTTP 映射由后续接口切片接入。
+
+语义模型 Controller、SHACL、发布编排和 Query IR 按后端设计文档继续接入。
 
 详细方案见工作区的 [后端语义查询技术文档](../../document/tech/backend/07-语义数据查询与本体引擎技术文档.md)。

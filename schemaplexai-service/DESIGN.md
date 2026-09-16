@@ -10,12 +10,18 @@ Jena/TDB2 只存在于 `semantic.infrastructure.jena`。共享 Dataset 由 `Sema
 
 语义模型与版本是独立聚合。聚合自身执行状态转换和 revision 校验，application 只编排当前租户上下文与仓储端口。数据库适配器的查询必须显式带 `tenant_id`；更新必须同时匹配 `tenant_id + id + revision`。数据库组合外键保证版本、映射和活动版本不能跨租户关联。
 
+Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生命周期会话。关系型和 ClickHouse 适配器只执行内置只读元数据 SQL，并再次经过 `SqlReadOnlyGuard`；MongoDB 只允许集合、结构、索引三类白名单操作。适配器不会把样例值写入领域对象、快照或 API 响应。
+
+`SchemaIntrospectorPort` 接收纯领域值对象 `SchemaScanScope`，数据库差异留在 infrastructure 策略中。快照先规范化排序再计算 SHA-256 fingerprint；`tenantId + sourceId + fingerprint` 唯一约束和重复键回读共同保证并发幂等。
+
 ## 已知限制
 
 - 当前 AST 门禁尚未包含表列白名单、函数白名单和成本估算，后续 QueryPlan 编译阶段补齐；
 - 旧数据源中可能存在历史明文凭据，编辑保存时迁移，正式上线前需执行数据盘点；
 - 当前已完成 Jena/TDB2 基础设施与语义控制面，SHACL 校验、受限推理和查询模板守卫将在后续切片实现；
 - 当前控制面提供 application CRUD，HTTP Controller 与权限码契约由后续接口切片交付；
+- Schema 扫描 HTTP 端点与语义目录细粒度权限码由后续接口切片统一补齐；
+- 当前 Schema 扫描为同步调用，超大库的异步任务、超时和进度查询在容量测试后增加；
 - `SemanticDatasetManager` 当前按单 JVM 单写入者部署，不能让多个 Pod 共享同一 TDB2 目录。
 
 ## 变更历史
@@ -31,3 +37,7 @@ Jena/TDB2 只存在于 `semantic.infrastructure.jena`。共享 Dataset 由 `Sema
 ### 2026-09-16 - 语义模型控制面
 
 增加模型与版本聚合、状态机、租户限定仓储、revision 乐观锁、application CRUD 和 Phase 1 四表迁移。模型有活动版本时禁止删除，已发布版本不能退回可编辑状态。
+
+### 2026-09-16 - 多数据库 Schema 快照
+
+增加 PostgreSQL、MySQL、ClickHouse 和 MongoDB 扫描策略、规范化 fingerprint、租户限定快照仓储及扫描历史应用接口。MongoDB 快照只保存类型分布，不保存采样值。
