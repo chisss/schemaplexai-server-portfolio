@@ -182,7 +182,10 @@ public enum ResultCode {
     SEMANTIC_VERSION_NOT_FOUND(93003, "语义版本不存在"),
     SEMANTIC_VERSION_STATUS_INVALID(93004, "语义版本状态不允许当前操作"),
     SEMANTIC_REVISION_CONFLICT(93005, "语义对象已被其他操作更新，请刷新后重试"),
-    SEMANTIC_MODEL_HAS_ACTIVE_VERSION(93006, "语义模型存在活动版本，不能删除");
+    SEMANTIC_MODEL_HAS_ACTIVE_VERSION(93006, "语义模型存在活动版本，不能删除"),
+    SCHEMA_SOURCE_UNSUPPORTED(93007, "不支持的数据源 Schema 类型"),
+    SCHEMA_SCAN_FAILED(93008, "Schema 扫描失败"),
+    SCHEMA_SNAPSHOT_NOT_FOUND(93009, "Schema 快照不存在");
 
     private final int code;
     private final String message;
