@@ -1,5 +1,6 @@
 package com.schemaplexai.service.semantic.infrastructure.jena;
 
+import com.schemaplexai.service.semantic.domain.port.SemanticGraphLocator;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -7,7 +8,7 @@ import java.util.regex.Pattern;
 
 /** 服务端生成语义版本图 IRI，避免客户端注入任意图名。 */
 @Component
-public class SemanticGraphIriFactory {
+public class SemanticGraphIriFactory implements SemanticGraphLocator {
 
     private static final Pattern SAFE_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,127}");
 
@@ -19,6 +20,11 @@ public class SemanticGraphIriFactory {
         }
         String prefix = "urn:spx:tenant:" + tenantId + ":semantic:" + modelId + ":v:" + version;
         return new GraphSet(prefix);
+    }
+
+    @Override
+    public String assertedGraph(String tenantId, String modelId, long version) {
+        return create(tenantId, modelId, version).asserted();
     }
 
     private static void validateId(String value, String name) {

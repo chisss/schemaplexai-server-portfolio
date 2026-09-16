@@ -173,7 +173,16 @@ public enum ResultCode {
     API_GATEWAY_RATE_LIMITED(92003, "API调用频率超限"),
     API_GATEWAY_COST_EXCEEDED(92004, "API调用费用超限"),
     API_GATEWAY_POLICY_NOT_FOUND(92005, "API网关策略不存在"),
-    API_GATEWAY_UNAUTHORIZED(92006, "API网关认证失败");
+    API_GATEWAY_UNAUTHORIZED(92006, "API网关认证失败"),
+
+    // ---- 语义目录 93000~93019 ----
+    SEMANTIC_MODEL_NOT_FOUND(93000, "语义模型不存在"),
+    SEMANTIC_MODEL_NAME_DUPLICATE(93001, "语义模型名称已存在"),
+    SEMANTIC_MODEL_STATUS_INVALID(93002, "语义模型状态不允许当前操作"),
+    SEMANTIC_VERSION_NOT_FOUND(93003, "语义版本不存在"),
+    SEMANTIC_VERSION_STATUS_INVALID(93004, "语义版本状态不允许当前操作"),
+    SEMANTIC_REVISION_CONFLICT(93005, "语义对象已被其他操作更新，请刷新后重试"),
+    SEMANTIC_MODEL_HAS_ACTIVE_VERSION(93006, "语义模型存在活动版本，不能删除");
 
     private final int code;
     private final String message;
