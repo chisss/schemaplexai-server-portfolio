@@ -29,6 +29,11 @@ class SemanticDatasetManager implements AutoCloseable {
         Txn.executeWrite(current, () -> action.accept(current.asDatasetGraph()));
     }
 
+    <T> T calculateWrite(Function<DatasetGraph, T> action) {
+        Dataset current = getOrOpen();
+        return Txn.calculateWrite(current, () -> action.apply(current.asDatasetGraph()));
+    }
+
     private synchronized Dataset getOrOpen() {
         if (dataset == null) {
             String location = properties.getDirectory().toAbsolutePath().normalize().toString();

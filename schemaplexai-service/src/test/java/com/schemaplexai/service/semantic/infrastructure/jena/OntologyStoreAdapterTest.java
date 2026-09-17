@@ -35,7 +35,8 @@ class OntologyStoreAdapterTest {
                 datasetManager,
                 new TenantDatasetViewFactory(graphIriFactory),
                 graphIriFactory,
-                properties);
+                properties,
+                new JenaOntologyStatementMapper());
     }
 
     @AfterEach

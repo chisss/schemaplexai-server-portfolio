@@ -9,7 +9,6 @@ import com.schemaplexai.service.semantic.domain.model.ontology.OntologyStatement
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologySubgraph;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyTerm;
 import com.schemaplexai.service.semantic.domain.port.OntologyStorePort;
-import org.apache.jena.datatypes.TypeMapper;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.query.Dataset;
@@ -40,16 +39,19 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
     private final TenantDatasetViewFactory viewFactory;
     private final SemanticGraphIriFactory graphIriFactory;
     private final SemanticStoreProperties properties;
+    private final JenaOntologyStatementMapper statementMapper;
 
     public JenaOntologyStoreAdapter(
             SemanticDatasetManager datasetManager,
             TenantDatasetViewFactory viewFactory,
             SemanticGraphIriFactory graphIriFactory,
-            SemanticStoreProperties properties) {
+            SemanticStoreProperties properties,
+            JenaOntologyStatementMapper statementMapper) {
         this.datasetManager = datasetManager;
         this.viewFactory = viewFactory;
         this.graphIriFactory = graphIriFactory;
         this.properties = properties;
+        this.statementMapper = statementMapper;
     }
 
     @Override
@@ -67,11 +69,7 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
         datasetManager.write(dataset -> {
             dataset.deleteAny(graphNode, Node.ANY, Node.ANY, Node.ANY);
             for (OntologyStatement statement : graph.statements()) {
-                dataset.add(new Quad(
-                        graphNode,
-                        NodeFactory.createURI(statement.subjectIri()),
-                        NodeFactory.createURI(statement.predicateIri()),
-                        toNode(statement.object())));
+                dataset.add(statementMapper.toQuad(graphNode, statement));
             }
         });
     }
@@ -103,7 +101,7 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
         Node asserted = NodeFactory.createURI(graphSet.asserted());
         List<OntologyStatement> statements = new ArrayList<>();
         Iterator<Quad> quads = view.asDatasetGraph().find(asserted, Node.ANY, Node.ANY, Node.ANY);
-        quads.forEachRemaining(quad -> statements.add(fromQuad(quad)));
+        quads.forEachRemaining(quad -> statements.add(statementMapper.fromQuad(quad)));
         statements.sort(Comparator.comparing(this::statementKey));
 
         Map<String, String> labels = collectLabels(statements);
@@ -199,43 +197,6 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
                 .sorted(Comparator.comparing(this::statementKey))
                 .forEach(statement -> labels.putIfAbsent(statement.subjectIri(), statement.object().value()));
         return labels;
-    }
-
-    private Node toNode(OntologyTerm term) {
-        if (term.kind() == OntologyTerm.Kind.IRI) {
-            return NodeFactory.createURI(term.value());
-        }
-        if (term.language() != null) {
-            return NodeFactory.createLiteralLang(term.value(), term.language());
-        }
-        if (term.datatype() != null) {
-            return NodeFactory.createLiteralDT(term.value(), TypeMapper.getInstance().getSafeTypeByName(term.datatype()));
-        }
-        return NodeFactory.createLiteralString(term.value());
-    }
-
-    private OntologyStatement fromQuad(Quad quad) {
-        return new OntologyStatement(
-                quad.getSubject().getURI(),
-                quad.getPredicate().getURI(),
-                fromNode(quad.getObject()));
-    }
-
-    private OntologyTerm fromNode(Node node) {
-        if (node.isURI()) {
-            return OntologyTerm.iri(node.getURI());
-        }
-        if (!node.isLiteral()) {
-            throw new IllegalStateException("ontology graph contains unsupported RDF object");
-        }
-        String language = node.getLiteralLanguage();
-        if (language != null && !language.isBlank()) {
-            return OntologyTerm.languageLiteral(node.getLiteralLexicalForm(), language);
-        }
-        String datatype = node.getLiteralDatatypeURI();
-        return datatype == null
-                ? OntologyTerm.literal(node.getLiteralLexicalForm())
-                : OntologyTerm.typedLiteral(node.getLiteralLexicalForm(), datatype);
     }
 
     private String statementKey(OntologyStatement statement) {
