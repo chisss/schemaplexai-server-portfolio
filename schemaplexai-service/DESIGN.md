@@ -10,6 +10,8 @@ Jena/TDB2 只存在于 `semantic.infrastructure.jena`。共享 Dataset 由 `Sema
 
 语义模型与版本是独立聚合。聚合自身执行状态转换和 revision 校验，application 只编排当前租户上下文与仓储端口。数据库适配器的查询必须显式带 `tenant_id`；更新必须同时匹配 `tenant_id + id + revision`。数据库组合外键保证版本、映射和活动版本不能跨租户关联。
 
+本体图编辑采用 `OntologyStorePort` 的结构化契约：调用方提供模型和版本标识及三元组，application 从 `SecurityUtil` 取得租户并读取版本聚合，只有 `DRAFT`/`INVALID` 可写；Jena 适配器根据服务端 `SemanticGraphIriFactory` 生成 asserted 图。读取同样先解析租户版本，再以受限 `GraphQuery` 返回分页邻域，默认不返回页外资源边，避免前端拿到未加载节点。
+
 Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生命周期会话。关系型和 ClickHouse 适配器只执行内置只读元数据 SQL，并再次经过 `SqlReadOnlyGuard`；MongoDB 只允许集合、结构、索引三类白名单操作。适配器不会把样例值写入领域对象、快照或 API 响应。
 
 `SchemaIntrospectorPort` 接收纯领域值对象 `SchemaScanScope`，数据库差异留在 infrastructure 策略中。快照先规范化排序再计算 SHA-256 fingerprint；`tenantId + sourceId + fingerprint` 唯一约束和重复键回读共同保证并发幂等。
@@ -23,6 +25,8 @@ Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生�
 - Schema 扫描 HTTP 端点与语义目录细粒度权限码由后续接口切片统一补齐；
 - 当前 Schema 扫描为同步调用，超大库的异步任务、超时和进度查询在容量测试后增加；
 - `SemanticDatasetManager` 当前按单 JVM 单写入者部署，不能让多个 Pod 共享同一 TDB2 目录。
+- 图查询当前为受限邻域读取，适配器会将 asserted 图 materialize 到 JVM 后筛选；生产大图需在 Query IR 切片改成服务端 SPARQL 分页和查询超时。
+- `maxAssertedTriples`、`maxGraphNodes` 是硬配额，超过配额返回参数错误；SHACL 校验和 OWL 2 RL 推理尚未接入图写入事务。
 
 ## 变更历史
 
@@ -41,3 +45,7 @@ Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生�
 ### 2026-09-16 - 多数据库 Schema 快照
 
 增加 PostgreSQL、MySQL、ClickHouse 和 MongoDB 扫描策略、规范化 fingerprint、租户限定快照仓储及扫描历史应用接口。MongoDB 快照只保存类型分布，不保存采样值。
+
+### 2026-09-17 - 本体图编辑与邻域读取
+
+增加结构化本体图领域模型、租户限定的 Jena asserted 图替换、focus/keyword/depth 邻域查询、分页节点配额，以及 application 层版本状态和租户校验。补充真实 TDB2 临时目录下的跨租户、标签、深度和页内边测试。
