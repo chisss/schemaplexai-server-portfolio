@@ -18,6 +18,8 @@
 - 租户 Dataset View 只暴露当前模型版本的业务图，并禁止写事务和底层解包。
 - `OntologyStorePort` 只接受结构化三元组；`OntologyGraphApplicationService` 在写入前按当前租户查询版本，并拒绝已发布/归档版本。
 - 邻域查询使用 focus、keyword、depth、page、size 参数，节点页大小受 `maxGraphNodes`（默认 500）限制，关系边只返回页内两端均可见的边。
+- `SemanticPublishApplicationService` 使用 revision 乐观锁串联版本校验、SHACL、推理和活动版本切换；客户端只能提交结构化 shape 三元组，不能提交规则脚本或原始 SPARQL。
+- 发布只物化子类、子属性、domain、range、等价类和等价属性白名单规则；推理结果受 `maxInferredTriples` 硬配额约束。
 
 语义控制面位于 `com.schemaplexai.service.semantic`：
 
@@ -34,6 +36,6 @@ Schema 快照链路复用租户数据库 MCP 数据源：
 - 规范化结构排序后计算 SHA-256 fingerprint，相同租户、数据源和 fingerprint 幂等复用；
 - `SchemaScanApplicationService` 提供扫描和快照历史应用接口，HTTP 映射由后续接口切片接入。
 
-语义模型 Controller、SHACL、发布编排和 Query IR 按后端设计文档继续接入。当前图端口不接受客户端 graph IRI 或原始 SPARQL。
+语义模型 Controller 和 Query IR 按后端设计文档继续接入。当前图端口不接受客户端 graph IRI 或原始 SPARQL。
 
 详细方案见工作区的 [后端语义查询技术文档](../../document/tech/backend/07-语义数据查询与本体引擎技术文档.md)。
