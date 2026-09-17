@@ -13,12 +13,12 @@ public class SemanticGraphIriFactory implements SemanticGraphLocator {
     private static final Pattern SAFE_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,127}");
 
     public GraphSet create(String tenantId, String modelId, long version) {
-        validateId(tenantId, "tenantId");
-        validateId(modelId, "modelId");
+        String normalizedTenantId = normalizeId(tenantId, "tenantId");
+        String normalizedModelId = normalizeId(modelId, "modelId");
         if (version < 1) {
             throw new IllegalArgumentException("version must be positive");
         }
-        String prefix = "urn:spx:tenant:" + tenantId + ":semantic:" + modelId + ":v:" + version;
+        String prefix = "urn:spx:tenant:" + normalizedTenantId + ":semantic:" + normalizedModelId + ":v:" + version;
         return new GraphSet(prefix);
     }
 
@@ -27,10 +27,13 @@ public class SemanticGraphIriFactory implements SemanticGraphLocator {
         return create(tenantId, modelId, version).asserted();
     }
 
-    private static void validateId(String value, String name) {
-        if (!StringUtils.hasText(value) || !SAFE_ID.matcher(value).matches()) {
+    static String normalizeId(String value, String name) {
+        String normalized = value == null ? null : value.trim();
+        if (!StringUtils.hasText(normalized) || !normalized.equals(value)
+                || !SAFE_ID.matcher(normalized).matches()) {
             throw new IllegalArgumentException(name + " contains unsupported characters");
         }
+        return normalized;
     }
 
     public static final class GraphSet {
@@ -54,8 +57,7 @@ public class SemanticGraphIriFactory implements SemanticGraphLocator {
         }
 
         public String temporary(String operationId) {
-            validateId(operationId, "operationId");
-            return prefix + ":temporary:" + operationId;
+            return prefix + ":temporary:" + normalizeId(operationId, "operationId");
         }
     }
 }
