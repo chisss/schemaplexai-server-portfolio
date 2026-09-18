@@ -186,7 +186,9 @@ public enum ResultCode {
     SCHEMA_SOURCE_UNSUPPORTED(93007, "不支持的数据源 Schema 类型"),
     SCHEMA_SCAN_FAILED(93008, "Schema 扫描失败"),
     SCHEMA_SNAPSHOT_NOT_FOUND(93009, "Schema 快照不存在"),
-    SEMANTIC_NODE_NOT_FOUND(93010, "语义节点不存在");
+    SEMANTIC_NODE_NOT_FOUND(93010, "语义节点不存在"),
+    SEMANTIC_QUERY_SOURCE_UNAVAILABLE(93011, "语义查询数据源不可用"),
+    SEMANTIC_QUERY_NOT_INTERPRETABLE(93012, "自然语言问题无法解释");
 
     private final int code;
     private final String message;
