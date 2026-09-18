@@ -228,6 +228,14 @@
             </dependency>
 
             <!-- Apache Jena 语义存储与 SHACL -->
+            <!-- Jena BOM 仍声明 Spring 5，必须先锁定 Boot 3 对应的 Spring 6。 -->
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-framework-bom</artifactId>
+                <version>${spring-framework.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.apache.jena</groupId>
                 <artifactId>jena-bom</artifactId>

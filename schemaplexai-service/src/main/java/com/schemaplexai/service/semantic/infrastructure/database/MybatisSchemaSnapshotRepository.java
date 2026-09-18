@@ -39,6 +39,11 @@ public class MybatisSchemaSnapshotRepository implements SchemaSnapshotRepository
     }
 
     @Override
+    public Optional<SchemaSnapshot> findByTenantAndId(String tenantId, String snapshotId) {
+        return Optional.ofNullable(mapper.selectOwned(tenantId, snapshotId)).map(this::toDomain);
+    }
+
+    @Override
     public List<SchemaSnapshot> findAllBySource(String tenantId, String sourceId) {
         return mapper.selectAllBySource(tenantId, sourceId).stream().map(this::toDomain).toList();
     }

@@ -30,7 +30,7 @@ class SemanticVersionMapperTest {
         assertThat(sql(lookup.getAnnotation(Select.class).value()))
                 .contains("tenant_id", "model_id", "versionId", "deleted = 0");
         assertThat(sql(update.getAnnotation(Update.class).value()))
-                .contains("tenant_id", "model_id", "expectedRevision", "revision =", "deleted = 0");
+                .contains("tenant_id", "model_id", "source_snapshot_id", "expectedRevision", "revision =", "deleted = 0");
         assertThat(sql(nextVersion.getAnnotation(Select.class).value()))
                 .contains("locked_model", "tenant_id", "modelId", "FOR UPDATE");
     }

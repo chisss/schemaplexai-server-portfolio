@@ -65,6 +65,7 @@ class OntologyGraphApplicationServiceTest {
         SemanticVersion version = SemanticVersion.restore(
                 "v1", "tenant-a", "model-1", 1,
                 "urn:spx:tenant:tenant-a:semantic:model-1:v:1:asserted",
+                null,
                 SemanticVersionStatus.PUBLISHED, "checksum", 1, null, LocalDateTime.now(), 1);
         when(versionRepository.findByTenantModelAndId("tenant-a", "model-1", "v1"))
                 .thenReturn(Optional.of(version));

@@ -12,7 +12,7 @@ Jena/TDB2 只存在于 `semantic.infrastructure.jena`。共享 Dataset 由 `Sema
 
 本体图编辑采用 `OntologyStorePort` 的结构化契约：调用方提供模型和版本标识及三元组，application 从 `SecurityUtil` 取得租户并读取版本聚合，只有 `DRAFT`/`INVALID` 可写；Jena 适配器根据服务端 `SemanticGraphIriFactory` 生成 asserted 图。读取同样先解析租户版本，再以受限 `GraphQuery` 返回分页邻域，默认不返回页外资源边，避免前端拿到未加载节点。
 
-发布由 `SemanticPublishPort` 隔离 Jena 类型。适配器把 asserted 和 shapes 写入 operationId 隔离的临时图，执行 SHACL 后仅物化子类、子属性、domain、range、等价类和等价属性规则；每条推导写入前检查配额。checksum 对 asserted、shapes、inferred 三类排序后的 N-Triples 表示计算 SHA-256。application 先用 version revision 进入 `VALIDATING`，校验失败写 `INVALID`；校验成功后在同一数据库事务中发布版本并激活模型，再提交临时 shapes/inferred 图。revision 冲突会丢弃临时图，活动版本不变。
+发布由 `SemanticPublishPort` 隔离 Jena 类型。适配器把 asserted 和服务端基线 shapes 写入 operationId 隔离的临时图，执行 SHACL 后仅物化子类、子属性、domain、range、等价类和等价属性规则；每条推导写入前检查配额。HTTP API 不接收租户自定义 shapes，避免第一期开放可执行 SHACL 扩展。checksum 对 asserted、shapes、inferred 三类排序后的 N-Triples 表示计算 SHA-256。application 先用 version revision 进入 `VALIDATING`，校验失败写 `INVALID`；校验成功后在同一数据库事务中发布版本并激活模型，再提交临时 shapes/inferred 图。revision 冲突会丢弃临时图，活动版本不变。
 
 Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生命周期会话。关系型和 ClickHouse 适配器只执行内置只读元数据 SQL，并再次经过 `SqlReadOnlyGuard`；MongoDB 只允许集合、结构、索引三类白名单操作。适配器不会把样例值写入领域对象、快照或 API 响应。
 
@@ -31,6 +31,7 @@ Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生�
 - `maxAssertedTriples`、`maxInferredTriples`、`maxGraphNodes` 是硬配额，超过配额会中止当前 TDB2 写事务。
 - SHACL 已在发布链路启用，但 Jena 校验当前没有独立墙钟超时；上线前需结合容量测试增加可中断的执行器隔离。
 - 推理采用明确的 RDFS/OWL 等价关系白名单，不是完整 OWL 2 DL，也不执行租户自定义规则。
+- PostgreSQL 元数据与 TDB2 图存储无法组成单一 ACID 事务。节点编辑先通过 revision 锁定数据库版本，再写 TDB2；Jena 写失败会触发数据库事务回滚，但 Jena 成功后数据库提交失败仍可能留下已更新图。Phase 2 需以操作日志和补偿任务收敛该极低概率窗口。
 
 ## 变更历史
 
@@ -57,3 +58,7 @@ Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生�
 ### 2026-09-17 - SHACL 校验与版本发布
 
 增加 operationId 临时图、SHACL 报告、白名单规则物化、推理配额、稳定 checksum，以及 version/model revision 驱动的发布与活动版本切换。失败路径清理临时图，且不会改变活动版本。
+
+### 2026-09-18 - Phase 1 HTTP 集成验收
+
+增加模型、版本、Schema 扫描、本体图编辑、校验和发布 REST 适配层。版本可绑定当前租户 Schema 快照；HTTP 发布固定使用服务端基线 shapes，并记录 PostgreSQL/TDB2 双存储一致性边界。

@@ -8,9 +8,11 @@ import com.schemaplexai.service.semantic.domain.model.SemanticModel;
 import com.schemaplexai.service.semantic.domain.model.SemanticVersion;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyGraphRef;
 import com.schemaplexai.service.semantic.domain.model.ontology.PublishPreparation;
+import com.schemaplexai.service.semantic.domain.model.ontology.SemanticValidation;
 import com.schemaplexai.service.semantic.domain.port.SemanticPublishPort;
 import com.schemaplexai.service.semantic.domain.repository.SemanticModelRepository;
 import com.schemaplexai.service.semantic.domain.repository.SemanticVersionRepository;
+import com.schemaplexai.service.semantic.domain.service.BaselineSemanticShapes;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,6 +28,45 @@ public class SemanticPublishApplicationService {
     private final SemanticModelRepository modelRepository;
     private final SemanticVersionRepository versionRepository;
     private final SemanticPublishPort publishPort;
+    private final BaselineSemanticShapes baselineShapes = new BaselineSemanticShapes();
+
+    public SemanticValidation validate(String versionId, long expectedRevision) {
+        SemanticVersion version = requireVersion(versionId);
+        if (!version.isEditable()) {
+            throw new BusinessException(ResultCode.SEMANTIC_VERSION_STATUS_INVALID);
+        }
+        if (version.getRevision() != expectedRevision) {
+            throw new BusinessException(ResultCode.SEMANTIC_REVISION_CONFLICT);
+        }
+        PublishPreparation preparation = publishPort.prepare(
+                new OntologyGraphRef(
+                        version.getTenantId(),
+                        version.getModelId(),
+                        version.getVersionNo()),
+                baselineShapes.statements(),
+                UUID.randomUUID().toString());
+        try {
+            return new SemanticValidation(
+                    preparation.conforms(),
+                    preparation.validationReport(),
+                    LocalDateTime.now());
+        } finally {
+            publishPort.discard(preparation);
+        }
+    }
+
+    public SemanticVersion publish(String versionId, long expectedRevision) {
+        SemanticVersion version = requireVersion(versionId);
+        SemanticModel model = modelRepository.findByTenantAndId(version.getTenantId(), version.getModelId())
+                .orElseThrow(() -> new BusinessException(ResultCode.SEMANTIC_MODEL_NOT_FOUND));
+        return publish(
+                model.getId(),
+                version.getId(),
+                new PublishSemanticVersionCommand(
+                        expectedRevision,
+                        model.getRevision(),
+                        baselineShapes.statements()));
+    }
 
     @Transactional(rollbackFor = Exception.class)
     public SemanticVersion publish(
@@ -129,5 +170,10 @@ public class SemanticPublishApplicationService {
             throw new BusinessException(ResultCode.FORBIDDEN, "租户上下文缺失");
         }
         return tenantId.trim();
+    }
+
+    private SemanticVersion requireVersion(String versionId) {
+        return versionRepository.findByTenantAndId(requireTenantId(), versionId)
+                .orElseThrow(() -> new BusinessException(ResultCode.SEMANTIC_VERSION_NOT_FOUND));
     }
 }

@@ -29,6 +29,17 @@ public interface SemanticVersionMapper extends BaseMapper<SemanticVersionEntity>
     @Select("""
             SELECT * FROM sf_semantic_version
             WHERE tenant_id = CAST(#{tenantId} AS UUID)
+              AND id = CAST(#{versionId} AS UUID)
+              AND deleted = 0
+            LIMIT 1
+            """)
+    SemanticVersionEntity selectOwnedById(
+            @Param("tenantId") String tenantId,
+            @Param("versionId") String versionId);
+
+    @Select("""
+            SELECT * FROM sf_semantic_version
+            WHERE tenant_id = CAST(#{tenantId} AS UUID)
               AND model_id = CAST(#{modelId} AS UUID)
               AND deleted = 0
             ORDER BY version_no DESC
@@ -59,6 +70,7 @@ public interface SemanticVersionMapper extends BaseMapper<SemanticVersionEntity>
     @Update("""
             UPDATE sf_semantic_version
             SET status = #{entity.status},
+                source_snapshot_id = CAST(#{entity.sourceSnapshotId} AS UUID),
                 checksum = #{entity.checksum},
                 triple_count = #{entity.tripleCount},
                 validation_report = #{entity.validationReport},
