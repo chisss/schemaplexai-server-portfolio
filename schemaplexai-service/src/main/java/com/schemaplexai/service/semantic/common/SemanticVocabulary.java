@@ -26,6 +26,11 @@ public final class SemanticVocabulary {
     public static final String PHYSICAL_OBJECT = "urn:schemaplexai:semantic:physicalObject";
     public static final String PHYSICAL_FIELD = "urn:schemaplexai:semantic:physicalField";
     public static final String MAPPING_KIND = "urn:schemaplexai:semantic:mappingKind";
+    public static final String AGGREGATION = "urn:schemaplexai:semantic:aggregation";
+    public static final String METRIC_CLASS = "urn:schemaplexai:semantic:Metric";
+    public static final String DIMENSION_CLASS = "urn:schemaplexai:semantic:Dimension";
+    public static final String FILTER_CLASS = "urn:schemaplexai:semantic:Filter";
+    public static final String TIME_CLASS = "urn:schemaplexai:semantic:TimeAttribute";
 
     private SemanticVocabulary() {
     }
