@@ -15,6 +15,17 @@ public interface SchemaSnapshotMapper extends BaseMapper<SchemaSnapshotEntity> {
     @Select("""
             SELECT * FROM sf_schema_snapshot
             WHERE tenant_id = CAST(#{tenantId} AS UUID)
+              AND id = CAST(#{snapshotId} AS UUID)
+              AND deleted = 0
+            LIMIT 1
+            """)
+    SchemaSnapshotEntity selectOwned(
+            @Param("tenantId") String tenantId,
+            @Param("snapshotId") String snapshotId);
+
+    @Select("""
+            SELECT * FROM sf_schema_snapshot
+            WHERE tenant_id = CAST(#{tenantId} AS UUID)
               AND source_id = CAST(#{sourceId} AS UUID)
               AND fingerprint = #{fingerprint}
               AND deleted = 0

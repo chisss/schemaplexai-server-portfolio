@@ -12,5 +12,7 @@ public interface SchemaSnapshotRepository {
 
     Optional<SchemaSnapshot> findByFingerprint(String tenantId, String sourceId, String fingerprint);
 
+    Optional<SchemaSnapshot> findByTenantAndId(String tenantId, String snapshotId);
+
     List<SchemaSnapshot> findAllBySource(String tenantId, String sourceId);
 }

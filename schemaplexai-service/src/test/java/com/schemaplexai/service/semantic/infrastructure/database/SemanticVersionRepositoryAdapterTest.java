@@ -20,6 +20,7 @@ class SemanticVersionRepositoryAdapterTest {
         entity.setModelId("model-1");
         entity.setVersionNo(1);
         entity.setGraphIri("urn:spx:tenant:tenant-a:semantic:model-1:v:1:asserted");
+        entity.setSourceSnapshotId("79d58fb6-8df4-4aec-8939-abac643096fb");
         entity.setStatus("draft");
         entity.setTripleCount(0L);
         entity.setRevision(0L);
@@ -29,6 +30,8 @@ class SemanticVersionRepositoryAdapterTest {
         var result = repository.findByTenantModelAndId("tenant-a", "model-1", "version-1");
 
         assertThat(result).isPresent();
+        assertThat(result.orElseThrow().getSourceSnapshotId())
+                .isEqualTo("79d58fb6-8df4-4aec-8939-abac643096fb");
         verify(mapper).selectOwned("tenant-a", "model-1", "version-1");
     }
 }

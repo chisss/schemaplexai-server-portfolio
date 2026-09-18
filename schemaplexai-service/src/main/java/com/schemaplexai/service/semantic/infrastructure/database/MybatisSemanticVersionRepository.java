@@ -38,6 +38,11 @@ public class MybatisSemanticVersionRepository implements SemanticVersionReposito
     }
 
     @Override
+    public Optional<SemanticVersion> findByTenantAndId(String tenantId, String versionId) {
+        return Optional.ofNullable(mapper.selectOwnedById(tenantId, versionId)).map(this::toDomain);
+    }
+
+    @Override
     public List<SemanticVersion> findAllByTenantAndModel(String tenantId, String modelId) {
         return mapper.selectAllOwned(tenantId, modelId).stream().map(this::toDomain).toList();
     }
@@ -54,6 +59,7 @@ public class MybatisSemanticVersionRepository implements SemanticVersionReposito
         entity.setModelId(version.getModelId());
         entity.setVersionNo(version.getVersionNo());
         entity.setGraphIri(version.getGraphIri());
+        entity.setSourceSnapshotId(version.getSourceSnapshotId());
         entity.setStatus(version.getStatus().name().toLowerCase(Locale.ROOT));
         entity.setChecksum(version.getChecksum());
         entity.setTripleCount(version.getTripleCount());
@@ -71,6 +77,7 @@ public class MybatisSemanticVersionRepository implements SemanticVersionReposito
                 entity.getModelId(),
                 entity.getVersionNo(),
                 entity.getGraphIri(),
+                entity.getSourceSnapshotId(),
                 SemanticVersionStatus.valueOf(entity.getStatus().toUpperCase(Locale.ROOT)),
                 entity.getChecksum(),
                 entity.getTripleCount(),

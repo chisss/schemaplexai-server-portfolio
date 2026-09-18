@@ -16,6 +16,7 @@ public class SemanticVersionEntity extends BaseEntity {
     private String modelId;
     private Integer versionNo;
     private String graphIri;
+    private String sourceSnapshotId;
     private String status;
     private String checksum;
     private Long tripleCount;

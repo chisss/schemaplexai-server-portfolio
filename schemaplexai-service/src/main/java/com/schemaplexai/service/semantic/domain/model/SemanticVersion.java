@@ -15,6 +15,7 @@ public final class SemanticVersion {
     private final String modelId;
     private final int versionNo;
     private final String graphIri;
+    private final String sourceSnapshotId;
     private SemanticVersionStatus status;
     private String checksum;
     private long tripleCount;
@@ -28,6 +29,7 @@ public final class SemanticVersion {
             String modelId,
             int versionNo,
             String graphIri,
+            String sourceSnapshotId,
             SemanticVersionStatus status,
             String checksum,
             long tripleCount,
@@ -42,6 +44,7 @@ public final class SemanticVersion {
         }
         this.versionNo = versionNo;
         this.graphIri = requireText(graphIri, "graphIri");
+        this.sourceSnapshotId = normalizeOptional(sourceSnapshotId);
         this.status = Objects.requireNonNull(status, "status is required");
         this.checksum = normalizeOptional(checksum);
         if (tripleCount < 0) {
@@ -62,12 +65,23 @@ public final class SemanticVersion {
             String modelId,
             int versionNo,
             String graphIri) {
+        return createDraft(id, tenantId, modelId, versionNo, graphIri, null);
+    }
+
+    public static SemanticVersion createDraft(
+            String id,
+            String tenantId,
+            String modelId,
+            int versionNo,
+            String graphIri,
+            String sourceSnapshotId) {
         return new SemanticVersion(
                 id,
                 tenantId,
                 modelId,
                 versionNo,
                 graphIri,
+                sourceSnapshotId,
                 SemanticVersionStatus.DRAFT,
                 null,
                 0,
@@ -82,6 +96,7 @@ public final class SemanticVersion {
             String modelId,
             int versionNo,
             String graphIri,
+            String sourceSnapshotId,
             SemanticVersionStatus status,
             String checksum,
             long tripleCount,
@@ -94,6 +109,7 @@ public final class SemanticVersion {
                 modelId,
                 versionNo,
                 graphIri,
+                sourceSnapshotId,
                 status,
                 checksum,
                 tripleCount,
@@ -104,6 +120,18 @@ public final class SemanticVersion {
 
     public boolean isEditable() {
         return status == SemanticVersionStatus.DRAFT || status == SemanticVersionStatus.INVALID;
+    }
+
+    public void recordDraftEdit(long expectedRevision) {
+        requireRevision(expectedRevision);
+        if (!isEditable()) {
+            throw new IllegalStateException("published semantic version cannot be edited");
+        }
+        status = SemanticVersionStatus.DRAFT;
+        validationReport = null;
+        checksum = null;
+        tripleCount = 0;
+        revision++;
     }
 
     public void startValidation(long expectedRevision) {

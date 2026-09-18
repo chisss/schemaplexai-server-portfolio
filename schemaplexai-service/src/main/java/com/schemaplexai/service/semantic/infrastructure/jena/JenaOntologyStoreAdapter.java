@@ -5,6 +5,7 @@ import com.schemaplexai.service.semantic.domain.model.ontology.OntologyEdge;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyGraph;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyGraphRef;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyNode;
+import com.schemaplexai.service.semantic.domain.model.ontology.OntologyNodeUpdate;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyStatement;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologySubgraph;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyTerm;
@@ -28,12 +29,36 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.MAPPING_KIND;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.MAPPING_SOURCE;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.NAME;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.PHYSICAL_FIELD;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.PHYSICAL_OBJECT;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.REQUIRED;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.RDFS_COMMENT;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.RDFS_RANGE;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.SKOS_ALT_LABEL;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.XSD_BOOLEAN;
+
 /** Jena/TDB2 本体图适配器，提供结构化写入和受限邻域读取。 */
 @Component
 public class JenaOntologyStoreAdapter implements OntologyStorePort {
 
     private static final String RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label";
     private static final String SKOS_PREF_LABEL = "http://www.w3.org/2004/02/skos/core#prefLabel";
+    private static final String XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema#";
+    private static final Set<String> EDITABLE_PREDICATES = Set.of(
+            NAME,
+            RDFS_LABEL,
+            SKOS_PREF_LABEL,
+            RDFS_COMMENT,
+            SKOS_ALT_LABEL,
+            RDFS_RANGE,
+            REQUIRED,
+            MAPPING_SOURCE,
+            PHYSICAL_OBJECT,
+            PHYSICAL_FIELD,
+            MAPPING_KIND);
 
     private final SemanticDatasetManager datasetManager;
     private final TenantDatasetViewFactory viewFactory;
@@ -70,6 +95,42 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
             dataset.deleteAny(graphNode, Node.ANY, Node.ANY, Node.ANY);
             for (OntologyStatement statement : graph.statements()) {
                 dataset.add(statementMapper.toQuad(graphNode, statement));
+            }
+        });
+    }
+
+    @Override
+    public void updateNode(OntologyGraphRef ref, String nodeIri, OntologyNodeUpdate update) {
+        if (ref == null || update == null) {
+            throw new IllegalArgumentException("ref and update are required");
+        }
+        Node subject = absoluteIri(nodeIri, "nodeIri");
+        SemanticGraphIriFactory.GraphSet graphSet = graphIriFactory.create(
+                ref.tenantId(), ref.modelId(), ref.version());
+        Node graphNode = NodeFactory.createURI(graphSet.asserted());
+        datasetManager.write(dataset -> {
+            if (!dataset.find(graphNode, subject, Node.ANY, Node.ANY).hasNext()) {
+                throw new IllegalArgumentException("ontology node not found");
+            }
+            EDITABLE_PREDICATES.forEach(predicate -> dataset.deleteAny(
+                    graphNode, subject, NodeFactory.createURI(predicate), Node.ANY));
+            addLiteral(dataset, graphNode, subject, NAME, update.name(), null);
+            addLiteral(dataset, graphNode, subject, RDFS_LABEL,
+                    update.label() == null ? update.name() : update.label(), null);
+            addOptionalLiteral(dataset, graphNode, subject, RDFS_COMMENT, update.description());
+            update.synonyms().forEach(value -> addLiteral(
+                    dataset, graphNode, subject, SKOS_ALT_LABEL, value, null));
+            if (update.dataType() != null) {
+                dataset.add(new Quad(graphNode, subject, NodeFactory.createURI(RDFS_RANGE),
+                        absoluteIri(normalizeDatatype(update.dataType()), "dataType")));
+            }
+            if (update.required() != null) {
+                addLiteral(dataset, graphNode, subject, REQUIRED,
+                        update.required().toString(), XSD_BOOLEAN);
+            }
+            addMapping(dataset, graphNode, subject, update.mapping());
+            if (countGraph(dataset, graphNode) > properties.getMaxAssertedTriples()) {
+                throw new IllegalArgumentException("asserted graph exceeds configured triple quota");
             }
         });
     }
@@ -202,6 +263,81 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
     private String statementKey(OntologyStatement statement) {
         return statement.subjectIri() + "|" + statement.predicateIri() + "|"
                 + statement.object().kind() + "|" + statement.object().value();
+    }
+
+    private void addMapping(
+            DatasetGraph dataset,
+            Node graphNode,
+            Node subject,
+            OntologyNodeUpdate.PhysicalMapping mapping) {
+        if (mapping == null) {
+            return;
+        }
+        addLiteral(dataset, graphNode, subject, MAPPING_SOURCE, mapping.sourceId(), null);
+        addLiteral(dataset, graphNode, subject, PHYSICAL_OBJECT, mapping.physicalObject(), null);
+        addOptionalLiteral(dataset, graphNode, subject, PHYSICAL_FIELD, mapping.physicalField());
+        addLiteral(dataset, graphNode, subject, MAPPING_KIND, mapping.mappingKind(), null);
+    }
+
+    private void addOptionalLiteral(
+            DatasetGraph dataset,
+            Node graphNode,
+            Node subject,
+            String predicate,
+            String value) {
+        if (value != null) {
+            addLiteral(dataset, graphNode, subject, predicate, value, null);
+        }
+    }
+
+    private void addLiteral(
+            DatasetGraph dataset,
+            Node graphNode,
+            Node subject,
+            String predicate,
+            String value,
+            String datatype) {
+        Node object = datatype == null
+                ? NodeFactory.createLiteralString(value)
+                : NodeFactory.createLiteralDT(value, org.apache.jena.datatypes.TypeMapper.getInstance()
+                        .getSafeTypeByName(datatype));
+        dataset.add(new Quad(graphNode, subject, NodeFactory.createURI(predicate), object));
+    }
+
+    private long countGraph(DatasetGraph dataset, Node graphNode) {
+        long count = 0;
+        Iterator<Quad> iterator = dataset.find(graphNode, Node.ANY, Node.ANY, Node.ANY);
+        while (iterator.hasNext()) {
+            iterator.next();
+            count++;
+        }
+        return count;
+    }
+
+    private Node absoluteIri(String value, String field) {
+        if (value == null || value.isBlank() || !(value.startsWith("urn:")
+                || value.startsWith("http://") || value.startsWith("https://"))) {
+            throw new IllegalArgumentException(field + " must be an absolute IRI");
+        }
+        return NodeFactory.createURI(value.trim());
+    }
+
+    private String normalizeDatatype(String dataType) {
+        String normalized = dataType.trim();
+        if (normalized.startsWith("urn:") || normalized.startsWith("http://")
+                || normalized.startsWith("https://")) {
+            return normalized;
+        }
+        return XSD_NAMESPACE + switch (normalized.toLowerCase(Locale.ROOT)) {
+            case "int", "integer" -> "integer";
+            case "long", "bigint" -> "long";
+            case "decimal", "number", "numeric" -> "decimal";
+            case "double", "float" -> "double";
+            case "bool", "boolean" -> "boolean";
+            case "date" -> "date";
+            case "datetime", "timestamp" -> "dateTime";
+            default -> "string";
+        };
     }
 
     private record NodeDistance(String iri, int distance) {

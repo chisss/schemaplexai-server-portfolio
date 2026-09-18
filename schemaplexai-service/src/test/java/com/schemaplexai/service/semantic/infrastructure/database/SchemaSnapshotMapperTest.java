@@ -16,6 +16,14 @@ class SchemaSnapshotMapperTest {
         assertTenantScoped("selectAllBySource", String.class, String.class);
     }
 
+    @Test
+    void snapshotLookupByIdRequiresTenant() throws Exception {
+        Method method = SchemaSnapshotMapper.class.getMethod("selectOwned", String.class, String.class);
+        String sql = method.getAnnotation(Select.class).value()[0];
+
+        assertThat(sql).contains("tenant_id", "#{tenantId}", "id", "#{snapshotId}", "deleted = 0");
+    }
+
     private void assertTenantScoped(String methodName, Class<?>... parameterTypes) throws Exception {
         Method method = SchemaSnapshotMapper.class.getMethod(methodName, parameterTypes);
         String sql = method.getAnnotation(Select.class).value()[0];
