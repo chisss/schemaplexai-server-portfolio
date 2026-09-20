@@ -272,40 +272,63 @@ public final class MongoAggregationSemanticQueryExecutorAdapter implements Seman
     }
 
     private List<Map<String, Object>> extractRows(Map<String, Object> payload) {
-        JsonNode node = objectMapper.valueToTree(payload);
-        for (String key : List.of("rows", "data", "results", "documents", "result")) {
-            JsonNode candidate = findField(node, key);
-            if (candidate != null && candidate.isArray()) {
-                return toRows(candidate);
-            }
-        }
-        return node.isArray() ? toRows(node) : List.of();
+        return extractRows(objectMapper.valueToTree(payload), 0);
     }
 
-    private JsonNode findField(JsonNode node, String key) {
-        if (!node.isObject()) {
-            return null;
+    private List<Map<String, Object>> extractRows(JsonNode node, int depth) {
+        if (node == null || depth > MAX_DEPTH) {
+            return List.of();
         }
-        var value = node.get(key);
-        if (value != null) {
-            return value;
-        }
-        var content = node.get("content");
-        if (content != null && content.isTextual()) {
+        if (node.isTextual()) {
             try {
-                return findField(objectMapper.readTree(content.textValue()), key);
+                return extractRows(objectMapper.readTree(node.textValue()), depth + 1);
             } catch (Exception ignored) {
-                return null;
+                return List.of();
             }
         }
-        return null;
+        if (node.isArray()) {
+            List<Map<String, Object>> rows = toRows(node);
+            if (!rows.isEmpty()) {
+                return rows;
+            }
+            for (JsonNode child : node) {
+                List<Map<String, Object>> nested = extractRows(child, depth + 1);
+                if (!nested.isEmpty()) {
+                    return nested;
+                }
+            }
+            return List.of();
+        }
+        if (!node.isObject()) {
+            return List.of();
+        }
+        for (String key : List.of("rows", "data", "results", "documents", "result", "content")) {
+            JsonNode candidate = node.get(key);
+            if (candidate != null) {
+                List<Map<String, Object>> nested = extractRows(candidate, depth + 1);
+                if (!nested.isEmpty()) {
+                    return nested;
+                }
+            }
+        }
+        return List.of();
     }
 
     private List<Map<String, Object>> toRows(JsonNode array) {
         List<Map<String, Object>> rows = new ArrayList<>();
         array.forEach(item -> {
             if (item.isObject()) {
-                rows.add(objectMapper.convertValue(item, new TypeReference<>() { }));
+                JsonNode type = item.get("type");
+                JsonNode text = item.get("text");
+                if (type != null && text != null && "text".equalsIgnoreCase(type.asText())) {
+                    try {
+                        rows.addAll(extractRows(objectMapper.readTree(text.asText()), 1));
+                    } catch (Exception ignored) {
+                        // MCP 文本载荷无法解析时不把协议包装字段当作业务行返回。
+                    }
+                } else {
+                    rows.add(objectMapper.convertValue(item, new TypeReference<>() { }));
+                }
             }
         });
         return rows;
