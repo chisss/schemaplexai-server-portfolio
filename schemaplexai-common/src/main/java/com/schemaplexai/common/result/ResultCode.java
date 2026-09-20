@@ -188,7 +188,9 @@ public enum ResultCode {
     SCHEMA_SNAPSHOT_NOT_FOUND(93009, "Schema 快照不存在"),
     SEMANTIC_NODE_NOT_FOUND(93010, "语义节点不存在"),
     SEMANTIC_QUERY_SOURCE_UNAVAILABLE(93011, "语义查询数据源不可用"),
-    SEMANTIC_QUERY_NOT_INTERPRETABLE(93012, "自然语言问题无法解释");
+    SEMANTIC_QUERY_NOT_INTERPRETABLE(93012, "自然语言问题无法解释"),
+    SEMANTIC_QUERY_PLAN_CHANGED(93013, "查询计划已变化，请重新确认"),
+    SEMANTIC_QUERY_EXECUTION_UNAVAILABLE(93014, "语义查询执行能力不可用");
 
     private final int code;
     private final String message;
