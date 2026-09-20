@@ -135,7 +135,9 @@ public final class SemanticQueryInterpretationService {
             return null;
         }
         int days = Integer.parseInt(matcher.group(1));
-        return new QueryTimeRange(timeCandidates.get(0).iri(), days, null, null);
+        SemanticQueryCandidate candidate = timeCandidates.get(0);
+        return new QueryTimeRange(
+                candidate.iri(), days, null, null, candidate.physicalObject(), candidate.physicalField());
     }
 
     private String aggregation(SemanticQueryCandidate candidate) {

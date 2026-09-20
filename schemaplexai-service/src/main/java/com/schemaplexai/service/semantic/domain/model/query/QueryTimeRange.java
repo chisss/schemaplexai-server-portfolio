@@ -8,10 +8,18 @@ public record QueryTimeRange(
         String fieldIri,
         Integer relativeDays,
         LocalDate from,
-        LocalDate to) {
+        LocalDate to,
+        String physicalObject,
+        String physicalField) {
+
+    public QueryTimeRange(String fieldIri, Integer relativeDays, LocalDate from, LocalDate to) {
+        this(fieldIri, relativeDays, from, to, null, null);
+    }
 
     public QueryTimeRange {
         fieldIri = Objects.requireNonNull(fieldIri, "fieldIri is required").trim();
+        physicalObject = normalize(physicalObject);
+        physicalField = normalize(physicalField);
         if (relativeDays != null && relativeDays < 1) {
             throw new IllegalArgumentException("relativeDays must be positive");
         }
@@ -21,5 +29,12 @@ public record QueryTimeRange(
         if (from != null && from.isAfter(to)) {
             throw new IllegalArgumentException("from must not be after to");
         }
+        if ((physicalObject == null) != (physicalField == null)) {
+            throw new IllegalArgumentException("physicalObject and physicalField must be provided together");
+        }
+    }
+
+    private static String normalize(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
     }
 }
