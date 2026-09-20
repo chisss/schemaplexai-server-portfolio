@@ -89,6 +89,47 @@ class MongoAggregationSemanticQueryExecutorAdapterTest {
         verify(client, never()).toolsCall(any(), any(), any());
     }
 
+    @Test
+    void negotiatesConfiguredAliasAndStringPipelineFromToolSchema() {
+        SecurityUtil.setCurrentTenantId("tenant-a");
+        McpServer source = source("mongo_aggregate");
+        source.setConnectionConfig(Map.of("mongoAggregationToolName", "mongo_aggregate"));
+        source.setTools(List.of(Map.of(
+                "name", "mongo_aggregate",
+                "inputSchema", Map.of("type", "object", "properties", Map.of(
+                        "collectionName", Map.of("type", "string"),
+                        "aggregation", Map.of("type", "string"),
+                        "maxRows", Map.of("type", "integer"),
+                        "timeoutMs", Map.of("type", "integer"))))));
+        when(mapper.selectOne(any())).thenReturn(source);
+        when(client.toolsCall(eq(source), eq("mongo_aggregate"), any()))
+                .thenReturn(Map.of("rows", List.of(Map.of("metric_1", 7))));
+
+        new MongoAggregationSemanticQueryExecutorAdapter(mapper, client, new ObjectMapper())
+                .execute(plan("[{\"$limit\": 1}]"), new QueryExecutionLimits(10, 4));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> arguments = ArgumentCaptor.forClass(Map.class);
+        verify(client).toolsCall(eq(source), eq("mongo_aggregate"), arguments.capture());
+        assertThat(arguments.getValue()).containsKeys("collectionName", "aggregation", "maxRows", "timeoutMs");
+        assertThat(arguments.getValue().get("aggregation")).isInstanceOf(String.class);
+        assertThat(arguments.getValue().get("aggregation").toString()).contains("$limit");
+    }
+
+    @Test
+    void rejectsConfiguredToolOutsideControlledWhitelist() {
+        SecurityUtil.setCurrentTenantId("tenant-a");
+        McpServer source = source("aggregate");
+        source.setConnectionConfig(Map.of("mongoAggregationToolName", "run arbitrary code"));
+        when(mapper.selectOne(any())).thenReturn(source);
+
+        assertThatThrownBy(() -> new MongoAggregationSemanticQueryExecutorAdapter(mapper, client, new ObjectMapper())
+                .execute(plan("[{\"$limit\": 1}]"), QueryExecutionLimits.defaults()))
+                .isInstanceOf(com.schemaplexai.common.exception.BusinessException.class)
+                .hasMessageContaining("白名单");
+        verify(client, never()).toolsCall(any(), any(), any());
+    }
+
     private McpServer source(String toolName) {
         McpServer source = new McpServer();
         source.setId("source-1");

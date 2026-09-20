@@ -16,7 +16,7 @@ Jena/TDB2 只存在于 `semantic.infrastructure.jena`。共享 Dataset 由 `Sema
 
 Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生命周期会话。关系型和 ClickHouse 适配器只执行内置只读元数据 SQL，并再次经过 `SqlReadOnlyGuard`；MongoDB 只允许集合、结构、索引三类白名单操作。适配器不会把样例值写入领域对象、快照或 API 响应。
 
-语义查询执行通过 `RoutingSemanticQueryExecutorAdapter` 按服务端签名计划路由 SQL 和 MongoDB。Mongo aggregation 只允许单集合、单 pipeline 和受控阶段，pipeline 在 Jackson JSON 树中绑定参数后才传给租户限定的 MCP Server；限制包括 16 个阶段、64KiB、12 层深度和 `QueryExecutionLimits` 的行数/超时。`$out`、`$merge`、脚本、跨集合扩展和搜索扩展均被阻断。Mongo EXPLAIN 只调用显式 explain 工具，工具不可用时返回计划元数据并跳过真实执行。
+语义查询执行通过 `RoutingSemanticQueryExecutorAdapter` 按服务端签名计划路由 SQL 和 MongoDB。Mongo aggregation 只允许单集合、单 pipeline 和受控阶段，pipeline 在 Jackson JSON 树中绑定参数后才传给租户限定的 MCP Server；限制包括 16 个阶段、64KiB、12 层深度和 `QueryExecutionLimits` 的行数/超时。`$out`、`$merge`、脚本、跨集合扩展和搜索扩展均被阻断。Mongo EXPLAIN 只调用显式 explain 工具，工具不可用时返回计划元数据并跳过真实执行。数据源 `connectionConfig` 可通过 `mongoAggregationToolName`/`mongoExplainToolName` 指定白名单别名；适配器依据 MCP `inputSchema.properties` 协商 collection、pipeline、limit、timeout 参数名，并在 schema 要求时把 pipeline 编码为 JSON 字符串。
 
 语义查询审计使用现有 `sf_audit_log` 表，不再以结构化日志作为唯一载体。`MybatisSemanticQueryAuditAdapter` 写入租户、用户、动作、资源、planHash 和 UTC 时间；detail 仅包含 auditId、sourceId、outcome、rowCount、elapsedMs，不写入 SQL、pipeline、参数、结果行或凭据。审计写入仍是同步 fail-closed，写入失败会让调用方感知失败，后续可替换为可靠事件流而不改领域 Port。
 
@@ -35,7 +35,7 @@ Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生�
 - `maxAssertedTriples`、`maxInferredTriples`、`maxGraphNodes` 是硬配额，超过配额会中止当前 TDB2 写事务。
 - SHACL 已在发布链路启用，但 Jena 校验当前没有独立墙钟超时；上线前需结合容量测试增加可中断的执行器隔离。
 - 推理采用明确的 RDFS/OWL 等价关系白名单，不是完整 OWL 2 DL，也不执行租户自定义规则。
-- Mongo aggregation 的 MCP 工具名称和返回包装由数据源实现决定，目前适配器只识别约定的 aggregation/explain 白名单和常见 rows/data/documents/content 载荷；上线前需用真实 Mongo MCP Server 做端到端契约验收。
+- Mongo aggregation 的 MCP 工具名称和返回包装由数据源实现决定，目前适配器只识别受控 aggregation/explain 别名和常见 rows/data/documents/content 载荷；未知工具名会拒绝执行。上线前仍需用真实 Mongo MCP Server 做端到端契约验收。
 - 查询审计当前复用通用审计表，detail 未单独拆列，审计检索依赖 JSON detail；高吞吐场景需评估按事件流异步投递和失败重放。
 - PostgreSQL 元数据与 TDB2 图存储无法组成单一 ACID 事务。节点编辑先通过 revision 锁定数据库版本，再写 TDB2；Jena 写失败会触发数据库事务回滚，但 Jena 成功后数据库提交失败仍可能留下已更新图。Phase 2 需以操作日志和补偿任务收敛该极低概率窗口。
 
@@ -72,3 +72,7 @@ Schema 扫描通过 `SchemaMetadataSessionFactory` 打开租户限定的短生�
 ### 2026-09-20 - Phase 2 执行治理收口
 
 增加 MongoDB aggregation 专用执行适配器和 SQL/Mongo 路由，采用受控 MCP 工具、JSON 节点参数绑定、阶段白名单和资源配额；将语义查询审计从结构化日志切换为 `sf_audit_log` 持久化摘要，保留敏感信息不落库边界。
+
+### 2026-09-20 - Mongo MCP 契约协商
+
+增加 Mongo aggregation/explain 工具白名单别名、数据源配置覆盖和 MCP input schema 参数名/字符串 pipeline 协商，保持未知工具拒绝和服务端安全边界。

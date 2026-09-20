@@ -42,9 +42,14 @@ import java.util.regex.Pattern;
 public final class MongoAggregationSemanticQueryExecutorAdapter implements SemanticQueryExecutorPort {
 
     private static final List<String> AGGREGATION_TOOLS = List.of(
-            "aggregate", "mongodb_aggregate", "aggregate_collection", "run_aggregation", "execute_aggregation");
+            "aggregate", "mongodb_aggregate", "mongo_aggregate", "aggregate_collection", "aggregate_pipeline",
+            "run_aggregation", "execute_aggregation");
     private static final List<String> EXPLAIN_TOOLS = List.of(
-            "explain_aggregation", "mongodb_explain", "aggregate_explain");
+            "explain_aggregation", "mongodb_explain", "mongo_explain", "aggregate_explain");
+    private static final List<String> COLLECTION_ARGUMENTS = List.of("collection", "collectionName", "namespace");
+    private static final List<String> PIPELINE_ARGUMENTS = List.of("pipeline", "aggregation", "stages", "pipelineJson");
+    private static final List<String> LIMIT_ARGUMENTS = List.of("limit", "maxResults", "maxRows");
+    private static final List<String> TIMEOUT_ARGUMENTS = List.of("maxTimeMS", "timeoutMs", "timeout");
     private static final Set<String> ALLOWED_STAGES = Set.of(
             "$match", "$project", "$group", "$sort", "$limit", "$unwind");
     private static final Set<String> ALLOWED_OPERATORS = Set.of(
@@ -68,13 +73,13 @@ public final class MongoAggregationSemanticQueryExecutorAdapter implements Seman
         requireMongo(plan);
         BoundAggregation aggregation = bindAndValidate(plan, limits);
         McpServer source = findSource(plan.sourceId());
-        String explainTool = findTool(source, EXPLAIN_TOOLS);
+        ToolContract explainTool = findTool(source, EXPLAIN_TOOLS, "mongoExplainToolName");
         List<String> warnings = new ArrayList<>();
         if (explainTool == null) {
             warnings.add("Mongo aggregation explain 工具不可用，已跳过真实执行");
         } else {
             Map<String, Object> response = mcpClientService.toolsCall(
-                    source, explainTool, aggregation.arguments());
+                    source, explainTool.name(), aggregation.arguments(explainTool, objectMapper));
             warnings.addAll(readWarnings(response));
         }
         warnings.add("EXPLAIN 仅返回计划元数据，不返回业务数据");
@@ -89,12 +94,12 @@ public final class MongoAggregationSemanticQueryExecutorAdapter implements Seman
         requireMongo(plan);
         BoundAggregation aggregation = bindAndValidate(plan, limits);
         McpServer source = findSource(plan.sourceId());
-        String tool = findTool(source, AGGREGATION_TOOLS);
+        ToolContract tool = findTool(source, AGGREGATION_TOOLS, "mongoAggregationToolName");
         if (tool == null) {
             throw new BusinessException(ResultCode.SCHEMA_SCAN_FAILED, "数据源未提供受控 Mongo aggregation 工具");
         }
         long startedAt = System.currentTimeMillis();
-        Map<String, Object> payload = mcpClientService.toolsCall(source, tool, aggregation.arguments());
+        Map<String, Object> payload = mcpClientService.toolsCall(source, tool.name(), aggregation.arguments(tool, objectMapper));
         long elapsed = Math.max(0, System.currentTimeMillis() - startedAt);
         List<Map<String, Object>> rows = extractRows(payload);
         boolean truncated = rows.size() > limits.maxRows();
@@ -131,12 +136,7 @@ public final class MongoAggregationSemanticQueryExecutorAdapter implements Seman
         validateStages(pipeline);
         JsonNode bound = bindParameters(pipeline, plan.query().parameters());
         List<Object> pipelineValue = objectMapper.convertValue(bound, new TypeReference<>() { });
-        Map<String, Object> arguments = new LinkedHashMap<>();
-        arguments.put("collection", collection);
-        arguments.put("pipeline", pipelineValue);
-        arguments.put("limit", limits.maxRows());
-        arguments.put("maxTimeMS", limits.timeoutSeconds() * 1000);
-        return new BoundAggregation(arguments);
+        return new BoundAggregation(collection, pipelineValue, limits);
     }
 
     private JsonNode bindParameters(JsonNode node, List<QueryParameter> parameters) {
@@ -247,7 +247,7 @@ public final class MongoAggregationSemanticQueryExecutorAdapter implements Seman
         return source;
     }
 
-    private String findTool(McpServer source, List<String> candidates) {
+    private ToolContract findTool(McpServer source, List<String> candidates, String configuredKey) {
         List<Map<String, Object>> tools = new ArrayList<>();
         if (source.getTools() != null) {
             source.getTools().forEach(tool -> {
@@ -261,10 +261,16 @@ public final class MongoAggregationSemanticQueryExecutorAdapter implements Seman
         if (tools.isEmpty()) {
             tools.addAll(mcpClientService.discoverTools(source));
         }
-        for (String candidate : candidates) {
+        String configured = text(source.getConnectionConfig(), configuredKey);
+        if (configured != null && !candidates.stream().anyMatch(candidate -> candidate.equalsIgnoreCase(configured))) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "配置的 Mongo MCP 工具不在受控白名单内");
+        }
+        List<String> preferred = configured == null ? candidates : List.of(configured);
+        for (String candidate : preferred) {
             for (Map<String, Object> tool : tools) {
-                if (candidate.equalsIgnoreCase(String.valueOf(tool.get("name")))) {
-                    return String.valueOf(tool.get("name"));
+                String name = String.valueOf(tool.get("name"));
+                if (candidate.equalsIgnoreCase(name)) {
+                    return new ToolContract(name, tool);
                 }
             }
         }
@@ -348,6 +354,63 @@ public final class MongoAggregationSemanticQueryExecutorAdapter implements Seman
         }
     }
 
-    private record BoundAggregation(Map<String, Object> arguments) {
+    private String text(Map<String, Object> source, String key) {
+        if (source == null) {
+            return null;
+        }
+        Object value = source.get(key);
+        return value == null || !StringUtils.hasText(String.valueOf(value)) ? null : String.valueOf(value).trim();
+    }
+
+    private record ToolContract(String name, Map<String, Object> definition) {
+        private String argument(List<String> candidates, String fallback) {
+            Object schemaObject = definition.get("inputSchema");
+            if (schemaObject instanceof Map<?, ?> schema) {
+                Object propertiesObject = schema.get("properties");
+                if (propertiesObject instanceof Map<?, ?> properties) {
+                    for (String candidate : candidates) {
+                        if (properties.keySet().stream().anyMatch(key -> candidate.equalsIgnoreCase(String.valueOf(key)))) {
+                            return properties.keySet().stream()
+                                    .filter(key -> candidate.equalsIgnoreCase(String.valueOf(key)))
+                                    .findFirst().map(String::valueOf).orElse(fallback);
+                        }
+                    }
+                }
+            }
+            return fallback;
+        }
+
+        private boolean pipelineIsText() {
+            Object schemaObject = definition.get("inputSchema");
+            if (!(schemaObject instanceof Map<?, ?> schema)
+                    || !(schema.get("properties") instanceof Map<?, ?> properties)) {
+                return false;
+            }
+            Object pipeline = properties.get(argument(PIPELINE_ARGUMENTS, "pipeline"));
+            if (!(pipeline instanceof Map<?, ?> pipelineSchema)) {
+                return false;
+            }
+            return "string".equalsIgnoreCase(String.valueOf(pipelineSchema.get("type")));
+        }
+    }
+
+    private record BoundAggregation(String collection, List<Object> pipeline, QueryExecutionLimits limits) {
+        private Map<String, Object> arguments(ToolContract tool, ObjectMapper objectMapper) {
+            Map<String, Object> arguments = new LinkedHashMap<>();
+            arguments.put(tool.argument(COLLECTION_ARGUMENTS, "collection"), collection);
+            arguments.put(tool.argument(PIPELINE_ARGUMENTS, "pipeline"), tool.pipelineIsText()
+                    ? writePipeline(pipeline, objectMapper) : pipeline);
+            arguments.put(tool.argument(LIMIT_ARGUMENTS, "limit"), limits.maxRows());
+            arguments.put(tool.argument(TIMEOUT_ARGUMENTS, "maxTimeMS"), limits.timeoutSeconds() * 1000);
+            return arguments;
+        }
+
+        private String writePipeline(List<Object> pipeline, ObjectMapper objectMapper) {
+            try {
+                return objectMapper.writeValueAsString(pipeline);
+            } catch (Exception exception) {
+                throw new IllegalStateException("无法序列化 Mongo aggregation pipeline", exception);
+            }
+        }
     }
 }
