@@ -54,6 +54,14 @@ public class SemanticQueryApplicationService {
             String question,
             String semanticVersionId,
             String sourceId) {
+        return interpret(question, semanticVersionId, sourceId, null);
+    }
+
+    public SemanticQueryInterpretation interpret(
+            String question,
+            String semanticVersionId,
+            String sourceId,
+            String context) {
         String tenantId = requireTenantId();
         SemanticVersion version = versionRepository.findByTenantAndId(tenantId, semanticVersionId)
                 .orElseThrow(() -> new BusinessException(ResultCode.SEMANTIC_VERSION_NOT_FOUND));
@@ -69,7 +77,14 @@ public class SemanticQueryApplicationService {
         if (graph.hasMore()) {
             throw new BusinessException(ResultCode.SEMANTIC_QUERY_NOT_INTERPRETABLE, "语义版本候选超过解释配额，请缩小语义模型");
         }
-        return interpretationService.interpret(question, semanticVersionId, sourceId, candidates(graph));
+        return interpretationService.interpret(withContext(question, context), semanticVersionId, sourceId, candidates(graph));
+    }
+
+    private String withContext(String question, String context) {
+        if (context == null || context.isBlank()) {
+            return question;
+        }
+        return question + " 补充上下文：" + context.trim();
     }
 
     private List<SemanticQueryCandidate> candidates(OntologySubgraph graph) {

@@ -5,6 +5,7 @@ import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.model.dto.semantic.SchemaScanRequest;
 import com.schemaplexai.model.dto.semantic.SemanticModelCreateRequest;
 import com.schemaplexai.model.dto.semantic.SemanticNodeUpdateRequest;
+import com.schemaplexai.model.dto.semantic.SemanticQueryExecutionRequest;
 import com.schemaplexai.model.dto.semantic.SemanticQueryInterpretRequest;
 import com.schemaplexai.model.dto.semantic.SemanticVersionActionRequest;
 import com.schemaplexai.model.dto.semantic.SemanticVersionCreateRequest;
@@ -12,6 +13,7 @@ import com.schemaplexai.service.semantic.application.orchestration.OntologyGraph
 import com.schemaplexai.service.semantic.application.orchestration.SemanticModelApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticPublishApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticQueryApplicationService;
+import com.schemaplexai.service.semantic.application.orchestration.SemanticQueryExecutionApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticVersionApplicationService;
 import com.schemaplexai.web.mapper.SemanticWebMapper;
 import jakarta.validation.Validation;
@@ -48,6 +50,8 @@ class SemanticControllerContractTest {
     @Mock
     private SemanticQueryApplicationService queryService;
     @Mock
+    private SemanticQueryExecutionApplicationService executionService;
+    @Mock
     private SemanticWebMapper mapper;
 
     private Validator validator;
@@ -60,7 +64,7 @@ class SemanticControllerContractTest {
         validator = Validation.buildDefaultValidatorFactory().getValidator();
         modelController = new SemanticModelController(modelService, versionService, mapper);
         ontologyController = new SemanticOntologyController(graphService, publishService, mapper);
-        queryController = new SemanticQueryController(queryService);
+        queryController = new SemanticQueryController(queryService, executionService);
     }
 
     @Test
@@ -78,6 +82,8 @@ class SemanticControllerContractTest {
         assertThat(validator.validate(invalidAction)).hasSize(1);
         assertThat(validator.validate(invalidScan)).hasSize(1);
         assertThat(validator.validate(new SemanticQueryInterpretRequest(" ", "", "", null))).hasSize(3);
+        assertThat(validator.validate(new SemanticQueryExecutionRequest(
+                " ", "", "", null, "x".repeat(129), 0, 301))).hasSize(6);
     }
 
     @Test
@@ -91,6 +97,9 @@ class SemanticControllerContractTest {
         assertPermission(DatabaseSchemaController.class, "scan", "database:source:manage");
         assertPermission(DatabaseSchemaController.class, "snapshots", "database:source:view");
         assertPermission(SemanticQueryController.class, "interpret", "semantic:query:interpret");
+        assertPermission(SemanticQueryController.class, "plan", "semantic:query:interpret");
+        assertPermission(SemanticQueryController.class, "explain", "semantic:query:execute");
+        assertPermission(SemanticQueryController.class, "execute", "semantic:query:execute");
     }
 
     @Test

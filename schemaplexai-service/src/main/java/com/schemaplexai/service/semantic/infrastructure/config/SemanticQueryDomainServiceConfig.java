@@ -1,6 +1,17 @@
 package com.schemaplexai.service.semantic.infrastructure.config;
 
 import com.schemaplexai.service.semantic.domain.service.QueryPlanCompilationService;
+import com.schemaplexai.service.database.DatabaseSourceService;
+import com.schemaplexai.service.semantic.domain.port.SemanticQueryAuditPort;
+import com.schemaplexai.service.semantic.domain.port.SemanticQueryExecutorPort;
+import com.schemaplexai.service.semantic.domain.port.SemanticQuerySourcePort;
+import com.schemaplexai.service.semantic.domain.service.QueryPlanPolicy;
+import com.schemaplexai.service.semantic.domain.service.QueryPlanSignatureService;
+import com.schemaplexai.service.semantic.domain.service.SemanticQueryExecutionService;
+import com.schemaplexai.service.semantic.infrastructure.database.DatabaseSemanticQueryExecutorAdapter;
+import com.schemaplexai.service.semantic.infrastructure.database.DatabaseSemanticQuerySourceAdapter;
+import com.schemaplexai.service.semantic.infrastructure.database.LoggingSemanticQueryAuditAdapter;
+import org.springframework.beans.factory.annotation.Value;
 import com.schemaplexai.service.semantic.domain.service.SemanticQueryInterpretationService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -17,5 +28,40 @@ public class SemanticQueryDomainServiceConfig {
     @Bean
     public QueryPlanCompilationService queryPlanCompilationService() {
         return new QueryPlanCompilationService();
+    }
+
+    @Bean
+    public QueryPlanSignatureService queryPlanSignatureService(
+            @Value("${schemaplexai.semantic.query-signing-secret:${jwt.secret}}") String secret) {
+        return new QueryPlanSignatureService(secret);
+    }
+
+    @Bean
+    public QueryPlanPolicy queryPlanPolicy() {
+        return new QueryPlanPolicy();
+    }
+
+    @Bean
+    public SemanticQueryExecutorPort semanticQueryExecutorPort(DatabaseSourceService databaseSourceService) {
+        return new DatabaseSemanticQueryExecutorAdapter(databaseSourceService);
+    }
+
+    @Bean
+    public SemanticQuerySourcePort semanticQuerySourcePort(DatabaseSourceService databaseSourceService) {
+        return new DatabaseSemanticQuerySourceAdapter(databaseSourceService);
+    }
+
+    @Bean
+    public SemanticQueryAuditPort semanticQueryAuditPort() {
+        return new LoggingSemanticQueryAuditAdapter();
+    }
+
+    @Bean
+    public SemanticQueryExecutionService semanticQueryExecutionService(
+            QueryPlanSignatureService signatureService,
+            QueryPlanPolicy policy,
+            SemanticQueryExecutorPort executor,
+            SemanticQueryAuditPort audit) {
+        return new SemanticQueryExecutionService(signatureService, policy, executor, audit);
     }
 }
