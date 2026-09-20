@@ -10,7 +10,11 @@ import com.schemaplexai.service.semantic.domain.service.QueryPlanSignatureServic
 import com.schemaplexai.service.semantic.domain.service.SemanticQueryExecutionService;
 import com.schemaplexai.service.semantic.infrastructure.database.DatabaseSemanticQueryExecutorAdapter;
 import com.schemaplexai.service.semantic.infrastructure.database.DatabaseSemanticQuerySourceAdapter;
-import com.schemaplexai.service.semantic.infrastructure.database.LoggingSemanticQueryAuditAdapter;
+import com.schemaplexai.service.semantic.infrastructure.database.MongoAggregationSemanticQueryExecutorAdapter;
+import com.schemaplexai.service.semantic.infrastructure.database.MybatisSemanticQueryAuditAdapter;
+import com.schemaplexai.service.semantic.infrastructure.database.RoutingSemanticQueryExecutorAdapter;
+import com.schemaplexai.dao.mapper.AuditLogMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import com.schemaplexai.service.semantic.domain.service.SemanticQueryInterpretationService;
 import org.springframework.context.annotation.Bean;
@@ -42,8 +46,11 @@ public class SemanticQueryDomainServiceConfig {
     }
 
     @Bean
-    public SemanticQueryExecutorPort semanticQueryExecutorPort(DatabaseSourceService databaseSourceService) {
-        return new DatabaseSemanticQueryExecutorAdapter(databaseSourceService);
+    public SemanticQueryExecutorPort semanticQueryExecutorPort(
+            DatabaseSourceService databaseSourceService,
+            MongoAggregationSemanticQueryExecutorAdapter mongoAdapter) {
+        return new RoutingSemanticQueryExecutorAdapter(
+                new DatabaseSemanticQueryExecutorAdapter(databaseSourceService), mongoAdapter);
     }
 
     @Bean
@@ -52,8 +59,10 @@ public class SemanticQueryDomainServiceConfig {
     }
 
     @Bean
-    public SemanticQueryAuditPort semanticQueryAuditPort() {
-        return new LoggingSemanticQueryAuditAdapter();
+    public SemanticQueryAuditPort semanticQueryAuditPort(
+            AuditLogMapper auditLogMapper,
+            ObjectMapper objectMapper) {
+        return new MybatisSemanticQueryAuditAdapter(auditLogMapper, objectMapper);
     }
 
     @Bean
