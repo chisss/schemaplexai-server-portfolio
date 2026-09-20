@@ -34,7 +34,8 @@ public final class MybatisSemanticQueryAuditAdapter implements SemanticQueryAudi
         log.setResource("semantic_query");
         log.setResourceId(event.planHash());
         log.setDetail(toDetail(event));
-        log.setCreatedAt(LocalDateTime.ofInstant(event.occurredAt(), ZoneOffset.UTC));
+        log.setCreatedAt(LocalDateTime.ofInstant(
+                event.occurredAt() == null ? java.time.Instant.now() : event.occurredAt(), ZoneOffset.UTC));
         auditLogMapper.insert(log);
     }
 
