@@ -37,6 +37,16 @@ Schema 快照链路复用租户数据库 MCP 数据源：
 - 规范化结构排序后计算 SHA-256 fingerprint，相同租户、数据源和 fingerprint 幂等复用；
 - `SchemaScanApplicationService` 提供扫描和快照历史应用接口，并由 `DatabaseSchemaController` 暴露租户受控的 REST 契约。
 
-语义模型 Controller 已接入模型、版本、Schema 扫描、本体图编辑、校验和发布 REST 契约。Query IR 按后端设计文档继续接入；当前图端口不接受客户端 graph IRI 或原始 SPARQL。
+语义模型 Controller 已接入模型、版本、Schema 扫描、本体图编辑、校验和发布 REST 契约。语义查询执行链路已经交付：
+
+- `SemanticQueryInterpretationService` 将自然语言解释为结构化 `QueryIntent`，歧义返回澄清问题；
+- `QueryPlanCompilationService` 为 PostgreSQL、MySQL、ClickHouse 编译参数化 SQL，为 MongoDB 编译受控 aggregation；
+- `SignedQueryPlan`、HMAC 和 `planHash` 保证执行计划由服务端生成且在用户确认后未发生变化；
+- `DatabaseSemanticQueryExecutorAdapter` 复用 SQL AST 只读门禁，`MongoAggregationSemanticQueryExecutorAdapter` 执行单集合、白名单阶段的 aggregation；
+- Mongo MCP 工具支持受控别名、数据源配置覆盖和 `inputSchema` 参数协商，未知工具拒绝执行；
+- 查询结果携带语义 IRI 到物理表字段的血缘，执行摘要由 `MybatisSemanticQueryAuditAdapter` 持久化到 `sf_audit_log`；
+- 审计不保存问题原文、SQL、pipeline、参数值、结果行或凭据。
+
+对外提供 `/semantic/query/interpret`、`/plan`、`/explain`、`/execute` 四阶段 REST 契约。客户端不能提交 graph IRI、原始 SPARQL、SQL、Mongo pipeline 或物理字段映射。
 
 详细方案见工作区的 [后端语义查询技术文档](../../document/tech/backend/07-语义数据查询与本体引擎技术文档.md)。
