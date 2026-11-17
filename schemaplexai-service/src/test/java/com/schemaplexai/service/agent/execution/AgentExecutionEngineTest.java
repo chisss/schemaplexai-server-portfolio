@@ -11,6 +11,7 @@ import com.schemaplexai.model.entity.PendingToolApproval;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
 import com.schemaplexai.service.agent.execution.approval.CreatePendingToolApprovalCommand;
 import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
+import com.schemaplexai.service.agent.execution.approval.ToolApprovalBatchService;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicyResolver;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePromptContributor;
 import com.schemaplexai.service.agent.execution.policy.ToolExecutionGate;
@@ -857,7 +858,7 @@ class AgentExecutionEngineTest {
                 .build();
 
         PendingToolApproval approval = engine.createPendingApprovalForTool(
-                context, request, ToolIoTypeEnum.WRITE, 3, "conv-1");
+                context, request, ToolIoTypeEnum.WRITE, 3, "conv-1", "batch-1");
 
         ArgumentCaptor<CreatePendingToolApprovalCommand> captor =
                 ArgumentCaptor.forClass(CreatePendingToolApprovalCommand.class);
@@ -872,6 +873,7 @@ class AgentExecutionEngineTest {
         assertThat(command.getExecutionMode()).isEqualTo("plan");
         assertThat(command.getIoType()).isEqualTo(ToolIoTypeEnum.WRITE);
         assertThat(command.getToolRequest()).isSameAs(request);
+        assertThat(command.getBatchId()).isEqualTo("batch-1");
     }
 
     @Test
@@ -885,6 +887,7 @@ class AgentExecutionEngineTest {
         PendingToolApprovalService pendingService = mock(PendingToolApprovalService.class);
         when(pendingService.isApproved(approval)).thenReturn(true);
         when(pendingService.rebuildToolRequest(approval)).thenReturn(rebuilt);
+        when(pendingService.consume("approval-1")).thenReturn(true);
         AgentExecutionEngine engine = buildMinimalEngine(mock(AgentLogService.class),
                 mock(ExecutionEventStreamService.class), null, pendingService);
         ChatMemory chatMemory = mock(ChatMemory.class);
@@ -979,7 +982,8 @@ class AgentExecutionEngineTest {
                 null, mock(AgentTraceService.class), new AgentHookExecutor(List.of(), null),
                 mock(AgentContextBudgetService.class), mock(MultimodalMessageBuilder.class),
                 mock(ObjectProvider.class), new ToolExecutionGate(mock(ToolApprovalAmendmentService.class)),
-                new ExecutionModePolicyResolver(), new ExecutionModePromptContributor(), pendingToolApprovalService);
+                new ExecutionModePolicyResolver(), new ExecutionModePromptContributor(), pendingToolApprovalService,
+                mock(ToolApprovalBatchService.class));
     }
 
     private AgentToolSessionFactory.RoundToolContext roundToolContext(

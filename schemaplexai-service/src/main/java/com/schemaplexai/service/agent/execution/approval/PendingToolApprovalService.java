@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.execution.approval;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.enums.ToolIoTypeEnum;
@@ -13,7 +14,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -28,6 +31,7 @@ public class PendingToolApprovalService {
     public static final String STATUS_APPROVED = "approved";
     public static final String STATUS_DENIED = "denied";
     public static final String STATUS_EDITED = "edited";
+    public static final String STATUS_CONSUMED = "consumed";
 
     private static final String DECISION_APPROVE = "approve";
     private static final String DECISION_APPROVE_ALWAYS = "approve_always";
@@ -40,6 +44,7 @@ public class PendingToolApprovalService {
     public PendingToolApproval createPending(CreatePendingToolApprovalCommand command) {
         ToolExecutionRequest request = command.getToolRequest();
         PendingToolApproval approval = new PendingToolApproval();
+        approval.setBatchId(command.getBatchId());
         approval.setTenantId(command.getTenantId());
         approval.setAgentId(command.getAgentId());
         approval.setExecutionId(command.getExecutionId());
@@ -59,31 +64,102 @@ public class PendingToolApprovalService {
         return approval;
     }
 
+    /**
+     * 决策（不做归属校验；仅当调用方无四元组上下文时使用）
+     */
     public PendingToolApproval decide(String approvalId, AgentExecutionInputDTO input, String decidedBy) {
+        return decide(approvalId, input, decidedBy, null, null, null, null);
+    }
+
+    /**
+     * 归属校验 + PENDING 一次性状态迁移（原子 CAS，防重复决策导致重复执行写工具）。
+     * expected* 为空时跳过对应校验；任一项不匹配即拒绝。
+     */
+    public PendingToolApproval decide(String approvalId, AgentExecutionInputDTO input, String decidedBy,
+                                      String expectedTenantId, String expectedAgentId,
+                                      String expectedExecutionId, String expectedConversationId) {
         PendingToolApproval approval = approvalMapper.selectById(approvalId);
         if (approval == null) {
             throw new IllegalArgumentException("待审批工具调用不存在: " + approvalId);
         }
+        validateOwnership(approval, expectedTenantId, expectedAgentId, expectedExecutionId, expectedConversationId);
         String decision = input.getApprovalDecision();
-        approval.setDecision(decision);
-        approval.setDecisionReason(input.getDecisionReason());
-        approval.setDecidedBy(decidedBy);
-        approval.setDecidedAt(LocalDateTime.now());
-        if (DECISION_DENY.equals(decision)) {
-            approval.setDecisionStatus(STATUS_DENIED);
-        } else if (DECISION_EDIT.equals(decision)) {
-            approval.setDecisionStatus(STATUS_EDITED);
-            if (input.getEditedArguments() != null && !input.getEditedArguments().isEmpty()) {
-                approval.setToolArguments(new LinkedHashMap<>(input.getEditedArguments()));
-                approval.setToolArgumentsText(toJson(input.getEditedArguments()));
-            }
-        } else if (DECISION_APPROVE.equals(decision) || DECISION_APPROVE_ALWAYS.equals(decision)) {
-            approval.setDecisionStatus(STATUS_APPROVED);
-        } else {
+        if (!isValidDecision(decision)) {
             throw new IllegalArgumentException("无效的审批决策: " + decision);
         }
-        approvalMapper.updateById(approval);
+
+        PendingToolApproval update = new PendingToolApproval();
+        update.setDecision(decision);
+        update.setDecisionReason(input.getDecisionReason());
+        update.setDecidedBy(decidedBy);
+        update.setDecidedAt(LocalDateTime.now());
+        if (DECISION_DENY.equals(decision)) {
+            update.setDecisionStatus(STATUS_DENIED);
+        } else if (DECISION_EDIT.equals(decision)) {
+            update.setDecisionStatus(STATUS_EDITED);
+            if (input.getEditedArguments() != null && !input.getEditedArguments().isEmpty()) {
+                update.setToolArguments(new LinkedHashMap<>(input.getEditedArguments()));
+                update.setToolArgumentsText(toJson(input.getEditedArguments()));
+            }
+        } else {
+            update.setDecisionStatus(STATUS_APPROVED);
+        }
+
+        int rows = approvalMapper.update(update, new LambdaUpdateWrapper<PendingToolApproval>()
+                .eq(PendingToolApproval::getId, approvalId)
+                .eq(PendingToolApproval::getDecisionStatus, STATUS_PENDING));
+        if (rows != 1) {
+            throw new IllegalArgumentException("审批已处理，请勿重复提交: " + approvalId);
+        }
+        // 回填内存对象，供调用方继续使用
+        approval.setDecision(update.getDecision());
+        approval.setDecisionReason(update.getDecisionReason());
+        approval.setDecidedBy(update.getDecidedBy());
+        approval.setDecidedAt(update.getDecidedAt());
+        approval.setDecisionStatus(update.getDecisionStatus());
+        if (update.getToolArguments() != null) {
+            approval.setToolArguments(update.getToolArguments());
+            approval.setToolArgumentsText(update.getToolArgumentsText());
+        }
         return approval;
+    }
+
+    /**
+     * 一次性消费：approved/edited → consumed（CAS）。返回 false 表示已消费，调用方不得重复执行工具。
+     */
+    public boolean consume(String approvalId) {
+        PendingToolApproval update = new PendingToolApproval();
+        update.setDecisionStatus(STATUS_CONSUMED);
+        int rows = approvalMapper.update(update, new LambdaUpdateWrapper<PendingToolApproval>()
+                .eq(PendingToolApproval::getId, approvalId)
+                .in(PendingToolApproval::getDecisionStatus, STATUS_APPROVED, STATUS_EDITED));
+        return rows == 1;
+    }
+
+    private void validateOwnership(PendingToolApproval approval,
+                                   String expectedTenantId, String expectedAgentId,
+                                   String expectedExecutionId, String expectedConversationId) {
+        List<String> violations = new ArrayList<>();
+        if (StringUtils.hasText(expectedTenantId) && !expectedTenantId.equals(approval.getTenantId())) {
+            violations.add("tenantId");
+        }
+        if (StringUtils.hasText(expectedAgentId) && !expectedAgentId.equals(approval.getAgentId())) {
+            violations.add("agentId");
+        }
+        if (StringUtils.hasText(expectedExecutionId) && !expectedExecutionId.equals(approval.getExecutionId())) {
+            violations.add("executionId");
+        }
+        if (StringUtils.hasText(expectedConversationId) && !expectedConversationId.equals(approval.getConversationId())) {
+            violations.add("conversationId");
+        }
+        if (!violations.isEmpty()) {
+            throw new IllegalArgumentException("审批归属校验失败: " + String.join(",", violations));
+        }
+    }
+
+    private boolean isValidDecision(String decision) {
+        return DECISION_DENY.equals(decision) || DECISION_EDIT.equals(decision)
+                || DECISION_APPROVE.equals(decision) || DECISION_APPROVE_ALWAYS.equals(decision);
     }
 
     public Optional<PendingToolApproval> findActivePending(String executionId) {

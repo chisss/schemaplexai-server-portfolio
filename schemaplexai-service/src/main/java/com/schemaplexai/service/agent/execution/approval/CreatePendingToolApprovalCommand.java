@@ -21,4 +21,5 @@ public class CreatePendingToolApprovalCommand {
     private ToolIoTypeEnum ioType;
     private String riskLevel;
     private ToolExecutionRequest toolRequest;
+    private String batchId;
 }
