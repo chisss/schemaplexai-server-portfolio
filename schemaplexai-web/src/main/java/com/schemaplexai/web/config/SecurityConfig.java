@@ -49,7 +49,6 @@ public class SecurityConfig {
             "/auth/register",
             "/auth/refresh",
             "/health",
-            "/demo/**",
             "/i18n/locales",
             "/i18n/messages",
             "/doc.html",

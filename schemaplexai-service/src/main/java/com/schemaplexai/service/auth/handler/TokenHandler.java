@@ -23,7 +23,7 @@ public class TokenHandler {
 
     private final StringRedisTemplate redisTemplate;
 
-    @Value("${jwt.secret:default-secret-key-at-least-32-characters}")
+    @Value("${jwt.secret}")
     private String jwtSecret;
 
     @Value("${jwt.access-token-expire:86400}")

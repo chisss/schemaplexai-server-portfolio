@@ -40,7 +40,7 @@ mybatis-plus:
 
 # JWT
 jwt:
-  secret: ${JWT_SECRET:schemaplexai-default-jwt-secret-key-32chars}
+  secret: ${JWT_SECRET:}
   expiration: 86400
   refresh-expiration: 604800
 
@@ -57,6 +57,13 @@ logging:
   level:
     com.schemaplexai: DEBUG
     org.springframework: INFO
+
+# Actuator 暴露面收紧：默认仅 health/info，其余端点生产不暴露
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
 
 # 代码沙箱配置（Wasm 隔离执行）
 schemaplexai:
