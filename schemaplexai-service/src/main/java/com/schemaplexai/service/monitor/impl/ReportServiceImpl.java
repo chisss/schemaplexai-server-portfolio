@@ -284,13 +284,17 @@ public class ReportServiceImpl implements ReportService {
         List<WorkflowNodeExecution> pendingReviews = workflowNodeExecutionMapper.selectList(new LambdaQueryWrapper<WorkflowNodeExecution>()
                 .eq(WorkflowNodeExecution::getStatus, "pending")
                 .orderByDesc(WorkflowNodeExecution::getCreatedAt));
-        Map<String, WorkflowInstance> workflowInstanceMap = workflowInstanceMapper.selectBatchIds(pendingReviews.stream()
-                        .map(WorkflowNodeExecution::getInstanceId)
-                        .filter(StringUtils::hasText)
-                        .collect(Collectors.toCollection(LinkedHashSet::new)))
-                .stream()
-                .filter(Objects::nonNull)
-                .collect(Collectors.toMap(WorkflowInstance::getId, instance -> instance, (left, right) -> left, LinkedHashMap::new));
+        Set<String> workflowInstanceIds = pendingReviews.stream()
+                .map(WorkflowNodeExecution::getInstanceId)
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        // 空集合短路：避免 selectBatchIds 生成非法的 IN () SQL
+        Map<String, WorkflowInstance> workflowInstanceMap = workflowInstanceIds.isEmpty()
+                ? Map.of()
+                : workflowInstanceMapper.selectBatchIds(workflowInstanceIds)
+                        .stream()
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toMap(WorkflowInstance::getId, instance -> instance, (left, right) -> left, LinkedHashMap::new));
         Map<String, Long> ownerPendingCount = new LinkedHashMap<>();
         for (WorkflowNodeExecution node : pendingReviews) {
             WorkflowInstance instance = workflowInstanceMap.get(node.getInstanceId());
