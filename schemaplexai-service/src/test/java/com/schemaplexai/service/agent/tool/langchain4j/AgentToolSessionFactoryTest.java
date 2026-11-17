@@ -10,7 +10,11 @@ import com.schemaplexai.dao.mapper.SkillMapper;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.Skill;
 import com.schemaplexai.service.ai.LangChain4jToolSpecProvider;
+import com.schemaplexai.common.enums.SandboxProfileEnum;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
+import com.schemaplexai.service.agent.execution.SandboxGuard;
+import com.schemaplexai.service.agent.execution.SandboxPolicy;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.SkillToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.ApiGatewayToolExecutor;
@@ -28,11 +32,13 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.same;
 import static org.mockito.Mockito.when;
+
+import org.springframework.beans.factory.ObjectProvider;
 
 class AgentToolSessionFactoryTest {
 
@@ -51,10 +57,22 @@ class AgentToolSessionFactoryTest {
         SkillToolExecutor skillToolExecutor = mock(SkillToolExecutor.class);
         ApiGatewayToolExecutor apiGatewayToolExecutor = mock(ApiGatewayToolExecutor.class);
         LangChain4jMcpClientFactory mcpClientFactory = mock(LangChain4jMcpClientFactory.class);
+        SandboxGuard sandboxGuard = mock(SandboxGuard.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider = mock(ObjectProvider.class);
+        SandboxPolicy sandboxPolicy = SandboxPolicy.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("exec-1")
+                .sandboxProfile(SandboxProfileEnum.STANDARD)
+                .networkEgressEnabled(true)
+                .build();
 
         when(bindingMapper.selectList(any())).thenReturn(List.of(binding));
         when(skillMapper.selectOne(any())).thenReturn(skill);
-        when(skillToolExecutor.execute(eq("tenant-1"), eq("agent-1"), same(binding), any(ToolCall.class), isNull()))
+        when(securityRuntimeGuardServiceProvider.getObject()).thenReturn(null);
+        when(sandboxGuard.validateTool(any(SandboxPolicy.class), anyString(), any(ToolCall.class))).thenReturn(null);
+        when(skillToolExecutor.execute(eq("tenant-1"), eq("agent-1"), same(binding), any(ToolCall.class), same(sandboxPolicy)))
                 .thenReturn(ToolResult.builder()
                         .callId("call-skill")
                         .toolCode("skill.excel")
@@ -73,13 +91,16 @@ class AgentToolSessionFactoryTest {
                 skillToolExecutor,
                 apiGatewayToolExecutor,
                 new LangChain4jToolSpecProvider(),
-                mcpClientFactory
+                mcpClientFactory,
+                sandboxGuard,
+                securityRuntimeGuardServiceProvider
         );
 
         AgentExecutionContext context = AgentExecutionContext.builder()
                 .tenantId("tenant-1")
                 .agentId("agent-1")
                 .executionId("exec-1")
+                .sandboxPolicy(sandboxPolicy)
                 .build();
 
         try (AgentToolSessionFactory.AgentToolSession session = factory.openSession(context, "conv-1")) {
@@ -113,14 +134,14 @@ class AgentToolSessionFactoryTest {
             AgentToolSessionFactory.RoundToolContext roundToolContext = session.buildRoundContext(chatMemory, 1);
             assertThat(roundToolContext.toolServiceContext().effectiveTools())
                     .extracting(dev.langchain4j.agent.tool.ToolSpecification::name)
-                    .contains("skill.excel");
+                    .contains("skill_excel");
 
             ToolExecutionRequest skillRequest = ToolExecutionRequest.builder()
                     .id("call-skill")
-                    .name("skill.excel")
+                    .name("skill_excel")
                     .arguments("{\"fileName\":\"report.xlsx\",\"data\":[{\"name\":\"demo\"}]}")
                     .build();
-            ToolExecutionResult skillResult = roundToolContext.toolServiceContext().toolExecutors().get("skill.excel")
+            ToolExecutionResult skillResult = roundToolContext.toolServiceContext().toolExecutors().get("skill_excel")
                     .executeWithContext(skillRequest, roundToolContext.invocationContext());
 
             assertThat(skillResult).isNotNull();

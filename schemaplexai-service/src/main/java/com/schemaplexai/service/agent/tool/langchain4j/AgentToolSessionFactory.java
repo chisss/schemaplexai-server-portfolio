@@ -18,11 +18,13 @@ import com.schemaplexai.model.entity.Skill;
 import com.schemaplexai.service.ai.LangChain4jToolSpecProvider;
 import com.schemaplexai.service.ai.ToolNameNormalizer;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
+import com.schemaplexai.service.agent.execution.SandboxGuard;
 import com.schemaplexai.service.agent.tool.executor.ApiGatewayToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
 import com.schemaplexai.service.agent.tool.executor.SkillToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
 import com.schemaplexai.service.integration.mcp.LangChain4jMcpClientFactory;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import dev.langchain4j.agent.tool.SearchBehavior;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -48,6 +50,7 @@ import dev.langchain4j.skills.Skills;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -86,6 +89,8 @@ public class AgentToolSessionFactory {
     private final ApiGatewayToolExecutor apiGatewayToolExecutor;
     private final LangChain4jToolSpecProvider toolSpecProvider;
     private final LangChain4jMcpClientFactory mcpClientFactory;
+    private final SandboxGuard sandboxGuard;
+    private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
 
     private final LangChainToolSearchAdapter toolSearchAdapter = new LangChainToolSearchAdapter();
 
@@ -104,7 +109,7 @@ public class AgentToolSessionFactory {
                 .build();
 
         String skillPromptBlock = mergeSkillProviders(ctx, bindings, providerRequest, availableTools, executors, lazyLoadedSkillTools);
-        mergeDirectMcpProviders(bindings, providerRequest, availableTools, executors, closeables);
+        mergeDirectMcpProviders(ctx, bindings, providerRequest, availableTools, executors, closeables);
         mergeLocalBindings(ctx, bindings, availableTools, executors, ioTypeIndex);
 
         // MCP 和 Skill 工具默认 READ_WRITE
@@ -149,13 +154,18 @@ public class AgentToolSessionFactory {
             }
             ToolSpecification executableSpecification = toolSpecProvider.toToolSpecification(
                     definition, resolveSkillSearchBehavior(skillEntity));
-            dev.langchain4j.service.tool.ToolExecutor executableExecutor = new LangChain4jBindingToolExecutor(
-                    objectMapper,
-                    skillToolExecutor,
-                    ctx.getTenantId(),
-                    ctx.getAgentId(),
+            dev.langchain4j.service.tool.ToolExecutor executableExecutor = guard(
+                    new LangChain4jBindingToolExecutor(
+                            objectMapper,
+                            skillToolExecutor,
+                            ctx.getTenantId(),
+                            ctx.getAgentId(),
+                            binding,
+                            ctx.getSandboxPolicy()
+                    ),
+                    ctx,
                     binding,
-                    ctx.getSandboxPolicy()
+                    SourceTypeEnum.SKILL.getCode()
             );
             executableToolsBySkill.computeIfAbsent(skillEntity.getName(), key -> new ArrayList<>())
                     .add(new ExecutableSkillTool(skillEntity.getName(), executableSpecification, executableExecutor));
@@ -191,7 +201,8 @@ public class AgentToolSessionFactory {
                         .relativePathParameterDescription("要读取的资源相对路径")
                         .build())
                 .build();
-        mergeProviderResult(wrapSkillToolProvider(skillBundle.toolProvider()), providerRequest, availableTools, executors);
+        mergeProviderResult(wrapSkillToolProvider(skillBundle.toolProvider()), providerRequest, availableTools, executors,
+                ctx, SourceTypeEnum.SKILL.getCode());
 
         executableToolsBySkill.forEach((skillName, executableTools) -> {
             Skill skill = boundSkills.get(skillName);
@@ -210,7 +221,8 @@ public class AgentToolSessionFactory {
         return skillBundle.formatAvailableSkills();
     }
 
-    private void mergeDirectMcpProviders(List<AgentToolBinding> bindings,
+    private void mergeDirectMcpProviders(AgentExecutionContext ctx,
+                                         List<AgentToolBinding> bindings,
                                          ToolProviderRequest providerRequest,
                                          Map<String, ToolSpecification> availableTools,
                                          Map<String, dev.langchain4j.service.tool.ToolExecutor> executors,
@@ -242,7 +254,7 @@ public class AgentToolSessionFactory {
                                 .addMetadata(ToolSpecification.METADATA_SEARCH_BEHAVIOR, SearchBehavior.SEARCHABLE)
                                 .build())
                         .build();
-                mergeProviderResult(provider, providerRequest, availableTools, executors);
+                mergeProviderResult(provider, providerRequest, availableTools, executors, ctx, SourceTypeEnum.MCP.getCode());
             } catch (Exception exception) {
                 log.warn("MCP 工具提供器初始化失败: serverId={}, error={}", entry.getKey(), exception.getMessage());
             }
@@ -281,13 +293,18 @@ public class AgentToolSessionFactory {
                 delegate = skillToolExecutor;
             }
             executors.putIfAbsent(specification.name(),
-                    new LangChain4jBindingToolExecutor(
-                            objectMapper,
-                            delegate,
-                            ctx.getTenantId(),
-                            ctx.getAgentId(),
+                    guard(
+                            new LangChain4jBindingToolExecutor(
+                                    objectMapper,
+                                    delegate,
+                                    ctx.getTenantId(),
+                                    ctx.getAgentId(),
+                                    binding,
+                                    ctx.getSandboxPolicy()
+                            ),
+                            ctx,
                             binding,
-                            ctx.getSandboxPolicy()
+                            normalizeSourceType(binding.getSourceType())
                     ));
         }
     }
@@ -520,7 +537,9 @@ public class AgentToolSessionFactory {
     private void mergeProviderResult(ToolProvider toolProvider,
                                      ToolProviderRequest providerRequest,
                                      Map<String, ToolSpecification> availableTools,
-                                     Map<String, dev.langchain4j.service.tool.ToolExecutor> executors) {
+                                     Map<String, dev.langchain4j.service.tool.ToolExecutor> executors,
+                                     AgentExecutionContext ctx,
+                                     String sourceType) {
         ToolProviderResult providerResult = toolProvider.provideTools(providerRequest);
         if (providerResult == null || providerResult.tools() == null) {
             return;
@@ -533,8 +552,9 @@ public class AgentToolSessionFactory {
                     normalizedToolName != null && normalizedToolName.equals(originalToolName)
                             ? toolExecutor
                             : new AliasedToolExecutor(toolExecutor, originalToolName);
+            dev.langchain4j.service.tool.ToolExecutor guardedExecutor = guard(normalizedExecutor, ctx, null, sourceType);
             availableTools.putIfAbsent(normalizedToolName, normalizedSpecification);
-            executors.putIfAbsent(normalizedToolName, normalizedExecutor);
+            executors.putIfAbsent(normalizedToolName, guardedExecutor);
         });
     }
 
@@ -590,6 +610,26 @@ public class AgentToolSessionFactory {
                         .eq(AgentToolBinding::getEnabled, true)
                         .orderByAsc(AgentToolBinding::getPriority)
                         .orderByAsc(AgentToolBinding::getCreatedAt)
+        );
+    }
+
+    /**
+     * 统一安全装饰器：主链所有工具执行（本地/Skill/MCP）必须经过该入口
+     */
+    private dev.langchain4j.service.tool.ToolExecutor guard(dev.langchain4j.service.tool.ToolExecutor delegate,
+                                                            AgentExecutionContext ctx,
+                                                            AgentToolBinding binding,
+                                                            String sourceType) {
+        return new GuardedToolExecutor(
+                delegate,
+                objectMapper,
+                ctx.getTenantId(),
+                ctx.getAgentId(),
+                binding,
+                sourceType,
+                ctx.getSandboxPolicy(),
+                sandboxGuard,
+                securityRuntimeGuardServiceProvider.getObject()
         );
     }
 

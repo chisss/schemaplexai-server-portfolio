@@ -180,22 +180,11 @@ public class DefaultToolRegistry implements ToolRegistry {
     }
 
     private boolean requiresInterrupt(SecurityCheckDecisionVO decision) {
-        if (decision == null || !StringUtils.hasText(decision.getDecision())) {
-            return false;
-        }
-        return SecurityComplianceConstant.DECISION_BLOCK.equals(decision.getDecision())
-                || SecurityComplianceConstant.DECISION_PAUSE.equals(decision.getDecision());
+        return ToolSecuritySupport.requiresInterrupt(decision);
     }
 
     private ToolResult interruptedResult(ToolCall toolCall, SecurityCheckDecisionVO decision) {
-        return ToolResult.builder()
-                .callId(toolCall != null ? toolCall.getCallId() : null)
-                .toolCode(toolCall != null ? toolCall.getToolCode() : null)
-                .success(false)
-                .result(objectMapper.nullNode())
-                .errorMessage(decision != null ? decision.getMessage() : null)
-                .controlAction(decision != null ? decision.getDecision() : null)
-                .build();
+        return ToolSecuritySupport.interruptedResult(toolCall, decision, objectMapper);
     }
 
     private BuiltinTool resolveBuiltinTool(AgentToolBinding binding) {
@@ -213,21 +202,7 @@ public class DefaultToolRegistry implements ToolRegistry {
 
     private SecurityRuntimeCheckRequest buildToolCheckRequest(String scene, String tenantId, String agentId,
                                                               ToolCall toolCall, ToolResult toolResult) {
-        var request = new SecurityRuntimeCheckRequest();
-        request.setTenantId(tenantId);
-        request.setScene(scene);
-        request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
-        request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT);
-        request.setResourceId(agentId);
-        request.setAgentId(agentId);
-        request.setToolCode(toolCall != null ? toolCall.getToolCode() : null);
-        if (toolCall != null && toolCall.getArguments() != null && !toolCall.getArguments().isNull()) {
-            request.setArguments(objectMapper.convertValue(toolCall.getArguments(), Map.class));
-        }
-        if (toolResult != null) {
-            request.setContent(String.valueOf(toolResult.getResult()));
-        }
-        return request;
+        return ToolSecuritySupport.buildCheckRequest(scene, tenantId, agentId, toolCall, toolResult, objectMapper);
     }
 
     private String resolveDescription(AgentToolBinding binding, BuiltinTool builtinTool) {

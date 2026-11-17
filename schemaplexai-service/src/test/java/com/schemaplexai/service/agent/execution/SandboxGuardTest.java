@@ -2,6 +2,7 @@ package com.schemaplexai.service.agent.execution;
 
 import com.schemaplexai.common.enums.SandboxProfileEnum;
 import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.service.agent.tool.model.ToolCall;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -70,5 +71,38 @@ class SandboxGuardTest {
         ReflectionTestUtils.setField(guard, "allowedCommandsConfig", "ls,cat,head,tail,grep,find,wc,sort,uniq,diff,echo,pwd,date,whoami");
         guard.init();
         return guard;
+    }
+
+    @Test
+    void shouldRejectToolValidationWhenPolicyMissing() {
+        SandboxGuard guard = createGuard();
+        ToolCall call = ToolCall.builder()
+                .callId("call-1")
+                .toolCode("sys.read")
+                .build();
+
+        String result = guard.validateTool(null, "builtin", call);
+
+        assertThat(result).contains("fail-closed");
+    }
+
+    @Test
+    void shouldThrowWhenBuiltinExecutionPolicyMissing() {
+        SandboxGuard guard = createGuard();
+
+        assertThatThrownBy(() -> guard.validateBuiltinExecution(null, "sys.bash", java.util.Map.of(), null, "ls"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("fail-closed");
+    }
+
+    @Test
+    void shouldFailOpenWhenEscapeValveEnabled() {
+        SandboxGuard guard = createGuard();
+        ReflectionTestUtils.setField(guard, "failOpenOnNull", true);
+
+        String result = guard.validateTool(null, "builtin",
+                ToolCall.builder().callId("call-1").toolCode("sys.read").build());
+
+        assertThat(result).isNull();
     }
 }
