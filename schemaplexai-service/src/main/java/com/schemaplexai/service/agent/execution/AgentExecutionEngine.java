@@ -255,7 +255,7 @@ public class AgentExecutionEngine {
         List<String> systemContexts = mergeExecutionModeInstruction(ctx);
         ContextInjector.PromptBuildResult promptBuildResult = contextInjector.buildSystemPromptDetail(
                 agentId, extraContext, tenantId, ctx.getTeamAgentId(), systemContexts, first.config(),
-                userId, ctx.getProjectId(), ctx.isTemporaryChat());
+                userId, ctx.getProjectId(), ctx.isTemporaryChat(), ctx.getExecutionId());
         String systemPrompt  = promptBuildResult.prompt();
         logSystemPromptBuilt(executionId, agentId, tenantId, promptBuildResult, ctx.getModel(), startMs);
         persistContextBudgetSnapshot(ctx, promptBuildResult, first.config());
@@ -1417,8 +1417,17 @@ public class AgentExecutionEngine {
     // =========================================================================
 
     /** 解析或生成 conversationId */
-    private String resolveConversationId(AgentExecutionContext ctx) {
-        return StringUtils.hasText(ctx.getConversationId()) ? ctx.getConversationId() : UUID.randomUUID().toString();
+    String resolveConversationId(AgentExecutionContext ctx) {
+        String conversationId = StringUtils.hasText(ctx.getConversationId())
+                ? ctx.getConversationId()
+                : UUID.randomUUID().toString();
+        // 会话 Key 租户隔离：Solo 会话加租户前缀（幂等）；Team 子会话（team: 开头）保持原样，待 Team 恢复语义任务统一
+        if (StringUtils.hasText(ctx.getTenantId())
+                && !conversationId.startsWith(ctx.getTenantId() + ":")
+                && !conversationId.startsWith("team:")) {
+            return ctx.getTenantId() + ":" + conversationId;
+        }
+        return conversationId;
     }
 
     /** 解析当前执行所属用户，异步执行时不能依赖 ThreadLocal。 */

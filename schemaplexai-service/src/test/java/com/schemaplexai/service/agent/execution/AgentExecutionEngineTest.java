@@ -996,6 +996,44 @@ class AgentExecutionEngineTest {
         assertThat(engine.resolveMaxTokenBudget(context)).isEqualTo(200_000L);
     }
 
+    @Test
+    void shouldPrefixConversationIdWithTenant() {
+        AgentExecutionEngine engine = buildMinimalEngine(null, null, null, mock(PendingToolApprovalService.class));
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("exec-1")
+                .build();
+
+        assertThat(engine.resolveConversationId(context)).startsWith("tenant-1:");
+    }
+
+    @Test
+    void shouldNotDoublePrefixConversationId() {
+        AgentExecutionEngine engine = buildMinimalEngine(null, null, null, mock(PendingToolApprovalService.class));
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("exec-1")
+                .conversationId("tenant-1:conv-1")
+                .build();
+
+        assertThat(engine.resolveConversationId(context)).isEqualTo("tenant-1:conv-1");
+    }
+
+    @Test
+    void shouldKeepTeamConversationIdUnprefixed() {
+        AgentExecutionEngine engine = buildMinimalEngine(null, null, null, mock(PendingToolApprovalService.class));
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("exec-1")
+                .conversationId("team:exec-1:member-1")
+                .build();
+
+        assertThat(engine.resolveConversationId(context)).isEqualTo("team:exec-1:member-1");
+    }
+
     private AgentExecutionEngine buildMinimalEngine(AgentLogService agentLogService,
                                                      ExecutionEventStreamService eventStreamService,
                                                      QualityOrchestrator qualityOrchestrator,

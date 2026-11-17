@@ -75,7 +75,7 @@ public class AgentContextConsumer {
             String contextEntry = String.format("[%s] %s",
                     message.getNodeLabel() != null ? message.getNodeLabel() : subAgentId,
                     summary);
-            contextCacheService.updateTeamSharedContext(teamAgentId, subAgentId, contextEntry);
+            contextCacheService.updateTeamSharedContext(teamAgentId, resolveExecutionId(message), subAgentId, contextEntry);
         }
 
         // 2. 持久化到 sf_team_agent_output
@@ -85,6 +85,13 @@ public class AgentContextConsumer {
         if (milvusVectorService != null && StringUtils.hasText(summary)) {
             indexOutputToMilvus(message, summary);
         }
+    }
+
+    /**
+     * 解析执行维度 Key 使用的执行 ID（优先 executionId，回退 instanceId）
+     */
+    private String resolveExecutionId(AgentContextMessage message) {
+        return StringUtils.hasText(message.getExecutionId()) ? message.getExecutionId() : message.getInstanceId();
     }
 
     /**
