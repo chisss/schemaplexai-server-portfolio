@@ -35,6 +35,8 @@ import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
+import com.schemaplexai.service.agent.execution.SandboxPolicy;
+import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeStrategy;
 import com.schemaplexai.service.mq.AgentContextPublisher;
@@ -134,6 +136,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     private final ExecutionEventStreamService executionEventStreamService;
     private final AgentContextPublisher agentContextPublisher;
     private final DataSource dataSource;
+    private final SandboxPolicyResolver sandboxPolicyResolver;
     private final LangGraphTeamRuntimeAdapter langGraphRuntimeAdapter = new LangGraphTeamRuntimeAdapter();
 
     @Value("${spring.datasource.url:}")
@@ -353,6 +356,73 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         return TeamMemberExecutionMode.PIPELINE;
     }
 
+    /**
+     * 构建成员子执行上下文。
+     *
+     * <p>安全继承（审计 P0-2）：sandboxPolicy 优先继承父执行策略，父策略缺失时按成员维度解析兜底；
+     * executionMode 直接继承父执行（父 PLAN/SUGGEST 时子执行保持同语义，不再回退 auto）。</p>
+     */
+    AgentExecutionContext buildChildExecutionContext(Agent agent, AgentExecution parentExecution,
+                                                     AgentExecutionContext parentContext, AgentTeamMember member,
+                                                     int retryCount, String userInput, Map<String, Object> userOptions,
+                                                     String retryFeedback, String upstreamEvidence,
+                                                     AgentExecution childExecution) {
+        String modelName = StringUtils.hasText(member.getModelOverride()) ? member.getModelOverride() : parentExecution.getAiModel();
+        AgentExecutionContext childContext = AgentExecutionContext.builder()
+                .executionId(childExecution.getId())
+                .agentId(agent.getId())
+                .tenantId(parentExecution.getTenantId())
+                .userId(parentContext.getUserId())
+                .parentExecutionId(parentExecution.getId())
+                .teamAgentId(agent.getId())
+                .teamMemberId(member.getId())
+                .teamMemberRoleName(member.getRoleName())
+                .teamMemberRoleType(member.getRoleType())
+                .inputPrompt(buildMemberPrompt(
+                        parentContext.getInputPrompt(), member, retryCount, userInput, userOptions, retryFeedback,
+                        upstreamEvidence
+                ))
+                .inputContext(parentContext.getInputContext())
+                .model(modelName)
+                .agentModelType(AgentModelBindingTypeEnum.MODEL.getCode())
+                .conversationId(childExecution.getConversationId())
+                .maxRounds(resolveChildMaxRounds(parentContext, member))
+                .maxToolCallsPerRound(resolveChildMaxToolCalls(parentContext, member))
+                .maxMessages(resolveChildMaxMessages(parentContext, member))
+                .overrideToolBindings(loadMemberToolBindings(parentExecution.getTenantId(), agent.getId(), member.getId()))
+                .additionalSystemContexts(loadMemberSystemContexts(member))
+                .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
+                .sandboxPolicy(resolveChildSandboxPolicy(agent, parentContext, member))
+                .executionMode(StringUtils.hasText(parentContext.getExecutionMode())
+                        ? parentContext.getExecutionMode()
+                        : "auto")
+                .stream(false)
+                .temporaryChat(parentContext.isTemporaryChat())
+                .memoryWriteEnabled(parentContext.getMemoryWriteEnabled())
+                .build();
+        if (!StringUtils.hasText(member.getModelOverride())) {
+            childContext.setAgentModelType(parentContext.getAgentModelType());
+            childContext.setAgentModelGroupId(parentContext.getAgentModelGroupId());
+        }
+        return childContext;
+    }
+
+    /**
+     * 子执行沙箱策略：优先继承父执行策略，父策略缺失时按成员维度解析兜底
+     */
+    private SandboxPolicy resolveChildSandboxPolicy(Agent agent, AgentExecutionContext parentContext, AgentTeamMember member) {
+        SandboxPolicy inherited = parentContext.getSandboxPolicy();
+        if (inherited != null) {
+            return inherited;
+        }
+        try {
+            return sandboxPolicyResolver.resolve(agent, parentContext);
+        } catch (Exception e) {
+            log.warn("解析 Team 子执行沙箱策略失败: memberId={}, error={}", member.getId(), e.getMessage());
+            return null;
+        }
+    }
+
     private boolean memberHasWriteTools(String tenantId, String agentId, String memberId) {
         List<AgentTeamMemberToolBinding> bindings = agentTeamMemberToolBindingMapper.selectList(
                 new LambdaQueryWrapper<AgentTeamMemberToolBinding>()
@@ -452,38 +522,8 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         childExecution.setStatus(AgentExecutionStatusEnum.QUEUED.getCode());
         agentExecutionMapper.insert(childExecution);
 
-        AgentExecutionContext childContext = AgentExecutionContext.builder()
-                .executionId(childExecution.getId())
-                .agentId(agent.getId())
-                .tenantId(parentExecution.getTenantId())
-                .userId(parentContext.getUserId())
-                .parentExecutionId(parentExecution.getId())
-                .teamAgentId(agent.getId())
-                .teamMemberId(member.getId())
-                .teamMemberRoleName(member.getRoleName())
-                .teamMemberRoleType(member.getRoleType())
-                .inputPrompt(buildMemberPrompt(
-                        parentContext.getInputPrompt(), member, retryCount, userInput, userOptions, retryFeedback,
-                        upstreamEvidence
-                ))
-                .inputContext(parentContext.getInputContext())
-                .model(modelName)
-                .agentModelType(AgentModelBindingTypeEnum.MODEL.getCode())
-                .conversationId(childExecution.getConversationId())
-                .maxRounds(resolveChildMaxRounds(parentContext, member))
-                .maxToolCallsPerRound(resolveChildMaxToolCalls(parentContext, member))
-                .maxMessages(resolveChildMaxMessages(parentContext, member))
-                .overrideToolBindings(loadMemberToolBindings(parentExecution.getTenantId(), agent.getId(), member.getId()))
-                .additionalSystemContexts(loadMemberSystemContexts(member))
-                .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
-                .stream(false)
-                .temporaryChat(parentContext.isTemporaryChat())
-                .memoryWriteEnabled(parentContext.getMemoryWriteEnabled())
-                .build();
-        if (!StringUtils.hasText(member.getModelOverride())) {
-            childContext.setAgentModelType(parentContext.getAgentModelType());
-            childContext.setAgentModelGroupId(parentContext.getAgentModelGroupId());
-        }
+        AgentExecutionContext childContext = buildChildExecutionContext(agent, parentExecution, parentContext, member,
+                retryCount, userInput, userOptions, retryFeedback, upstreamEvidence, childExecution);
 
         return agentExecutionEngine.execute(childContext)
                 .handle((result, throwable) -> {

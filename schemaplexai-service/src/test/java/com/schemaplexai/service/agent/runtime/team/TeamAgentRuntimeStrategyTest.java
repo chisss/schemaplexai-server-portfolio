@@ -8,14 +8,18 @@ import com.schemaplexai.dao.mapper.AgentTeamMemberMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
+import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentTeamMember;
+import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
+import com.schemaplexai.service.agent.execution.SandboxPolicy;
+import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -270,6 +274,44 @@ class TeamAgentRuntimeStrategyTest {
                 .isEqualTo(AgentExecutionEventTypeEnum.FALLBACK_USED.getCode());
     }
 
+    @Test
+    void shouldInheritSandboxPolicyAndExecutionModeToChildContext() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        Agent agent = new Agent();
+        agent.setId("agent-1");
+        AgentExecution parent = new AgentExecution();
+        parent.setId("parent-1");
+        parent.setTenantId("tenant-1");
+        parent.setAgentId("agent-1");
+        SandboxPolicy policy = SandboxPolicy.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .maxExecutionMinutes(45)
+                .build();
+        AgentExecutionContext parentContext = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("parent-1")
+                .userId("user-1")
+                .inputPrompt("父任务需求")
+                .executionMode("plan")
+                .sandboxPolicy(policy)
+                .build();
+        AgentTeamMember member = new AgentTeamMember();
+        member.setId("member-1");
+        member.setRoleName("研究员");
+        member.setRoleType("contributor");
+        AgentExecution child = new AgentExecution();
+        child.setId("child-1");
+        child.setConversationId("team:parent-1:member-1");
+
+        AgentExecutionContext childContext = strategy.buildChildExecutionContext(
+                agent, parent, parentContext, member, 0, null, null, null, null, child);
+
+        assertThat(childContext.getSandboxPolicy()).isSameAs(policy);
+        assertThat(childContext.getExecutionMode()).isEqualTo("plan");
+    }
+
     private TeamAgentRuntimeStrategy createStrategy() {
         return createStrategy(mock(AgentExecutionMapper.class));
     }
@@ -297,7 +339,8 @@ class TeamAgentRuntimeStrategyTest {
                 mock(AgentLoopQualityChecker.class),
                 eventStreamService,
                 mock(AgentContextPublisher.class),
-                mock(DataSource.class)
+                mock(DataSource.class),
+                mock(SandboxPolicyResolver.class)
         );
     }
 }
