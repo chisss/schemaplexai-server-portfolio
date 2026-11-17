@@ -137,11 +137,11 @@ public class ContextInjector {
                                                      List<String> additionalSystemContexts,
                                                      AiModelConfig modelConfig) {
         return buildSystemPromptDetail(agentId, extraContext, tenantId, teamAgentId,
-                additionalSystemContexts, modelConfig, null, null, false);
+                additionalSystemContexts, modelConfig, null, null, false, null);
     }
 
     /**
-     * 返回带用户记忆观测指标的 System Prompt 构建结果。
+     * 返回带用户记忆观测指标的 System Prompt 构建结果（无执行维度，团队上下文回退旧 Key）。
      */
     public PromptBuildResult buildSystemPromptDetail(String agentId, String extraContext,
                                                      String tenantId, String teamAgentId,
@@ -150,6 +150,21 @@ public class ContextInjector {
                                                      String userId,
                                                      String projectId,
                                                      boolean temporaryChat) {
+        return buildSystemPromptDetail(agentId, extraContext, tenantId, teamAgentId,
+                additionalSystemContexts, modelConfig, userId, projectId, temporaryChat, null);
+    }
+
+    /**
+     * 返回带用户记忆观测指标的 System Prompt 构建结果（含执行维度，团队共享上下文按执行级 Key 隔离）。
+     */
+    public PromptBuildResult buildSystemPromptDetail(String agentId, String extraContext,
+                                                     String tenantId, String teamAgentId,
+                                                     List<String> additionalSystemContexts,
+                                                     AiModelConfig modelConfig,
+                                                     String userId,
+                                                     String projectId,
+                                                     boolean temporaryChat,
+                                                     String executionId) {
         boolean hasSemanticContext = StringUtils.hasText(tenantId) && StringUtils.hasText(extraContext);
         boolean hasTeamContext = StringUtils.hasText(teamAgentId);
         boolean hasRuntimeContext = additionalSystemContexts != null && !additionalSystemContexts.isEmpty();
@@ -178,7 +193,7 @@ public class ContextInjector {
         }
 
         DynamicPromptPart dynamicPart = buildDynamicPart(agentId, tenantId, teamAgentId, extraContext,
-                userId, projectId, temporaryChat, budget);
+                userId, projectId, temporaryChat, budget, executionId);
         String runtimePart = buildRuntimeSystemPart(additionalSystemContexts, budget.l3BudgetChars());
 
         StringBuilder promptBuilder = new StringBuilder(staticPart);
@@ -255,7 +270,8 @@ public class ContextInjector {
                                                String teamAgentId, String extraContext,
                                                String userId, String projectId,
                                                boolean temporaryChat,
-                                               PromptBudgetPlanner.PromptBudget budget) {
+                                               PromptBudgetPlanner.PromptBudget budget,
+                                               String executionId) {
         List<String> sections = new ArrayList<>();
         String retrievalSource = "empty";
         int retrievalHitCount = 0;
@@ -279,9 +295,9 @@ public class ContextInjector {
             }
         }
 
-        // L_team: 团队共享上下文（Team Agent 场景）
+        // L_team: 团队共享上下文（Team Agent 场景，按执行级 Key 隔离并发执行）
         if (StringUtils.hasText(teamAgentId)) {
-            Map<String, String> teamContext = contextCacheService.getTeamSharedContext(teamAgentId);
+            Map<String, String> teamContext = contextCacheService.getTeamSharedContext(teamAgentId, executionId);
             if (!teamContext.isEmpty()) {
                 StringBuilder teamSb = new StringBuilder();
                 teamContext.forEach((subId, summary) ->

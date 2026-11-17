@@ -17,7 +17,8 @@ import java.util.Map;
  * <p>Key 规范：
  * <pre>
  * sf:ctx:agent:{agentId}:prompt        → Agent系统提示词全文       TTL 5min
- * sf:ctx:team:{teamAgentId}:shared      → 团队共享上下文 Hash       TTL 10min
+ * sf:ctx:team:{teamAgentId}:shared      → 团队共享上下文 Hash（无执行维度，旧格式，自然过期）   TTL 10min
+ * sf:ctx:team:{teamAgentId}:{execId}:shared → 团队共享上下文 Hash（执行级隔离）               TTL 10min
  * sf:ctx:session:{execId}:history       → 对话历史 JSON            TTL 2h
  * sf:ctx:item:{itemId}                  → 单条上下文条目内容         TTL 30min
  * </pre>
@@ -32,6 +33,7 @@ public class ContextCacheService {
     private static final String PREFIX_AGENT_PROMPT = "sf:ctx:agent:%s:prompt";
     private static final String PREFIX_AGENT_PROMPT_VARIANT = "sf:ctx:agent:%s:prompt:%s";
     private static final String PREFIX_TEAM_SHARED = "sf:ctx:team:%s:shared";
+    private static final String PREFIX_TEAM_SHARED_EXECUTION_SCOPED = "sf:ctx:team:%s:%s:shared";
     private static final String PREFIX_SESSION_HISTORY = "sf:ctx:session:%s:history";
     private static final String PREFIX_CTX_ITEM = "sf:ctx:item:%s";
 
@@ -103,33 +105,50 @@ public class ContextCacheService {
     // =====================================================================
 
     /**
-     * 更新/写入团队成员的产出摘要到共享 Hash
+     * 更新/写入团队成员的产出摘要到共享 Hash（旧格式，无执行维度；新调用请使用执行级重载）
      *
      * @param teamAgentId Team Agent ID
      * @param subAgentId  子 Agent ID（作为 Hash key）
      * @param summary     产出摘要（前2000字符）
      */
     public void updateTeamSharedContext(String teamAgentId, String subAgentId, String summary) {
+        updateTeamSharedContext(teamAgentId, null, subAgentId, summary);
+    }
+
+    /**
+     * 更新/写入团队成员的产出摘要（执行级隔离 Key）
+     *
+     * @param executionId 父执行 ID；为空时回退旧格式 Key
+     */
+    public void updateTeamSharedContext(String teamAgentId, String executionId, String subAgentId, String summary) {
         if (!StringUtils.hasText(summary)) return;
         try {
-            String key = teamKey(teamAgentId);
+            String key = teamKey(teamAgentId, executionId);
             redisTemplate.opsForHash().put(key, subAgentId, summary);
             redisTemplate.expire(key, TTL_TEAM_SHARED);
-            log.debug("更新团队共享上下文: teamAgentId={}, subAgentId={}", teamAgentId, subAgentId);
+            log.debug("更新团队共享上下文: teamAgentId={}, executionId={}, subAgentId={}", teamAgentId, executionId, subAgentId);
         } catch (Exception e) {
             log.debug("写入团队共享上下文失败: teamAgentId={}", teamAgentId);
         }
     }
 
     /**
-     * 获取整个团队的共享上下文（subAgentId → summary 映射）
+     * 获取整个团队的共享上下文（旧格式 Key；新调用请使用执行级重载）
      *
      * @return 共享上下文映射，Redis 异常时返回空 Map
      */
     @SuppressWarnings("unchecked")
     public Map<String, String> getTeamSharedContext(String teamAgentId) {
+        return getTeamSharedContext(teamAgentId, null);
+    }
+
+    /**
+     * 获取团队共享上下文（执行级隔离 Key）
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, String> getTeamSharedContext(String teamAgentId, String executionId) {
         try {
-            Map<Object, Object> raw = redisTemplate.opsForHash().entries(teamKey(teamAgentId));
+            Map<Object, Object> raw = redisTemplate.opsForHash().entries(teamKey(teamAgentId, executionId));
             Map<String, String> result = new HashMap<>();
             raw.forEach((k, v) -> result.put(k.toString(), v.toString()));
             return result;
@@ -140,11 +159,21 @@ public class ContextCacheService {
     }
 
     /**
-     * 清除团队共享上下文（工作流实例完成时调用）
+     * 清除团队共享上下文（同时清理旧格式与执行级 Key）
      */
     public void evictTeamSharedContext(String teamAgentId) {
+        evictTeamSharedContext(teamAgentId, null);
+    }
+
+    /**
+     * 清除团队共享上下文（执行级 + 旧格式双 Key 一并清理）
+     */
+    public void evictTeamSharedContext(String teamAgentId, String executionId) {
         try {
-            redisTemplate.delete(teamKey(teamAgentId));
+            redisTemplate.delete(teamKey(teamAgentId, executionId));
+            if (StringUtils.hasText(executionId)) {
+                redisTemplate.delete(teamKey(teamAgentId));
+            }
         } catch (Exception e) {
             log.debug("删除团队共享上下文失败: teamAgentId={}", teamAgentId);
         }
@@ -211,6 +240,13 @@ public class ContextCacheService {
 
     private String teamKey(String teamAgentId) {
         return String.format(PREFIX_TEAM_SHARED, teamAgentId);
+    }
+
+    private String teamKey(String teamAgentId, String executionId) {
+        if (StringUtils.hasText(executionId)) {
+            return String.format(PREFIX_TEAM_SHARED_EXECUTION_SCOPED, teamAgentId, executionId);
+        }
+        return teamKey(teamAgentId);
     }
 
     private String sessionKey(String executionId) {
