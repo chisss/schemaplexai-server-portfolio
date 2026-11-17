@@ -37,6 +37,8 @@ import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
+import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringService;
+import com.schemaplexai.model.entity.ExecutionSteering;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeStrategy;
 import com.schemaplexai.service.mq.AgentContextPublisher;
@@ -139,6 +141,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     private final AgentContextPublisher agentContextPublisher;
     private final DataSource dataSource;
     private final SandboxPolicyResolver sandboxPolicyResolver;
+    private final ExecutionSteeringService executionSteeringService;
     private final LangGraphTeamRuntimeAdapter langGraphRuntimeAdapter = new LangGraphTeamRuntimeAdapter();
 
     @Value("${spring.datasource.url:}")
@@ -188,6 +191,8 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     @Async("agentExecutorPool")
     public CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution, AgentExecutionInputDTO input) {
         try {
+            // 消费执行中用户引导：追加到恢复输入，下一成员执行轮自然注入（轮边界消费语义）
+            input = mergePendingSteering(execution.getId(), input);
             AgentExecutionContext context = AgentExecutionContext.builder()
                     .executionId(execution.getId())
                     .agentId(execution.getAgentId())
@@ -386,6 +391,30 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .map(result -> asText(result.get(TeamGraphConstants.RESULT_MEMBER_ID)))
                 .filter(StringUtils::hasText)
                 .collect(Collectors.toSet());
+    }
+
+    /**
+     * 合并执行中用户引导到恢复输入：pending → applied CAS，追加为最高优先级引导段
+     */
+    private AgentExecutionInputDTO mergePendingSteering(String executionId, AgentExecutionInputDTO input) {
+        List<ExecutionSteering> pending = executionSteeringService.findPending(executionId);
+        if (pending.isEmpty()) {
+            return input;
+        }
+        StringBuilder guidance = new StringBuilder();
+        for (ExecutionSteering steering : pending) {
+            if (executionSteeringService.markApplied(steering.getId())) {
+                guidance.append(steering.getContent()).append("\n");
+            }
+        }
+        if (guidance.isEmpty()) {
+            return input;
+        }
+        AgentExecutionInputDTO merged = input != null ? input : new AgentExecutionInputDTO();
+        String existing = StringUtils.hasText(merged.getMessage()) ? merged.getMessage() : "";
+        merged.setMessage((StringUtils.hasText(existing) ? existing + "\n\n" : "")
+                + ExecutionSteeringService.buildSteeringWrapper(guidance.toString()));
+        return merged;
     }
 
     /**

@@ -20,6 +20,7 @@ import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
+import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringService;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -361,7 +362,8 @@ class TeamAgentRuntimeStrategyTest {
                 eventStreamService,
                 mock(AgentContextPublisher.class),
                 mock(DataSource.class),
-                mock(SandboxPolicyResolver.class)
+                mock(SandboxPolicyResolver.class),
+                mock(ExecutionSteeringService.class)
         );
     }
 }

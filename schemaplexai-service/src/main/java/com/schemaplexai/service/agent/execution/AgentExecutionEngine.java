@@ -21,6 +21,8 @@ import com.schemaplexai.service.agent.execution.AgentModelInvoker.ModelCallResul
 import com.schemaplexai.service.agent.execution.approval.CreatePendingToolApprovalCommand;
 import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
 import com.schemaplexai.service.agent.execution.approval.ToolApprovalBatchService;
+import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringService;
+import com.schemaplexai.model.entity.ExecutionSteering;
 import com.schemaplexai.model.entity.ToolApprovalBatch;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicyResolver;
@@ -146,6 +148,7 @@ public class AgentExecutionEngine {
     private final ExecutionModePromptContributor executionModePromptContributor;
     private final PendingToolApprovalService   pendingToolApprovalService;
     private final ToolApprovalBatchService     toolApprovalBatchService;
+    private final ExecutionSteeringService     executionSteeringService;
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
 
     @Qualifier("agentExecutorPool")
@@ -322,6 +325,9 @@ public class AgentExecutionEngine {
                 if (isStopped(executionId)) {
                     return buildStoppedResult(executionId, agentId, tenantId, round, startMs);
                 }
+
+                // 执行中用户引导（Steering）：轮边界按 seq 注入最新引导，追加消息不丢任务
+                consumePendingSteeringIfAny(executionId, agentId, tenantId, chatMemory, round, startMs);
 
                 // 执行截止时间硬边界（超时强制终止）
                 if (System.currentTimeMillis() > deadlineMs) {
@@ -1577,6 +1583,23 @@ public class AgentExecutionEngine {
     }
 
     /** 更新 state 中的 token 用量 */
+    /**
+     * 消费执行中用户引导：pending → applied CAS，按 seq 升序注入为追加用户消息
+     */
+    void consumePendingSteeringIfAny(String executionId, String agentId, String tenantId,
+                                     ChatMemory chatMemory, int round, long startMs) {
+        List<ExecutionSteering> pending = executionSteeringService.findPending(executionId);
+        for (ExecutionSteering steering : pending) {
+            if (!executionSteeringService.markApplied(steering.getId())) {
+                continue; // 已被消费（幂等保护）
+            }
+            chatMemory.add(UserMessage.from(ExecutionSteeringService.buildSteeringWrapper(steering.getContent())));
+            agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
+                    AgentLoopLogTypeEnum.EXECUTION_START.getCode(), round, null,
+                    "注入执行中用户引导: seq=" + steering.getSeq(), null, elapsed(startMs));
+        }
+    }
+
     int resolveMaxExecutionMinutes(AgentExecutionContext ctx) {
         SandboxPolicy policy = ctx.getSandboxPolicy();
         if (policy != null && policy.getMaxExecutionMinutes() > 0) {
