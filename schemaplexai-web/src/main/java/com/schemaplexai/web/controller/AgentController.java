@@ -37,6 +37,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.apache.tika.Tika;
 import org.springframework.http.MediaType;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -98,18 +99,21 @@ public class AgentController {
 
     @PostMapping
     @Operation(summary = "创建Agent")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<AgentVO> create(@Valid @RequestBody AgentCreateRequest request) {
         return R.ok(agentService.createAgent(request));
     }
 
     @PutMapping("/{id}")
     @Operation(summary = "更新Agent")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<AgentVO> update(@PathVariable String id, @Valid @RequestBody AgentUpdateRequest request) {
         return R.ok(agentService.updateAgent(id, request));
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "删除Agent")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<Void> delete(@PathVariable String id) {
         agentService.deleteAgent(id);
         return R.ok();
@@ -117,6 +121,7 @@ public class AgentController {
 
     @PutMapping("/{id}/status")
     @Operation(summary = "更新Agent状态（激活/停用）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<Void> updateStatus(@PathVariable String id, @RequestParam String status) {
         agentService.updateStatus(id, status);
         return R.ok();
@@ -130,6 +135,7 @@ public class AgentController {
 
     @PostMapping("/{id}/configs")
     @Operation(summary = "保存Agent配置")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<AgentConfigVO> saveConfig(@PathVariable String id,
                                        @Valid @RequestBody AgentConfigRequest request) {
         return R.ok(agentService.saveConfig(id, request));
@@ -137,6 +143,7 @@ public class AgentController {
 
     @DeleteMapping("/{id}/configs/{configId}")
     @Operation(summary = "删除Agent配置")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<Void> deleteConfig(@PathVariable String id, @PathVariable String configId) {
         agentService.deleteConfig(id, configId);
         return R.ok();
@@ -152,6 +159,7 @@ public class AgentController {
 
     @PostMapping("/{id}/team-members")
     @Operation(summary = "批量保存团队成员（全量覆盖）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<List<AgentTeamMemberVO>> saveTeamMembers(@PathVariable String id,
                                                        @Valid @RequestBody AgentTeamMemberBatchRequest request) {
         return R.ok(agentService.saveTeamMembers(id, request));
@@ -159,6 +167,7 @@ public class AgentController {
 
     @DeleteMapping("/{id}/team-members/{memberId}")
     @Operation(summary = "删除团队成员")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<Void> deleteTeamMember(@PathVariable String id, @PathVariable String memberId) {
         agentService.deleteTeamMember(id, memberId);
         return R.ok();
@@ -174,6 +183,7 @@ public class AgentController {
 
     @PostMapping("/{id}/context-bindings")
     @Operation(summary = "创建上下文绑定")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<AgentContextBindingVO> createContextBinding(@PathVariable String id,
                                                           @Valid @RequestBody AgentContextBindingDTO request) {
         return R.ok(agentService.createContextBinding(id, request));
@@ -181,6 +191,7 @@ public class AgentController {
 
     @DeleteMapping("/{id}/context-bindings/{bindingId}")
     @Operation(summary = "删除上下文绑定")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<Void> deleteContextBinding(@PathVariable String id, @PathVariable String bindingId) {
         agentService.deleteContextBinding(id, bindingId);
         return R.ok();
@@ -196,6 +207,7 @@ public class AgentController {
 
     @PutMapping("/{id}/tools")
     @Operation(summary = "批量更新Agent工具绑定（全量覆盖）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<List<AgentToolBindingVO>> saveToolBindings(@PathVariable String id,
                                                          @Valid @RequestBody AgentToolBindingBatchRequest request) {
         return R.ok(agentService.saveToolBindings(id, request));
@@ -211,6 +223,7 @@ public class AgentController {
 
     @PostMapping("/{id}/execute")
     @Operation(summary = "触发Agent执行任务（异步）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<AgentExecuteResultVO> execute(@PathVariable String id,
                                            @Valid @RequestBody AgentExecuteDTO dto) {
         return R.ok(agentService.execute(id, dto));
@@ -218,6 +231,7 @@ public class AgentController {
 
     @PostMapping(value = "/chat/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "上传 AI 对话附件")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<Map<String, String>> uploadChatAttachment(@RequestParam("file") MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "上传文件不能为空");
@@ -284,6 +298,7 @@ public class AgentController {
 
     @PostMapping("/{id}/executions/{execId}/stop")
     @Operation(summary = "停止执行")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<Void> stopExecution(@PathVariable String id, @PathVariable String execId) {
         agentService.stopExecution(id, execId);
         return R.ok();
@@ -306,6 +321,7 @@ public class AgentController {
 
     @PostMapping("/{id}/executions/{execId}/input")
     @Operation(summary = "提交 Human-in-Loop 输入")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<Void> submitExecutionInput(@PathVariable String id, @PathVariable String execId,
                                         @Valid @RequestBody AgentExecutionInputDTO dto) {
         agentService.submitExecutionInput(id, execId, dto);
@@ -314,6 +330,7 @@ public class AgentController {
 
     @PostMapping("/{id}/executions/{execId}/cancel")
     @Operation(summary = "取消执行（兼容 stop）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<Void> cancelExecution(@PathVariable String id, @PathVariable String execId) {
         agentService.stopExecution(id, execId);
         return R.ok();
@@ -327,6 +344,7 @@ public class AgentController {
 
     @PostMapping("/{id}/instructions/init")
     @Operation(summary = "基于模板初始化Agent专属指令")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<AgentInstructionsCheckVO> initInstructions(@PathVariable String id,
                                                          @Valid @RequestBody AgentInitInstructionsDTO dto) {
         return R.ok(agentService.initInstructions(id, dto));

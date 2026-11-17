@@ -76,3 +76,10 @@ logging:
   level:
     com.schemaplexai: INFO
     org.springframework: WARN
+
+schemaplexai:
+  security:
+    allowed-origins: ${SCHEMAPLEXAI_ALLOWED_ORIGINS:}
+    allow-default-secrets-in-dev: false
+    actuator-public-endpoints:
+      - /actuator/health

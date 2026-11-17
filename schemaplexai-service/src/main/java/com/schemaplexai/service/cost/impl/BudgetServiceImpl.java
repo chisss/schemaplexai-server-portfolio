@@ -22,10 +22,12 @@ import com.schemaplexai.model.vo.cost.BudgetAlertVO;
 import com.schemaplexai.model.vo.cost.BudgetUsageVO;
 import com.schemaplexai.model.vo.cost.BudgetVO;
 import com.schemaplexai.service.common.EntityValidator;
+import com.schemaplexai.service.common.DatabaseConstraintTranslator;
 import com.schemaplexai.service.cost.BudgetService;
 import com.schemaplexai.service.cost.validator.BudgetValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -75,10 +77,14 @@ public class BudgetServiceImpl implements BudgetService {
 
         // 构建实体（MapStruct 自动设置 status="active"）
         var budget = budgetConverter.fromCreateRequest(request);
-        budget.setTenantId(SecurityUtil.getCurrentTenantId());
+        budget.setTenantId(requireTenantId());
         budget.setCreatedBy(SecurityUtil.getCurrentUserId());
 
-        budgetMapper.insert(budget);
+        try {
+            budgetMapper.insert(budget);
+        } catch (DataIntegrityViolationException exception) {
+            throw DatabaseConstraintTranslator.translateOrDefault(exception, ResultCode.BUDGET_CYCLE_CONFLICT, "当前租户下同一范围和周期已存在活跃预算");
+        }
         log.info("创建预算成功: budgetId={}, level={}, targetId={}",
                 budget.getId(), budget.getBudgetLevel(), budget.getTargetId());
 
@@ -89,6 +95,7 @@ public class BudgetServiceImpl implements BudgetService {
     public PageResult<BudgetVO> page(BudgetQueryRequest request) {
         var page = new Page<Budget>(request.getPage(), request.getSize());
         var wrapper = new LambdaQueryWrapper<Budget>();
+        wrapper.eq(Budget::getTenantId, requireTenantId());
 
         // 可选条件过滤
         if (StringUtils.hasText(request.getBudgetLevel())) {
@@ -154,7 +161,7 @@ public class BudgetServiceImpl implements BudgetService {
             }
             BudgetCreateRequest createRequest = new BudgetCreateRequest();
             createRequest.setBudgetLevel("enterprise");
-            createRequest.setTargetId(SecurityUtil.getCurrentTenantId());
+            createRequest.setTargetId(requireTenantId());
             createRequest.setBudgetCycle("monthly");
             createRequest.setBudgetAmount(request.getBudgetAmount());
             createRequest.setAlertThreshold50(request.getAlertThreshold50() != null ? request.getAlertThreshold50() : Boolean.TRUE);
@@ -200,6 +207,7 @@ public class BudgetServiceImpl implements BudgetService {
         int pageNo = page == null || page < 1 ? 1 : page;
         int pageSize = size == null || size < 1 ? 20 : size;
         List<Budget> activeBudgets = budgetMapper.selectList(new LambdaQueryWrapper<Budget>()
+                .eq(Budget::getTenantId, requireTenantId())
                 .eq(Budget::getStatus, "active")
                 .orderByDesc(Budget::getCreatedAt));
         List<BudgetAlertVO> alerts = activeBudgets.stream()
@@ -254,7 +262,7 @@ public class BudgetServiceImpl implements BudgetService {
     private String resolveTargetId(String budgetLevel, String targetId) {
         String normalizedLevel = normalizeValue(budgetLevel);
         if ("enterprise".equals(normalizedLevel)) {
-            return SecurityUtil.getCurrentTenantId();
+            return requireTenantId();
         }
         return normalizeValue(targetId);
     }
@@ -412,10 +420,7 @@ public class BudgetServiceImpl implements BudgetService {
     }
 
     private Budget findCurrentBudget() {
-        String tenantId = SecurityUtil.getCurrentTenantId();
-        if (!StringUtils.hasText(tenantId)) {
-            return null;
-        }
+        String tenantId = requireTenantId();
         return budgetMapper.selectOne(new LambdaQueryWrapper<Budget>()
                 .eq(Budget::getTenantId, tenantId)
                 .eq(Budget::getBudgetLevel, "enterprise")
@@ -423,6 +428,14 @@ public class BudgetServiceImpl implements BudgetService {
                 .eq(Budget::getStatus, "active")
                 .orderByDesc(Budget::getCreatedAt)
                 .last("limit 1"));
+    }
+
+    private String requireTenantId() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "租户上下文缺失");
+        }
+        return tenantId;
     }
 
     private record TimeWindow(LocalDateTime start, LocalDateTime end) {

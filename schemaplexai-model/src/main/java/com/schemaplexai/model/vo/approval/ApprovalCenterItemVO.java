@@ -57,6 +57,21 @@ public class ApprovalCenterItemVO {
 
     private LocalDateTime deadline;
 
+    /** 审批优先级: CRITICAL/HIGH/MEDIUM/LOW */
+    private String priority;
+
+    /** SLA 截止时间，兼容 deadline 的治理视图字段 */
+    private LocalDateTime slaDueAt;
+
+    /** 影响范围 */
+    private String impactScope;
+
+    /** 证据摘要 */
+    private String evidenceSummary;
+
+    /** 被阻断或等待放行的资源 */
+    private String blockedResource;
+
     private String actionUrl;
 
     private LocalDateTime createdAt;

@@ -40,6 +40,7 @@ import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.agent.tool.executor.BuiltinToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.ai.ImageGenerationService;
+import com.schemaplexai.service.cost.BudgetAdmissionService;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import com.schemaplexai.service.quality.gate.QualityGateDecision;
 import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
@@ -127,6 +128,7 @@ public class WorkflowNodeEngine {
     private final BuiltinQualityAssuranceService builtinQualityAssuranceService;
     private final QualityIssueFeedbackService qualityIssueFeedbackService;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
+    private final BudgetAdmissionService budgetAdmissionService;
     private final FlowableWorkflowBridge flowableBridge;
     private final ImageGenerationService imageGenerationService;
     private final BuiltinToolExecutor builtinToolExecutor;
@@ -522,6 +524,8 @@ public class WorkflowNodeEngine {
         outputData.put("agentStatus", agentExecutionStatus);
         outputData.put("result", result);
         outputData.put("completedAt", LocalDateTime.now().toString());
+        boolean agentFallbackUsed = AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode().equals(agentExecutionStatus);
+        outputData.put("fallbackUsed", agentFallbackUsed);
 
         if (AgentExecutionStatusEnum.PAUSED.getCode().equals(agentExecutionStatus)) {
             nodeExec.setStatus(WorkflowInstanceStatusEnum.PAUSED.getCode());
@@ -534,6 +538,7 @@ public class WorkflowNodeEngine {
         }
 
         boolean agentSucceeded = AgentExecutionStatusEnum.COMPLETED.getCode().equals(agentExecutionStatus)
+                || agentFallbackUsed
                 || AgentExecutionStatusEnum.STOPPED.getCode().equals(agentExecutionStatus);
 
         if (agentSucceeded) {
@@ -762,6 +767,20 @@ public class WorkflowNodeEngine {
                 nodeExec.getInputData()
         );
 
+        var budgetAdmission = budgetAdmissionService.evaluateForTenantAgentExecution(
+                instance.getTenantId(), agentId, instance.getSpecId(), instance.getCreatedBy(), agent.getAiModel());
+        if (budgetAdmission != null && !Boolean.TRUE.equals(budgetAdmission.getAllowed())) {
+            nodeExec.setStatus(WorkflowInstanceStatusEnum.FAILED.getCode());
+            nodeExec.setErrorMessage(budgetAdmission.getMessage());
+            nodeExec.setOutputData(Map.of("budgetAdmission", budgetAdmission));
+            nodeExec.setCompletedAt(LocalDateTime.now());
+            nodeExecutionMapper.updateById(nodeExec);
+            budgetAdmissionService.recordAdmissionAudit(instance.getTenantId(), budgetAdmission,
+                    SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_NODE, nodeExec.getId());
+            failWorkflowInstance(instance.getId(), nodeExec.getNodeId(), budgetAdmission.getMessage());
+            return;
+        }
+
         SecurityCheckDecisionVO securityDecision = securityRuntimeGuardServiceProvider.getObject().evaluate(
                 buildNodeSecurityCheckRequest(instance, nodeExec, agentId, fullInstruction),
                 null
@@ -794,6 +813,10 @@ public class WorkflowNodeEngine {
         agentExecution.setStatus(AgentExecutionStatusEnum.QUEUED.getCode());
         agentExecution.setCreatedAt(LocalDateTime.now());
         agentExecutionMapper.insert(agentExecution);
+        if (budgetAdmission != null) {
+            budgetAdmissionService.recordAdmissionAudit(instance.getTenantId(), budgetAdmission,
+                    SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION, agentExecution.getId());
+        }
 
         nodeExec.setAgentExecutionId(agentExecution.getId());
         nodeExecutionMapper.updateById(nodeExec);
@@ -817,6 +840,7 @@ public class WorkflowNodeEngine {
                 .agentModelType(agent.getAiModelType())
                 .agentModelGroupId(agent.getAiModelGroupId())
                 .inputContext(nodeExec.getInputData())
+                .budgetAdmission(budgetAdmission)
                 .maxMessages(resolveWorkflowAgentMaxMessages(maxRounds, maxToolCallsPerRound))
                 .maxRounds(maxRounds)
                 .maxToolCallsPerRound(maxToolCallsPerRound)
@@ -860,6 +884,7 @@ public class WorkflowNodeEngine {
             return result.getOutputResult();
         }
         if (!AgentExecutionStatusEnum.COMPLETED.getCode().equals(callbackStatus)
+                && !AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode().equals(callbackStatus)
                 && !AgentExecutionStatusEnum.STOPPED.getCode().equals(callbackStatus)
                 && StringUtils.hasText(result.getErrorMessage())) {
             return result.getErrorMessage();

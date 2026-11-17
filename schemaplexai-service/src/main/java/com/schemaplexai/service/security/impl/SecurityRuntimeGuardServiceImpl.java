@@ -3,6 +3,8 @@ package com.schemaplexai.service.security.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
+import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.SecurityBindingMapper;
 import com.schemaplexai.dao.mapper.SecurityPolicyMapper;
@@ -87,15 +89,17 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
     }
 
     private String resolveTenantId(SecurityRuntimeCheckRequest request) {
-        if (request != null && StringUtils.hasText(request.getTenantId())) {
-            return request.getTenantId().trim();
+        String currentTenantId = requireTenantId();
+        if (request != null && StringUtils.hasText(request.getTenantId())
+                && !currentTenantId.equals(request.getTenantId().trim())) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "请求租户与当前租户不一致");
         }
-        return SecurityUtil.getCurrentTenantId();
+        return currentTenantId;
     }
 
     private List<SecurityMatchedRuleVO> matchPolicies(SecurityRuntimeCheckRequest request, String tenantId, String corpus) {
         var wrapper = new LambdaQueryWrapper<SecurityPolicy>()
-                .eq(StringUtils.hasText(tenantId), SecurityPolicy::getTenantId, tenantId)
+                .eq(SecurityPolicy::getTenantId, tenantId)
                 .eq(SecurityPolicy::getStatus, SecurityComplianceConstant.STATUS_ACTIVE)
                 .eq(StringUtils.hasText(request.getDomainCode()), SecurityPolicy::getDomainCode, request.getDomainCode())
                 .orderByDesc(SecurityPolicy::getRiskLevel)
@@ -126,7 +130,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
     private List<SecurityMatchedRuleVO> matchRulePacks(SecurityRuntimeCheckRequest request, String tenantId, String corpus) {
         List<SecurityRulePack> packs = securityRulePackMapper.selectList(
                 new LambdaQueryWrapper<SecurityRulePack>()
-                        .eq(StringUtils.hasText(tenantId), SecurityRulePack::getTenantId, tenantId)
+                        .eq(SecurityRulePack::getTenantId, tenantId)
                         .eq(SecurityRulePack::getStatus, SecurityComplianceConstant.STATUS_ACTIVE)
                         .orderByDesc(SecurityRulePack::getUpdatedAt)
         );
@@ -166,7 +170,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
     private boolean matchesTarget(SecurityPolicy policy, SecurityRuntimeCheckRequest request, String tenantId) {
         List<SecurityBinding> bindings = securityBindingMapper.selectList(
                 new LambdaQueryWrapper<SecurityBinding>()
-                        .eq(StringUtils.hasText(tenantId), SecurityBinding::getTenantId, tenantId)
+                        .eq(SecurityBinding::getTenantId, tenantId)
                         .eq(SecurityBinding::getSourceType, SecurityComplianceConstant.SOURCE_TYPE_POLICY)
                         .eq(SecurityBinding::getSourceId, policy.getId())
                         .eq(SecurityBinding::getStatus, SecurityComplianceConstant.STATUS_ACTIVE)
@@ -201,7 +205,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
     private boolean matchesRulePackBinding(String packId, SecurityRuntimeCheckRequest request, String tenantId) {
         List<SecurityBinding> bindings = securityBindingMapper.selectList(
                 new LambdaQueryWrapper<SecurityBinding>()
-                        .eq(StringUtils.hasText(tenantId), SecurityBinding::getTenantId, tenantId)
+                        .eq(SecurityBinding::getTenantId, tenantId)
                         .eq(SecurityBinding::getSourceType, SecurityComplianceConstant.SOURCE_TYPE_RULE_PACK)
                         .eq(SecurityBinding::getSourceId, packId)
                         .eq(SecurityBinding::getStatus, SecurityComplianceConstant.STATUS_ACTIVE)
@@ -238,6 +242,14 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
             return false;
         }
         return binding.getEffectiveTo() == null || !now.isAfter(binding.getEffectiveTo());
+    }
+
+    private String requireTenantId() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "租户上下文缺失");
+        }
+        return tenantId;
     }
 
     private String evaluatePolicy(SecurityPolicy policy, SecurityRuntimeCheckRequest request, String corpus) {

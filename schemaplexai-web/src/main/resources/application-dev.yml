@@ -98,6 +98,15 @@ knife4j:
 
 # 工作空间配置
 schemaplexai:
+  security:
+    allowed-origins:
+      - http://127.0.0.1:5173
+      - http://localhost:5173
+      - http://127.0.0.1:5174
+      - http://localhost:5174
+    allow-default-secrets-in-dev: true
+    actuator-public-endpoints:
+      - /actuator/health
   frontend-base-url: ${FRONTEND_BASE_URL:http://127.0.0.1:5174}
   workspace:
     root-path: ${WORKSPACE_ROOT:${user.home}/.schemaplexai/workspaces}

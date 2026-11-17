@@ -1,5 +1,7 @@
 package com.schemaplexai.service.agent.runtime.team;
 
+import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
+import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberContextBindingMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberMapper;
@@ -9,11 +11,14 @@ import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
+import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
+import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Method;
@@ -22,7 +27,9 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class TeamAgentRuntimeStrategyTest {
@@ -208,11 +215,76 @@ class TeamAgentRuntimeStrategyTest {
         assertThat(outputTokens.invoke(summary)).isEqualTo(80L);
     }
 
+    @Test
+    void shouldMarkRuleBasedFallbackAsCompletedWithFallback() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+
+        Map<String, Object> update = strategy.aggregate(List.of(Map.of(
+                TeamGraphConstants.RESULT_ROLE_NAME, "市场分析师",
+                TeamGraphConstants.RESULT_ROLE_TYPE, "member",
+                TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.FAILED.getCode(),
+                TeamGraphConstants.RESULT_ERROR_MESSAGE, "SocketException: connection reset"
+        )), 0);
+
+        assertThat(update.get(TeamGraphConstants.STATE_FINAL_STATUS))
+                .isEqualTo(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode());
+        assertThat(update.get(TeamGraphConstants.STATE_FINAL_OUTPUT))
+                .asString()
+                .contains("规则化兜底");
+    }
+
+    @Test
+    void shouldPublishFallbackUsedEventWhenFinalizingExecutionLevelFallback() throws Exception {
+        AgentExecutionMapper executionMapper = mock(AgentExecutionMapper.class);
+        AgentLogService agentLogService = mock(AgentLogService.class);
+        ExecutionEventStreamService eventStreamService = mock(ExecutionEventStreamService.class);
+        when(executionMapper.selectList(any())).thenReturn(List.of());
+        TeamAgentRuntimeStrategy strategy = createStrategy(executionMapper, agentLogService, eventStreamService);
+        AgentExecution execution = new AgentExecution();
+        execution.setId("execution-1");
+        execution.setAgentId("agent-1");
+        execution.setTenantId("tenant-1");
+        execution.setConversationId("conversation-1");
+        TeamGraphState state = new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.FAILED.getCode(),
+                TeamGraphConstants.STATE_FINAL_ERROR, "SocketException: connection reset"
+        ));
+
+        Method method = TeamAgentRuntimeStrategy.class.getDeclaredMethod(
+                "finalizeExecution", AgentExecution.class, TeamGraphState.class);
+        method.setAccessible(true);
+        AgentExecutionResult result = (AgentExecutionResult) method.invoke(strategy, execution, state);
+
+        assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode());
+        verify(agentLogService).updateExecutionStatus(
+                eq("execution-1"),
+                eq(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode()),
+                eq(null),
+                eq(0L),
+                eq(0L),
+                any()
+        );
+        ArgumentCaptor<AgentExecutionEvent> eventCaptor = ArgumentCaptor.forClass(AgentExecutionEvent.class);
+        verify(eventStreamService).publish(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().getEventType())
+                .isEqualTo(AgentExecutionEventTypeEnum.FALLBACK_USED.getCode());
+    }
+
     private TeamAgentRuntimeStrategy createStrategy() {
         return createStrategy(mock(AgentExecutionMapper.class));
     }
 
     private TeamAgentRuntimeStrategy createStrategy(AgentExecutionMapper agentExecutionMapper) {
+        return createStrategy(
+                agentExecutionMapper,
+                mock(AgentLogService.class),
+                mock(ExecutionEventStreamService.class)
+        );
+    }
+
+    private TeamAgentRuntimeStrategy createStrategy(AgentExecutionMapper agentExecutionMapper,
+                                                    AgentLogService agentLogService,
+                                                    ExecutionEventStreamService eventStreamService) {
         return new TeamAgentRuntimeStrategy(
                 agentExecutionMapper,
                 mock(AgentTeamMemberMapper.class),
@@ -221,9 +293,9 @@ class TeamAgentRuntimeStrategyTest {
                 mock(AgentTeamMemberContextBindingMapper.class),
                 mock(ContextItemMapper.class),
                 mock(AgentExecutionEngine.class),
-                mock(AgentLogService.class),
+                agentLogService,
                 mock(AgentLoopQualityChecker.class),
-                mock(ExecutionEventStreamService.class),
+                eventStreamService,
                 mock(AgentContextPublisher.class),
                 mock(DataSource.class)
         );

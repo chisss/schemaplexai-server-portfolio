@@ -36,6 +36,7 @@ import com.schemaplexai.web.util.RequestContextUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -101,6 +102,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/policies/{id}/bindings")
     @Operation(summary = "保存安全策略绑定关系")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<List<SecurityBindingVO>> savePolicyBindings(@PathVariable String id,
                                                          @RequestBody SecurityBindingSaveRequest request,
                                                          HttpServletRequest httpRequest) {
@@ -109,6 +111,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/policies")
     @Operation(summary = "创建安全策略")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityPolicyVO> createPolicy(@Valid @RequestBody SecurityPolicySaveRequest request,
                                             HttpServletRequest httpRequest) {
         return R.ok(securityComplianceService.createPolicy(request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
@@ -116,6 +119,7 @@ public class SecurityComplianceController {
 
     @PutMapping("/policies/{id}")
     @Operation(summary = "更新安全策略")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityPolicyVO> updatePolicy(@PathVariable String id,
                                             @Valid @RequestBody SecurityPolicySaveRequest request,
                                             HttpServletRequest httpRequest) {
@@ -124,12 +128,14 @@ public class SecurityComplianceController {
 
     @PostMapping("/policies/{id}/publish")
     @Operation(summary = "发布安全策略")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityPolicyVO> publishPolicy(@PathVariable String id, HttpServletRequest httpRequest) {
         return R.ok(securityComplianceService.publishPolicy(id, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
 
     @PostMapping("/policies/{id}/toggle")
     @Operation(summary = "切换安全策略状态")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityPolicyVO> togglePolicy(@PathVariable String id,
                                             @Valid @RequestBody SecurityPolicyToggleRequest request,
                                             HttpServletRequest httpRequest) {
@@ -138,6 +144,7 @@ public class SecurityComplianceController {
 
     @DeleteMapping("/policies/{id}")
     @Operation(summary = "删除安全策略")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<Void> deletePolicy(@PathVariable String id, HttpServletRequest httpRequest) {
         securityComplianceService.deletePolicy(id, RequestContextUtils.buildSecurityAuditContext(httpRequest));
         return R.ok();
@@ -181,6 +188,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/incidents/{id}/assign")
     @Operation(summary = "分派安全事件")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityIncidentVO> assignIncident(@PathVariable String id,
                                                 @Valid @RequestBody SecurityIncidentActionRequest request,
                                                 HttpServletRequest httpRequest) {
@@ -189,6 +197,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/incidents/{id}/resolve")
     @Operation(summary = "解决安全事件")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityIncidentVO> resolveIncident(@PathVariable String id,
                                                  @Valid @RequestBody SecurityIncidentActionRequest request,
                                                  HttpServletRequest httpRequest) {
@@ -197,6 +206,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/incidents/{id}/ignore")
     @Operation(summary = "忽略安全事件")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityIncidentVO> ignoreIncident(@PathVariable String id,
                                                 @Valid @RequestBody SecurityIncidentActionRequest request,
                                                 HttpServletRequest httpRequest) {
@@ -205,6 +215,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/incidents/{id}/escalate")
     @Operation(summary = "升级安全事件")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityIncidentVO> escalateIncident(@PathVariable String id,
                                                   @Valid @RequestBody SecurityIncidentActionRequest request,
                                                   HttpServletRequest httpRequest) {
@@ -213,6 +224,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/incidents/{id}/resume-resource")
     @Operation(summary = "恢复被安全暂停的资源")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityIncidentVO> resumeIncidentResource(@PathVariable String id, HttpServletRequest httpRequest) {
         return R.ok(securityIncidentService.resumeResource(id, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
     }
@@ -231,6 +243,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/rule-packs")
     @Operation(summary = "创建安全规则包")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityRulePackVO> createRulePack(@Valid @RequestBody SecurityRulePackSaveRequest request,
                                                 HttpServletRequest httpRequest) {
         return R.ok(securityRulePackService.create(request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));
@@ -238,6 +251,7 @@ public class SecurityComplianceController {
 
     @PutMapping("/rule-packs/{id}")
     @Operation(summary = "更新安全规则包")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityRulePackVO> updateRulePack(@PathVariable String id,
                                                 @Valid @RequestBody SecurityRulePackSaveRequest request,
                                                 HttpServletRequest httpRequest) {
@@ -246,6 +260,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/rule-packs/{id}/toggle")
     @Operation(summary = "切换安全规则包状态")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<SecurityRulePackVO> toggleRulePack(@PathVariable String id,
                                                 @Valid @RequestBody SecurityRulePackToggleRequest request,
                                                 HttpServletRequest httpRequest) {
@@ -266,6 +281,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/rule-packs/{id}/bind-tenants")
     @Operation(summary = "保存规则包绑定关系")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_POLICY_MANAGE.getCode())")
     public R<List<SecurityBindingVO>> bindRulePack(@PathVariable String id,
                                                    @RequestBody SecurityBindingSaveRequest request,
                                                    HttpServletRequest httpRequest) {
@@ -274,6 +290,7 @@ public class SecurityComplianceController {
 
     @PostMapping("/checks/runtime")
     @Operation(summary = "执行安全运行时检查")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SECURITY_VIEW.getCode())")
     public R<SecurityCheckDecisionVO> runtimeCheck(@RequestBody SecurityRuntimeCheckRequest request,
                                                    HttpServletRequest httpRequest) {
         return R.ok(securityRuntimeGuardService.evaluate(request, RequestContextUtils.buildSecurityAuditContext(httpRequest)));

@@ -12,6 +12,7 @@ import com.schemaplexai.service.workflow.WorkflowTriggerService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -51,6 +52,7 @@ public class WorkflowTriggerController {
 
     @PutMapping("/{templateId}/config")
     @Operation(summary = "更新触发节点配置")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<TriggerConfigVO> updateTriggerConfig(
             @PathVariable String templateId,
             @RequestBody TriggerConfigUpdateRequest request) {
@@ -59,6 +61,7 @@ public class WorkflowTriggerController {
 
     @PutMapping("/{templateId}/toggle")
     @Operation(summary = "启停触发")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<TriggerConfigVO> toggleTrigger(
             @PathVariable String templateId,
             @RequestParam boolean enabled) {
@@ -67,6 +70,7 @@ public class WorkflowTriggerController {
 
     @PostMapping("/{templateId}/fire")
     @Operation(summary = "手动触发工作流")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_EXECUTE.getCode())")
     public R<ManualTriggerResultVO> fireTrigger(
             @PathVariable String templateId,
             @RequestBody(required = false) ManualTriggerRequest request) {

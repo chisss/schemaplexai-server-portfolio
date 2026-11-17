@@ -1,6 +1,7 @@
 package com.schemaplexai.web.interceptor;
 
 import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.constant.SystemTenantConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -20,23 +21,48 @@ import org.springframework.web.servlet.HandlerInterceptor;
 @Component
 public class TenantInterceptor implements HandlerInterceptor {
 
-    private static final String TENANT_HEADER = "X-Tenant-Id";
+    private static final String[] PUBLIC_PATH_PREFIXES = {
+            "/auth/login",
+            "/auth/register",
+            "/auth/refresh",
+            "/health",
+            "/actuator/health",
+            "/i18n/",
+            "/doc.html",
+            "/swagger-resources",
+            "/v3/api-docs",
+            "/webjars",
+            "/ws"
+    };
 
     @Override
     public boolean preHandle(HttpServletRequest request,
                              HttpServletResponse response,
                              Object handler) {
-        String jwtTenantId = SecurityUtil.getCurrentTenantId();
-        if (StringUtils.hasText(jwtTenantId)) {
+        if (isPublicPath(request)) {
             return true;
         }
 
-        String headerTenantId = request.getHeader(TENANT_HEADER);
+        String jwtTenantId = SecurityUtil.getCurrentTenantId();
+        String headerTenantId = normalizeTenantId(request.getHeader(SystemTenantConstant.TENANT_HEADER));
+
+        if (isSuperAdmin() && StringUtils.hasText(headerTenantId)) {
+            SecurityUtil.setCurrentTenantId(headerTenantId);
+            return true;
+        }
+
         if (StringUtils.hasText(headerTenantId)) {
-            if (!isSuperAdmin()) {
-                throw new BusinessException(ResultCode.FORBIDDEN, "非超管用户不允许通过 Header 指定租户");
+            if (!StringUtils.hasText(jwtTenantId)) {
+                throw new BusinessException(ResultCode.FORBIDDEN, SystemTenantConstant.TENANT_CONTEXT_MISSING_MESSAGE);
             }
-            SecurityUtil.setCurrentTenantId(headerTenantId.trim());
+            if (!headerTenantId.equals(jwtTenantId)) {
+                throw new BusinessException(ResultCode.FORBIDDEN, "普通用户不允许切换租户");
+            }
+            return true;
+        }
+
+        if (!StringUtils.hasText(jwtTenantId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, SystemTenantConstant.TENANT_CONTEXT_MISSING_MESSAGE);
         }
 
         return true;
@@ -50,5 +76,22 @@ public class TenantInterceptor implements HandlerInterceptor {
         return authentication.getAuthorities().stream()
                 .map(authority -> authority.getAuthority())
                 .anyMatch(authority -> ("ROLE_" + CommonConstant.ROLE_SUPER_ADMIN).equalsIgnoreCase(authority));
+    }
+
+    private boolean isPublicPath(HttpServletRequest request) {
+        String path = request.getServletPath();
+        if (!StringUtils.hasText(path)) {
+            path = request.getRequestURI();
+        }
+        for (String prefix : PUBLIC_PATH_PREFIXES) {
+            if (path.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String normalizeTenantId(String tenantId) {
+        return StringUtils.hasText(tenantId) ? tenantId.trim() : null;
     }
 }

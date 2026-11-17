@@ -15,6 +15,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -41,6 +42,7 @@ public class WorkflowController {
 
     @PostMapping("/templates")
     @Operation(summary = "创建工作流模板")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<WorkflowTemplateVO> createTemplate(@Valid @RequestBody WorkflowTemplateCreateRequest request) {
         return R.ok(templateService.create(request));
     }
@@ -59,6 +61,7 @@ public class WorkflowController {
 
     @PutMapping("/templates/{id}")
     @Operation(summary = "更新工作流模板")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<WorkflowTemplateVO> updateTemplate(@PathVariable String id,
                                                  @Valid @RequestBody WorkflowTemplateUpdateRequest request) {
         return R.ok(templateService.update(id, request));
@@ -66,6 +69,7 @@ public class WorkflowController {
 
     @DeleteMapping("/templates/{id}")
     @Operation(summary = "删除工作流模板")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<Void> deleteTemplate(@PathVariable String id) {
         templateService.delete(id);
         return R.ok();
@@ -73,6 +77,7 @@ public class WorkflowController {
 
     @PostMapping("/templates/{id}/ai-arrange")
     @Operation(summary = "AI自动编排工作流节点")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<WorkflowAiArrangeVO> aiArrange(@PathVariable String id,
                                              @Valid @RequestBody WorkflowAiArrangeRequest request) {
         return R.ok(templateService.aiArrange(id, request));
@@ -80,6 +85,7 @@ public class WorkflowController {
 
     @PutMapping("/templates/{id}/toggle-status")
     @Operation(summary = "切换模板启用/停用状态")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<WorkflowTemplateVO> toggleTemplateStatus(@PathVariable String id) {
         return R.ok(templateService.toggleStatus(id));
     }
@@ -96,6 +102,7 @@ public class WorkflowController {
 
     @PostMapping("/instances")
     @Operation(summary = "创建工作流实例")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_EXECUTE.getCode())")
     public R<WorkflowInstanceVO> createInstance(@Valid @RequestBody WorkflowInstanceCreateRequest request) {
         return R.ok(instanceService.create(request));
     }
@@ -114,24 +121,28 @@ public class WorkflowController {
 
     @PostMapping("/instances/{id}/start")
     @Operation(summary = "启动工作流实例")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_EXECUTE.getCode())")
     public R<WorkflowInstanceVO> start(@PathVariable String id) {
         return R.ok(instanceService.start(id));
     }
 
     @PostMapping("/instances/{id}/pause")
     @Operation(summary = "暂停工作流实例")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<WorkflowInstanceVO> pause(@PathVariable String id) {
         return R.ok(instanceService.pause(id));
     }
 
     @PostMapping("/instances/{id}/resume")
     @Operation(summary = "恢复工作流实例")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_EXECUTE.getCode())")
     public R<WorkflowInstanceVO> resume(@PathVariable String id) {
         return R.ok(instanceService.resume(id));
     }
 
     @PostMapping("/instances/{id}/terminate")
     @Operation(summary = "终止工作流实例")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_MANAGE.getCode())")
     public R<Void> terminate(@PathVariable String id) {
         instanceService.terminate(id);
         return R.ok();
@@ -147,6 +158,7 @@ public class WorkflowController {
 
     @PostMapping("/instances/{id}/nodes/{nodeId}/approve")
     @Operation(summary = "审批通过节点")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).APPROVAL_DECIDE.getCode())")
     public R<Void> approveNode(@PathVariable String id,
                                 @PathVariable String nodeId,
                                 @RequestParam(defaultValue = "") String comment) {
@@ -156,6 +168,7 @@ public class WorkflowController {
 
     @PostMapping("/instances/{id}/nodes/{nodeId}/reject")
     @Operation(summary = "审批拒绝节点")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).APPROVAL_DECIDE.getCode())")
     public R<Void> rejectNode(@PathVariable String id,
                                @PathVariable String nodeId,
                                @RequestParam(defaultValue = "") String comment,
@@ -166,6 +179,7 @@ public class WorkflowController {
 
     @PostMapping("/instances/{id}/nodes/{nodeId}/modify")
     @Operation(summary = "请求修改节点")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).APPROVAL_DECIDE.getCode())")
     public R<Void> requestModify(@PathVariable String id,
                                   @PathVariable String nodeId,
                                   @RequestParam String modifyInstruction) {

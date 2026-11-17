@@ -62,6 +62,12 @@ logging:
 schemaplexai:
   security:
     aes-key: ${AES_SECRET_KEY:}
+    allowed-origins:
+      - http://127.0.0.1:5173
+      - http://localhost:5173
+    allow-default-secrets-in-dev: true
+    actuator-public-endpoints:
+      - /actuator/health
   sandbox:
     allowed-commands: ${SANDBOX_ALLOWED_COMMANDS:ls,cat,head,tail,grep,find,wc,sort,uniq,diff,echo,pwd,date,whoami}
     code-exec:

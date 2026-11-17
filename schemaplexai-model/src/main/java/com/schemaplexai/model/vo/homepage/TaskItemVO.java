@@ -21,4 +21,22 @@ public class TaskItemVO {
 
     private String targetUrl;
     private String updatedAt;
+
+    /** 当前任务负责人用户 ID */
+    private String ownerUserId;
+
+    /** 当前任务负责人角色 */
+    private String ownerRole;
+
+    /** SLA 截止时间 */
+    private String slaDueAt;
+
+    /** 影响范围 */
+    private String impactScope;
+
+    /** 证据数量 */
+    private Integer evidenceCount;
+
+    /** 是否需要当前用户处理 */
+    private Boolean requiresAction;
 }
