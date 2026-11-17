@@ -51,6 +51,7 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.RequiredArgsConstructor;
@@ -138,7 +139,6 @@ public class AgentExecutionEngine {
     private final PendingToolApprovalService   pendingToolApprovalService;
     private final ToolApprovalBatchService     toolApprovalBatchService;
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
-    private final AgentChatMemoryCompactor     chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport);
 
     @Qualifier("agentExecutorPool")
     @Autowired
@@ -228,11 +228,10 @@ public class AgentExecutionEngine {
         List<LangChain4jResolution> modelChain = resolveModelChain(ctx);
         LangChain4jResolution first = modelChain.getFirst();
 
-        // 为上下文压缩设置小模型（优先选择低成本模型）
+        // 每次执行构建独立压缩器（compactionModel 执行级隔离，避免并发执行互相覆盖）
         AiModelConfig compactModelConfig = aiModelRouter.resolveCompactModel(tenantId);
-        if (compactModelConfig != null) {
-            chatMemoryCompactor.setCompactionModel(aiModelRouter.buildChatModel(compactModelConfig));
-        }
+        ChatModel compactModel = compactModelConfig != null ? aiModelRouter.buildChatModel(compactModelConfig) : null;
+        AgentChatMemoryCompactor chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport, compactModel);
 
         // 首次执行时自动创建专属指令（幂等，非首次仅一次 SELECT）
         if (agentInstructionsAutoService != null) {
@@ -271,7 +270,7 @@ public class AgentExecutionEngine {
                 "chainSize=" + modelChain.size() + ", provider=" + first.config().getProvider()
                         + ", modelId=" + first.config().getModelId(), null, elapsed(startMs));
 
-        return runAgenticLoop(ctx, systemPrompt, chatMemory, modelChain, params, startMs, conversationId, resumeInput);
+        return runAgenticLoop(ctx, systemPrompt, chatMemory, modelChain, params, startMs, conversationId, resumeInput, chatMemoryCompactor);
     }
 
     // =========================================================================
@@ -288,7 +287,8 @@ public class AgentExecutionEngine {
                                                  AgentEngineParams params,
                                                  long startMs,
                                                  String conversationId,
-                                                 AgentExecutionInputDTO resumeInput) {
+                                                 AgentExecutionInputDTO resumeInput,
+                                                 AgentChatMemoryCompactor chatMemoryCompactor) {
         String executionId = ctx.getExecutionId();
         String agentId     = ctx.getAgentId();
         String tenantId    = ctx.getTenantId();

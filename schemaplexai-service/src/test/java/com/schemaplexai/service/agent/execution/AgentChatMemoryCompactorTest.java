@@ -7,12 +7,17 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class AgentChatMemoryCompactorTest {
 
@@ -168,6 +173,29 @@ class AgentChatMemoryCompactorTest {
         assertThat(chatMemory.messages().getFirst()).isInstanceOf(UserMessage.class);
         assertThat(chatMemory.messages().get(1)).isInstanceOf(AiMessage.class);
         assertThat(((AiMessage) chatMemory.messages().get(1)).text()).isEqualTo("保留的正常结论");
+    }
+
+    @Test
+    void shouldSummarizeWithConstructorInjectedModel() {
+        ChatModel model = mock(ChatModel.class);
+        when(model.chat(any(List.class))).thenReturn(ChatResponse.builder()
+                .aiMessage(AiMessage.from("目标: 压缩测试目标\n已完成: 无\n决策: 无\n待处理: 无"))
+                .build());
+        AgentChatMemoryCompactor compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport(), model);
+        List<ChatMessage> messages = new ArrayList<>();
+        messages.add(UserMessage.from("压缩前需求说明"));
+        for (int index = 0; index < 4; index++) {
+            messages.add(AiMessage.from("执行步骤 " + index));
+            messages.add(ToolExecutionResultMessage.from("call-" + index, "sys.ls", largeToolResult("module-" + index)));
+        }
+        InMemoryChatMemory chatMemory = new InMemoryChatMemory(messages);
+
+        AgentChatMemoryCompactor.CompactionResult result =
+                compactor.compactIfNeeded(chatMemory, null, buildModelConfig());
+
+        assertThat(result.compacted()).isTrue();
+        String summary = ((UserMessage) chatMemory.messages().getFirst()).singleText();
+        assertThat(summary).contains("[历史摘要]").contains("压缩测试目标");
     }
 
     private AiModelConfig buildModelConfig() {
