@@ -64,11 +64,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static org.bsc.langgraph4j.StateGraph.END;
 import static org.bsc.langgraph4j.StateGraph.START;
@@ -283,7 +285,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                         Map.of(TeamGraphConstants.STATE_MEMBER_RESULTS,
                                 executeMembers(agent, execution, context, members,
                                         state.retryCount(), state.userInput(), state.userOptions(),
-                                        state.qualityGateSummary()))
+                                        state.qualityGateSummary(), state.memberResults()))
                 ))
                 .addNode(TeamGraphConstants.NODE_AGGREGATE, node_async(state ->
                         aggregate(state.memberResults(), state.retryCount())
@@ -312,10 +314,23 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     private List<Map<String, Object>> executeMembers(Agent agent, AgentExecution execution, AgentExecutionContext parentContext,
                                                      List<AgentTeamMember> members, int retryCount,
                                                      String userInput, Map<String, Object> userOptions,
-                                                     String retryFeedback) {
+                                                     String retryFeedback, List<Map<String, Object>> previousResults) {
+        // 成功成员复用（审计 P0-3）：恢复/质量重试时不重复执行已完成成员，防写工具重复副作用
+        Set<String> completedMemberIds = resolveCompletedMemberIds(previousResults);
+        List<Map<String, Object>> memberResults = new ArrayList<>();
+        if (!completedMemberIds.isEmpty()) {
+            memberResults.addAll(previousResults.stream()
+                    .filter(result -> completedMemberIds.contains(asText(result.get(TeamGraphConstants.RESULT_MEMBER_ID))))
+                    .toList());
+        }
+
         AgentTeamMember leadMember = null;
         List<AgentTeamMember> contributorMembers = new ArrayList<>();
         for (AgentTeamMember member : members) {
+            if (completedMemberIds.contains(member.getId())) {
+                log.info("复用已完成成员结果，跳过执行: memberId={}, executionId={}", member.getId(), execution.getId());
+                continue;
+            }
             if (leadMember == null && isLeadRole(member.getRoleType())) {
                 leadMember = member;
                 continue;
@@ -323,17 +338,20 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             contributorMembers.add(member);
         }
 
+        if (leadMember == null && contributorMembers.isEmpty()) {
+            return memberResults;
+        }
+
         TeamMemberExecutionMode mode = resolveExecutionMode(contributorMembers, execution.getTenantId(), agent.getId());
         log.info("Team 成员执行模式: mode={}, contributors={}, executionId={}",
                 mode.getCode(), contributorMembers.size(), execution.getId());
 
-        List<Map<String, Object>> memberResults;
         if (mode == TeamMemberExecutionMode.PARALLEL && contributorMembers.size() > 1) {
-            memberResults = new ArrayList<>(executeMemberBatch(
+            memberResults.addAll(executeMemberBatch(
                     agent, execution, parentContext, contributorMembers, retryCount, userInput, userOptions, retryFeedback, null
             ));
         } else {
-            memberResults = new ArrayList<>(executeContributorsPipeline(
+            memberResults.addAll(executeContributorsPipeline(
                     agent, execution, parentContext, contributorMembers, retryCount, userInput, userOptions, retryFeedback
             ));
         }
@@ -354,6 +372,32 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
      */
     private TeamMemberExecutionMode resolveExecutionMode(List<AgentTeamMember> contributors, String tenantId, String agentId) {
         return TeamMemberExecutionMode.PIPELINE;
+    }
+
+    /**
+     * 从上一轮成员结果中解析已完成成员 ID 集合（恢复/重试复用判据）
+     */
+    Set<String> resolveCompletedMemberIds(List<Map<String, Object>> previousResults) {
+        if (previousResults == null) {
+            return Set.of();
+        }
+        return previousResults.stream()
+                .filter(result -> isSuccessfulOutputStatus(asText(result.get(TeamGraphConstants.RESULT_STATUS))))
+                .map(result -> asText(result.get(TeamGraphConstants.RESULT_MEMBER_ID)))
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toSet());
+    }
+
+    /**
+     * 查找可恢复的子执行（PAUSED 且属于当前父执行+成员），恢复时复用其 ID 继续
+     */
+    private AgentExecution findResumableChildExecution(String parentExecutionId, String teamMemberId) {
+        return agentExecutionMapper.selectOne(new LambdaQueryWrapper<AgentExecution>()
+                .eq(AgentExecution::getParentExecutionId, parentExecutionId)
+                .eq(AgentExecution::getTeamMemberId, teamMemberId)
+                .eq(AgentExecution::getStatus, AgentExecutionStatusEnum.PAUSED.getCode())
+                .orderByDesc(AgentExecution::getCreatedAt)
+                .last("LIMIT 1"));
     }
 
     /**
@@ -507,37 +551,48 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                                                                  String retryFeedback,
                                                                  String upstreamEvidence) {
         String modelName = StringUtils.hasText(member.getModelOverride()) ? member.getModelOverride() : parentExecution.getAiModel();
-        AgentExecution childExecution = new AgentExecution();
-        childExecution.setTenantId(parentExecution.getTenantId());
-        childExecution.setAgentId(agent.getId());
-        childExecution.setTaskId(parentExecution.getTaskId());
-        childExecution.setSpecId(parentExecution.getSpecId());
-        childExecution.setParentExecutionId(parentExecution.getId());
-        childExecution.setTeamMemberId(member.getId());
-        childExecution.setRuntimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode());
-        childExecution.setConversationId("team:" + parentExecution.getId() + ":" + member.getId());
-        childExecution.setInputPrompt(parentExecution.getInputPrompt());
-        childExecution.setInputContext(parentExecution.getInputContext());
-        childExecution.setAiModel(modelName);
-        childExecution.setStatus(AgentExecutionStatusEnum.QUEUED.getCode());
-        agentExecutionMapper.insert(childExecution);
+        // 恢复语义（裁决 #3）：优先复用既有 PAUSED 子执行，恢复原 childExecutionId 继续，不新建
+        AgentExecution childExecution = findResumableChildExecution(parentExecution.getId(), member.getId());
+        boolean resuming = childExecution != null;
+        if (childExecution == null) {
+            childExecution = new AgentExecution();
+            childExecution.setTenantId(parentExecution.getTenantId());
+            childExecution.setAgentId(agent.getId());
+            childExecution.setTaskId(parentExecution.getTaskId());
+            childExecution.setSpecId(parentExecution.getSpecId());
+            childExecution.setParentExecutionId(parentExecution.getId());
+            childExecution.setTeamMemberId(member.getId());
+            childExecution.setRuntimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode());
+            // 重试轮使用独立会话后缀，避免污染已写入历史的会话；恢复轮（retryCount=0）复用原会话
+            childExecution.setConversationId("team:" + parentExecution.getId() + ":" + member.getId()
+                    + (retryCount > 0 ? ":r" + retryCount : ""));
+            childExecution.setInputPrompt(parentExecution.getInputPrompt());
+            childExecution.setInputContext(parentExecution.getInputContext());
+            childExecution.setAiModel(modelName);
+            childExecution.setStatus(AgentExecutionStatusEnum.QUEUED.getCode());
+            agentExecutionMapper.insert(childExecution);
+        }
 
         AgentExecutionContext childContext = buildChildExecutionContext(agent, parentExecution, parentContext, member,
                 retryCount, userInput, userOptions, retryFeedback, upstreamEvidence, childExecution);
 
-        return agentExecutionEngine.execute(childContext)
+        AgentExecutionInputDTO resumeInput = new AgentExecutionInputDTO();
+        resumeInput.setMessage(userInput);
+        // lambda 内引用需 effectively final：捕获本次执行实际使用的子执行
+        AgentExecution capturedChild = childExecution;
+        return (resuming ? agentExecutionEngine.resume(childContext, resumeInput) : agentExecutionEngine.execute(childContext))
                 .handle((result, throwable) -> {
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put(TeamGraphConstants.RESULT_MEMBER_ID, member.getId());
                     payload.put(TeamGraphConstants.RESULT_ROLE_NAME, member.getRoleName());
                     payload.put(TeamGraphConstants.RESULT_ROLE_TYPE, member.getRoleType());
                     payload.put(TeamGraphConstants.RESULT_MODEL, modelName);
-                    payload.put(TeamGraphConstants.RESULT_EXECUTION_ID, childExecution.getId());
+                    payload.put(TeamGraphConstants.RESULT_EXECUTION_ID, capturedChild.getId());
                     if (throwable != null) {
                         String errorMessage = resolveThrowableMessage(throwable);
                         if (isTransientModelChannelFailure(errorMessage)) {
                             return buildTransientMemberFallbackPayload(agent, parentExecution, member,
-                                    childExecution, modelName, errorMessage, payload);
+                                    capturedChild, modelName, errorMessage, payload);
                         }
                         payload.put(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.FAILED.getCode());
                         payload.put(TeamGraphConstants.RESULT_ERROR_MESSAGE, errorMessage);
@@ -553,13 +608,13 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     if (!isSuccessfulOutputStatus(status)
                             && isTransientModelChannelFailure(result != null ? result.getErrorMessage() : null)) {
                         return buildTransientMemberFallbackPayload(agent, parentExecution, member,
-                                childExecution, modelName, result.getErrorMessage(), payload);
+                                capturedChild, modelName, result.getErrorMessage(), payload);
                     }
                     if (StringUtils.hasText((String) payload.get(TeamGraphConstants.RESULT_OUTPUT_RESULT))) {
                         agentContextPublisher.publishAgentOutput(
                                 agent.getId(),
                                 member.getId(),
-                                childExecution.getId(),
+                                capturedChild.getId(),
                                 parentExecution.getId(),
                                 member.getId(),
                                 member.getRoleName(),

@@ -50,7 +50,8 @@ import static org.mockito.Mockito.when;
 
 class TeamAgentRuntimeStrategyCheckpointTest {
 
-    private static final String DATASOURCE_URL = "jdbc:postgresql://localhost:5432/schemaplexai?stringtype=unspecified";
+    private static final String DATASOURCE_URL = System.getenv().getOrDefault(
+            "DB_TEST_URL", "jdbc:postgresql://localhost:5432/schemaplexai?stringtype=unspecified");
     private static final String DATASOURCE_USERNAME = "schemaplexai";
     private static final String DATASOURCE_PASSWORD = System.getenv().getOrDefault("DB_PASSWORD", "schemaplexai123");
 
