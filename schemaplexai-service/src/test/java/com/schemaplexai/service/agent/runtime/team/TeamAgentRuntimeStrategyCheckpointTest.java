@@ -94,7 +94,8 @@ class TeamAgentRuntimeStrategyCheckpointTest {
                 agentContextPublisher,
                 buildCheckpointDataSource(),
                 mock(SandboxPolicyResolver.class),
-                mock(ExecutionSteeringService.class)
+                mock(ExecutionSteeringService.class),
+                new DefaultTeamQualityDetector()
         );
         ReflectionTestUtils.setField(strategy, "datasourceUrl", DATASOURCE_URL);
         ReflectionTestUtils.setField(strategy, "datasourceUsername", DATASOURCE_USERNAME);
