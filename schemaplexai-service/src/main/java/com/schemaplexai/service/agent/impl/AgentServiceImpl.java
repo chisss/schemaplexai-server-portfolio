@@ -94,6 +94,7 @@ import com.schemaplexai.model.vo.agent.AgentToolBindingVO;
 import com.schemaplexai.model.vo.agent.AgentVO;
 import com.schemaplexai.model.vo.agent.AvailableToolVO;
 import com.schemaplexai.model.vo.agent.ConversationMessageVO;
+import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
 import com.schemaplexai.service.agent.AgentService;
@@ -101,6 +102,7 @@ import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalServ
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.agent.validator.AgentValidator;
 import com.schemaplexai.service.common.EntityValidator;
+import com.schemaplexai.service.cost.BudgetAdmissionService;
 import com.schemaplexai.service.agent.system.SystemAgentService;
 import com.schemaplexai.service.agent.tool.ToolApprovalAmendmentService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
@@ -175,6 +177,7 @@ public class AgentServiceImpl implements AgentService {
     private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
     private final ExecutionEventStreamService executionEventStreamService;
     private final SecurityRuntimeGuardService securityRuntimeGuardService;
+    private final BudgetAdmissionService budgetAdmissionService;
     private final ToolApprovalAmendmentService toolApprovalAmendmentService;
     private final PendingToolApprovalService pendingToolApprovalService;
     private final SystemAgentService systemAgentService;
@@ -1297,18 +1300,48 @@ public class AgentServiceImpl implements AgentService {
         if (!AgentStatusEnum.ACTIVE.getCode().equals(agent.getStatus())) {
             throw new BusinessException(ResultCode.AGENT_INACTIVE);
         }
+        String selectedModel = StringUtils.hasText(dto.getModel()) ? dto.getModel() : agent.getAiModel();
+        var budgetAdmission = budgetAdmissionService.evaluateForAgentExecution(
+                agentId, null, SecurityUtil.getCurrentUserId(), selectedModel);
 
         var execution = new AgentExecution();
         execution.setAgentId(agentId);
         execution.setInputPrompt(dto.getPrompt());
         execution.setInputContext(dto.getContext());
-        execution.setAiModel(StringUtils.hasText(dto.getModel()) ? dto.getModel() : agent.getAiModel());
+        execution.setAiModel(selectedModel);
         execution.setConversationId(StringUtils.hasText(dto.getConversationId())
                 ? dto.getConversationId()
                 : UUID.randomUUID().toString().replace("-", ""));
         execution.setExecutionMode(StringUtils.hasText(dto.getExecutionMode()) ? dto.getExecutionMode() : "auto");
+        if (budgetAdmission != null && !Boolean.TRUE.equals(budgetAdmission.getAllowed())) {
+            execution.setStatus(AgentExecutionStatusEnum.FAILED.getCode());
+            execution.setErrorMessage(budgetAdmission.getMessage());
+            execution.setCompletedAt(LocalDateTime.now());
+            agentExecutionMapper.insert(execution);
+            budgetAdmissionService.recordAdmissionAudit(budgetAdmission,
+                    SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION, execution.getId());
+            executionEventStreamService.publish(AgentExecutionEvent.builder()
+                    .eventType(AgentExecutionEventTypeEnum.BLOCKED.getCode())
+                    .executionId(execution.getId())
+                    .message(budgetAdmission.getMessage())
+                    .payload(Map.of("budgetAdmission", budgetAdmission))
+                    .timestamp(Instant.now())
+                    .build());
+            return AgentExecuteResultVO.builder()
+                    .executionId(execution.getId())
+                    .conversationId(execution.getConversationId())
+                    .status(AgentExecutionEventTypeEnum.BLOCKED.getCode().toLowerCase())
+                    .queuedAt(execution.getCreatedAt())
+                    .message(budgetAdmission.getMessage())
+                    .budgetAdmission(budgetAdmission)
+                    .build();
+        }
         execution.setStatus(QUEUED);
         agentExecutionMapper.insert(execution);
+        if (budgetAdmission != null) {
+            budgetAdmissionService.recordAdmissionAudit(budgetAdmission,
+                    SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION, execution.getId());
+        }
 
         SecurityCheckDecisionVO securityDecision = securityRuntimeGuardService.evaluate(
                 buildSecurityCheckRequest(agent, execution, dto),
@@ -1334,6 +1367,7 @@ public class AgentServiceImpl implements AgentService {
                     .queuedAt(execution.getCreatedAt())
                     .message("执行已被安全策略阻断")
                     .securityDecision(securityDecision)
+                    .budgetAdmission(budgetAdmission)
                     .build();
         }
         if (securityDecision != null && "pause".equals(securityDecision.getDecision())) {
@@ -1355,13 +1389,15 @@ public class AgentServiceImpl implements AgentService {
                     .queuedAt(execution.getCreatedAt())
                     .message("执行因安全策略暂停，等待人工处理")
                     .securityDecision(securityDecision)
+                    .budgetAdmission(budgetAdmission)
                     .build();
         }
 
         executionEventStreamService.publish(AgentExecutionEvent.builder()
                 .eventType(AgentExecutionEventTypeEnum.QUEUED.getCode())
                 .executionId(execution.getId())
-                .message("执行已加入队列")
+                .message(resolveQueuedMessage(securityDecision, budgetAdmission))
+                .payload(buildBudgetAdmissionPayload(budgetAdmission))
                 .timestamp(Instant.now())
                 .build());
 
@@ -1385,6 +1421,7 @@ public class AgentServiceImpl implements AgentService {
                 .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
                 .temporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()))
                 .memoryWriteEnabled(dto.getMemoryWriteEnabled())
+                .budgetAdmission(budgetAdmission)
                 .build());
 
         log.info("Agent执行任务已入队: agentId={}, executionId={}", agentId, execution.getId());
@@ -1393,11 +1430,28 @@ public class AgentServiceImpl implements AgentService {
                 .conversationId(execution.getConversationId())
                 .status(QUEUED)
                 .queuedAt(execution.getCreatedAt())
-                .message(securityDecision != null && "warn".equals(securityDecision.getDecision())
-                        ? "执行任务已提交，但命中安全告警，请关注风险提示"
-                        : "执行任务已提交，等待调度")
+                .message(resolveQueuedMessage(securityDecision, budgetAdmission))
                 .securityDecision(securityDecision)
+                .budgetAdmission(budgetAdmission)
                 .build();
+    }
+
+    private String resolveQueuedMessage(SecurityCheckDecisionVO securityDecision,
+                                        BudgetAdmissionVO budgetAdmission) {
+        if (securityDecision != null && "warn".equals(securityDecision.getDecision())) {
+            return "执行任务已提交，但命中安全告警，请关注风险提示";
+        }
+        if (budgetAdmission != null && Boolean.TRUE.equals(budgetAdmission.getActionRequired())) {
+            return "执行任务已提交，预算准入提示：" + budgetAdmission.getMessage();
+        }
+        return "执行任务已提交，等待调度";
+    }
+
+    private Map<String, Object> buildBudgetAdmissionPayload(BudgetAdmissionVO budgetAdmission) {
+        if (budgetAdmission == null) {
+            return Map.of();
+        }
+        return Map.of("budgetAdmission", budgetAdmission);
     }
 
     private SecurityRuntimeCheckRequest buildSecurityCheckRequest(Agent agent, AgentExecution execution, AgentExecuteDTO dto) {

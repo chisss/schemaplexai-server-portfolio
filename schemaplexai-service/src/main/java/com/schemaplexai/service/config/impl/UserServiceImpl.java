@@ -13,10 +13,12 @@ import com.schemaplexai.model.dto.system.UserUpdateRequest;
 import com.schemaplexai.model.entity.User;
 import com.schemaplexai.model.vo.system.UserVO;
 import com.schemaplexai.service.common.AssociationManager;
+import com.schemaplexai.service.common.DatabaseConstraintTranslator;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.config.UserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -74,7 +76,11 @@ public class UserServiceImpl implements UserService {
 
         var user = userConverter.fromCreateRequest(request);
         user.setPasswordHash(passwordEncoder.encode(request.getPassword()));
-        userMapper.insert(user);
+        try {
+            userMapper.insert(user);
+        } catch (DataIntegrityViolationException exception) {
+            throw DatabaseConstraintTranslator.translateOrDefault(exception, ResultCode.USER_ALREADY_EXISTS, "当前租户下用户已存在");
+        }
 
         associationManager.saveUserRoles(user.getId(), request.getRoleIds());
 
@@ -94,7 +100,11 @@ public class UserServiceImpl implements UserService {
         updateEntity.setRealName(request.getRealName());
         updateEntity.setAvatarUrl(request.getAvatarUrl());
         updateEntity.setStatus(request.getStatus());
-        userMapper.updateById(updateEntity);
+        try {
+            userMapper.updateById(updateEntity);
+        } catch (DataIntegrityViolationException exception) {
+            throw DatabaseConstraintTranslator.translateOrDefault(exception, ResultCode.USER_ALREADY_EXISTS, "当前租户下用户已存在");
+        }
 
         if (request.getRoleIds() != null) {
             associationManager.replaceUserRoles(id, request.getRoleIds());

@@ -15,10 +15,12 @@ import com.schemaplexai.model.dto.system.RoleUpdateRequest;
 import com.schemaplexai.model.entity.Role;
 import com.schemaplexai.model.vo.system.RoleVO;
 import com.schemaplexai.service.common.AssociationManager;
+import com.schemaplexai.service.common.DatabaseConstraintTranslator;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.config.RoleService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -95,7 +97,11 @@ public class RoleServiceImpl implements RoleService {
         entityValidator.checkUnique(roleMapper, Role::getCode, request.getCode(), ResultCode.ROLE_CODE_DUPLICATE);
 
         var role = roleConverter.fromCreateRequest(request);
-        roleMapper.insert(role);
+        try {
+            roleMapper.insert(role);
+        } catch (DataIntegrityViolationException exception) {
+            throw DatabaseConstraintTranslator.translateOrDefault(exception, ResultCode.ROLE_CODE_DUPLICATE, "当前租户下角色编码已存在");
+        }
 
         associationManager.saveRolePermissions(role.getId(), request.getPermissionIds());
 

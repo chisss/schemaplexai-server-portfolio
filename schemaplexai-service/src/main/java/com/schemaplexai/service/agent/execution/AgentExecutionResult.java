@@ -11,7 +11,7 @@ import lombok.Data;
 @Builder
 public class AgentExecutionResult {
 
-    /** 最终状态：completed / failed / stopped */
+    /** 最终状态：completed / completed_with_fallback / failed / stopped */
     private String status;
 
     /** 最终输出文本 */

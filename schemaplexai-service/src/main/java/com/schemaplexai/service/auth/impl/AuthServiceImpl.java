@@ -3,6 +3,7 @@ package com.schemaplexai.service.auth.impl;
 import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SystemTenantContext;
 import com.schemaplexai.dao.mapper.UserMapper;
 import com.schemaplexai.model.dto.auth.LoginRequest;
 import com.schemaplexai.model.dto.auth.RefreshTokenRequest;
@@ -46,41 +47,45 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LoginVO login(LoginRequest request) {
-        // 1. 校验凭据（用户名 + 密码 + 账号状态）
-        var user = authValidator.validateCredentials(request.getUsername(), request.getPassword());
+        return SystemTenantContext.callAsSystem(() -> {
+            // 1. 校验凭据（用户名 + 密码 + 账号状态）
+            var user = authValidator.validateCredentials(request.getUsername(), request.getPassword());
 
-        // 2. 加载角色和权限
-        var roleCodes = permissionLoader.loadRoleCodes(user.getId());
-        var permissions = permissionLoader.loadPermissionCodes(user.getId(), roleCodes);
+            // 2. 加载角色和权限
+            var roleCodes = permissionLoader.loadRoleCodes(user.getId());
+            var permissions = permissionLoader.loadPermissionCodes(user.getId(), roleCodes);
 
-        // 3. 生成 Token 并存储到 Redis
-        var tokenPair = tokenHandler.generateAndStoreTokenPair(user.getId(), user.getTenantId(), roleCodes);
+            // 3. 生成 Token 并存储到 Redis
+            var tokenPair = tokenHandler.generateAndStoreTokenPair(user.getId(), user.getTenantId(), roleCodes);
 
-        // 4. 更新最后登录时间
-        updateLastLoginTime(user.getId());
+            // 4. 更新最后登录时间
+            updateLastLoginTime(user.getId());
 
-        // 5. 组装响应
-        log.info("用户登录成功: userId={}, username={}", user.getId(), user.getUsername());
-        return authAssembler.assembleLoginVO(user, tokenPair, roleCodes, permissions);
+            // 5. 组装响应
+            log.info("用户登录成功: userId={}, username={}", user.getId(), user.getUsername());
+            return authAssembler.assembleLoginVO(user, tokenPair, roleCodes, permissions);
+        });
     }
 
     @Override
     public TokenVO refreshToken(RefreshTokenRequest request) {
-        // 1. 验证 RefreshToken（签名 + Redis 比对）
-        var userId = tokenHandler.validateRefreshToken(request.getRefreshToken());
+        return SystemTenantContext.callAsSystem(() -> {
+            // 1. 验证 RefreshToken（签名 + Redis 比对）
+            var userId = tokenHandler.validateRefreshToken(request.getRefreshToken());
 
-        // 2. 校验用户状态
-        var user = userMapper.selectById(userId);
-        if (user == null || !CommonConstant.STATUS_ACTIVE.equals(user.getStatus())) {
-            throw new BusinessException(ResultCode.REFRESH_TOKEN_INVALID);
-        }
+            // 2. 校验用户状态
+            var user = userMapper.selectById(userId);
+            if (user == null || !CommonConstant.STATUS_ACTIVE.equals(user.getStatus())) {
+                throw new BusinessException(ResultCode.REFRESH_TOKEN_INVALID);
+            }
 
-        // 3. 重新加载角色并生成新的 AccessToken
-        var roleCodes = permissionLoader.loadRoleCodes(userId);
-        var newAccessToken = tokenHandler.generateAccessToken(userId, user.getTenantId(), roleCodes);
+            // 3. 重新加载角色并生成新的 AccessToken
+            var roleCodes = permissionLoader.loadRoleCodes(userId);
+            var newAccessToken = tokenHandler.generateAccessToken(userId, user.getTenantId(), roleCodes);
 
-        log.info("Token刷新成功: userId={}", userId);
-        return authAssembler.assembleTokenVO(newAccessToken, request.getRefreshToken());
+            log.info("Token刷新成功: userId={}", userId);
+            return authAssembler.assembleTokenVO(newAccessToken, request.getRefreshToken());
+        });
     }
 
     @Override

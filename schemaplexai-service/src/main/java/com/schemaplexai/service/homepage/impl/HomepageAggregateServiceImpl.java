@@ -3,12 +3,15 @@ package com.schemaplexai.service.homepage.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.WorkflowInstanceStatusEnum;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
+import com.schemaplexai.dao.mapper.AuditLogMapper;
 import com.schemaplexai.dao.mapper.QualityDeviationMapper;
 import com.schemaplexai.dao.mapper.SecurityIncidentMapper;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowNodeExecutionMapper;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.model.entity.AuditLog;
 import com.schemaplexai.model.entity.QualityDeviation;
 import com.schemaplexai.model.entity.SecurityIncident;
 import com.schemaplexai.model.entity.WorkflowInstance;
@@ -29,14 +32,19 @@ import com.schemaplexai.service.monitor.DashboardService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 首页聚合服务实现
@@ -57,12 +65,17 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
     private static final Set<String> ACTIVE_INCIDENT_STATUSES = Set.of(
             "new", "assigned", "investigating", "escalated"
     );
+    private static final Set<String> PRIORITY_AUDIT_RESOURCES = Set.of(
+            "agent_execution", "workflow_instance", "workflow_node", "security_incident", "review_session"
+    );
+    private static final Pattern JSON_STRING_FIELD_PATTERN = Pattern.compile("\"%s\"\\s*:\\s*\"([^\"]*)\"");
 
     private final WorkflowInstanceMapper workflowInstanceMapper;
     private final WorkflowNodeExecutionMapper workflowNodeExecutionMapper;
     private final AgentExecutionMapper agentExecutionMapper;
     private final QualityDeviationMapper qualityDeviationMapper;
     private final SecurityIncidentMapper securityIncidentMapper;
+    private final AuditLogMapper auditLogMapper;
     private final DashboardService dashboardService;
 
     @Override
@@ -206,16 +219,9 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
                         .in(WorkflowInstance::getStatus, RUNNING_STATUSES)
                         .orderByDesc(WorkflowInstance::getUpdatedAt)
                         .last("LIMIT 10"));
-        panel.setInProgressTasks(running.stream().map(wf -> {
-            TaskItemVO item = new TaskItemVO();
-            item.setId(wf.getId());
-            item.setItemType("workflow");
-            item.setTitle(wf.getName());
-            item.setStatus(wf.getStatus());
-            item.setTargetUrl("/workflow/" + wf.getId());
-            item.setUpdatedAt(wf.getUpdatedAt() != null ? wf.getUpdatedAt().toString() : null);
-            return item;
-        }).toList());
+        panel.setInProgressTasks(sortTaskItems(running.stream()
+                .map(wf -> toWorkflowTaskItem(wf, false))
+                .toList()));
 
         // 阻塞任务
         List<WorkflowInstance> blocked = workflowInstanceMapper.selectList(
@@ -223,17 +229,9 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
                         .in(WorkflowInstance::getStatus, BLOCKED_STATUSES)
                         .orderByDesc(WorkflowInstance::getUpdatedAt)
                         .last("LIMIT 10"));
-        panel.setBlockedTasks(blocked.stream().map(wf -> {
-            TaskItemVO item = new TaskItemVO();
-            item.setId(wf.getId());
-            item.setItemType("workflow");
-            item.setTitle(wf.getName());
-            item.setStatus(wf.getStatus());
-            item.setSeverity("HIGH");
-            item.setTargetUrl("/workflow/" + wf.getId());
-            item.setUpdatedAt(wf.getUpdatedAt() != null ? wf.getUpdatedAt().toString() : null);
-            return item;
-        }).toList());
+        panel.setBlockedTasks(sortTaskItems(blocked.stream()
+                .map(wf -> toWorkflowTaskItem(wf, true))
+                .toList()));
 
         // 待审批
         List<WorkflowNodeExecution> pending = workflowNodeExecutionMapper.selectList(
@@ -241,20 +239,112 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
                         .eq(WorkflowNodeExecution::getStatus, "PENDING_REVIEW")
                         .orderByDesc(WorkflowNodeExecution::getCreatedAt)
                         .last("LIMIT 10"));
-        panel.setPendingApprovals(pending.stream().map(node -> {
-            TaskItemVO item = new TaskItemVO();
-            item.setId(node.getId());
-            item.setItemType("approval");
-            item.setTitle("审批: " + node.getNodeLabel());
-            item.setStatus("PENDING_REVIEW");
-            item.setTargetUrl("/approval-center?view=pending");
-            item.setUpdatedAt(node.getCreatedAt() != null ? node.getCreatedAt().toString() : null);
-            return item;
-        }).toList());
+        panel.setPendingApprovals(sortTaskItems(pending.stream()
+                .map(this::toPendingApprovalTaskItem)
+                .toList()));
 
         // 快捷入口
         panel.setQuickEntries(buildQuickEntries());
         return panel;
+    }
+
+    private TaskItemVO toWorkflowTaskItem(WorkflowInstance workflow, boolean blocked) {
+        Map<String, Object> variables = workflow.getVariables() == null ? Map.of() : workflow.getVariables();
+        String ownerUserId = firstTextValue(variables, "ownerUserId", "assigneeId", "responsibleUserId");
+        if (!StringUtils.hasText(ownerUserId)) {
+            ownerUserId = StringUtils.hasText(workflow.getUpdatedBy()) ? workflow.getUpdatedBy() : workflow.getCreatedBy();
+        }
+        TaskItemVO item = new TaskItemVO();
+        item.setId(workflow.getId());
+        item.setItemType("workflow");
+        item.setTitle(workflow.getName());
+        item.setStatus(workflow.getStatus());
+        item.setSeverity(blocked ? "HIGH" : stringValue(variables.get("severity")));
+        item.setTargetUrl("/workflow/" + workflow.getId());
+        item.setUpdatedAt(workflow.getUpdatedAt() != null ? workflow.getUpdatedAt().toString() : null);
+        item.setOwnerUserId(ownerUserId);
+        item.setOwnerRole(defaultString(firstTextValue(variables, "ownerRole", "role"), "流程负责人"));
+        item.setSlaDueAt(stringValue(variables.get("slaDueAt")));
+        item.setImpactScope(stringValue(variables.get("impactScope")));
+        item.setEvidenceCount(intValue(variables.get("evidenceCount"), blocked ? 1 : 0));
+        item.setRequiresAction(isCurrentUser(ownerUserId) || blocked);
+        return item;
+    }
+
+    private TaskItemVO toPendingApprovalTaskItem(WorkflowNodeExecution node) {
+        Map<String, Object> input = node.getInputData() == null ? Map.of() : node.getInputData();
+        String ownerUserId = defaultString(firstTextValue(input, "ownerUserId", "reviewerId", "assigneeId"),
+                SecurityUtil.getCurrentUserId());
+        TaskItemVO item = new TaskItemVO();
+        item.setId(node.getId());
+        item.setItemType("approval");
+        item.setTitle("审批: " + node.getNodeLabel());
+        item.setStatus("PENDING_REVIEW");
+        item.setTargetUrl(StringUtils.hasText(node.getActionUrl()) ? node.getActionUrl() : "/approval-center?view=pending");
+        item.setUpdatedAt(node.getCreatedAt() != null ? node.getCreatedAt().toString() : null);
+        item.setOwnerUserId(ownerUserId);
+        item.setOwnerRole(defaultString(firstTextValue(input, "ownerRole", "role"), "审批人"));
+        item.setSlaDueAt(stringValue(input.get("slaDueAt")));
+        item.setImpactScope(stringValue(input.get("impactScope")));
+        item.setEvidenceCount(intValue(input.get("evidenceCount"), 1));
+        item.setRequiresAction(Boolean.TRUE);
+        return item;
+    }
+
+    private List<TaskItemVO> sortTaskItems(List<TaskItemVO> items) {
+        return items.stream()
+                .sorted(Comparator
+                        .comparing((TaskItemVO item) -> Boolean.TRUE.equals(item.getRequiresAction())).reversed()
+                        .thenComparing(item -> severityRank(item.getSeverity()), Comparator.reverseOrder())
+                        .thenComparing(TaskItemVO::getSlaDueAt, Comparator.nullsLast(String::compareTo))
+                        .thenComparing(TaskItemVO::getUpdatedAt, Comparator.nullsLast(Comparator.reverseOrder())))
+                .toList();
+    }
+
+    private int severityRank(String severity) {
+        return switch (defaultString(severity, "").toUpperCase()) {
+            case "CRITICAL" -> 4;
+            case "HIGH" -> 3;
+            case "MEDIUM" -> 2;
+            case "LOW" -> 1;
+            default -> 0;
+        };
+    }
+
+    private boolean isCurrentUser(String userId) {
+        return StringUtils.hasText(userId) && userId.equals(SecurityUtil.getCurrentUserId());
+    }
+
+    private String firstTextValue(Map<String, Object> data, String... keys) {
+        for (String key : keys) {
+            String value = stringValue(data.get(key));
+            if (StringUtils.hasText(value)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private Integer intValue(Object value, int fallback) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value != null) {
+            try {
+                return Integer.parseInt(String.valueOf(value));
+            } catch (NumberFormatException ignored) {
+                return fallback;
+            }
+        }
+        return fallback;
+    }
+
+    private String defaultString(String value, String fallback) {
+        return StringUtils.hasText(value) ? value : fallback;
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     private List<QuickEntryVO> buildQuickEntries() {
@@ -335,8 +425,7 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
         }
         panel.setBlockChains(chains);
 
-        // 审计追踪（简化：返回空列表，后续可接入 AuditLogService）
-        panel.setRecentAuditTrails(new ArrayList<>());
+        panel.setRecentAuditTrails(buildRecentAuditTrails());
 
         // 异常趋势
         panel.setAnomalyTrend(buildAnomalyTrend());
@@ -376,5 +465,96 @@ public class HomepageAggregateServiceImpl implements HomepageAggregateService {
         }
 
         return trend;
+    }
+
+    private List<AuditTrailVO> buildRecentAuditTrails() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            return new ArrayList<>();
+        }
+        List<AuditLog> logs = auditLogMapper.selectList(new LambdaQueryWrapper<AuditLog>()
+                .eq(AuditLog::getTenantId, tenantId)
+                .and(wrapper -> wrapper.in(AuditLog::getResource, PRIORITY_AUDIT_RESOURCES)
+                        .or()
+                        .like(AuditLog::getAction, "budget.")
+                        .or()
+                        .like(AuditLog::getAction, "approval.")
+                        .or()
+                        .like(AuditLog::getAction, "workflow.")
+                        .or()
+                        .like(AuditLog::getAction, "security."))
+                .orderByDesc(AuditLog::getCreatedAt)
+                .last("LIMIT 10"));
+        return logs.stream().map(this::toAuditTrail).toList();
+    }
+
+    private AuditTrailVO toAuditTrail(AuditLog log) {
+        AuditTrailVO trail = new AuditTrailVO();
+        trail.setId(log.getId());
+        trail.setUsername(StringUtils.hasText(log.getUsername()) ? log.getUsername() : "系统");
+        trail.setAction(log.getAction());
+        trail.setResource(log.getResource());
+        trail.setResourceId(log.getResourceId());
+        trail.setDetail(resolveAuditMessage(log));
+        trail.setSeverity(resolveAuditSeverity(log));
+        trail.setTargetUrl(resolveAuditTargetUrl(log));
+        trail.setTraceId(extractJsonString(log.getDetail(), "traceId"));
+        trail.setCreatedAt(log.getCreatedAt() != null ? log.getCreatedAt().toString() : null);
+        return trail;
+    }
+
+    private String resolveAuditMessage(AuditLog log) {
+        String message = extractJsonString(log.getDetail(), "message");
+        if (StringUtils.hasText(message)) {
+            return message;
+        }
+        return log.getDetail();
+    }
+
+    private String resolveAuditSeverity(AuditLog log) {
+        String severity = extractJsonString(log.getDetail(), "severity");
+        if (StringUtils.hasText(severity)) {
+            return severity.toUpperCase();
+        }
+        String action = log.getAction() == null ? "" : log.getAction().toLowerCase();
+        if (action.contains("block") || action.contains("denied") || action.contains("failed")) {
+            return "HIGH";
+        }
+        if (action.contains("warn") || action.contains("downgrade") || action.contains("security")) {
+            return "MEDIUM";
+        }
+        return "LOW";
+    }
+
+    private String resolveAuditTargetUrl(AuditLog log) {
+        String resourceId = log.getResourceId();
+        String resource = log.getResource();
+        if (!StringUtils.hasText(resourceId)) {
+            return "/dashboard?mode=situation";
+        }
+        if ("agent_execution".equals(resource)) {
+            return "/agents/executions/" + resourceId;
+        }
+        if ("workflow_instance".equals(resource)) {
+            return "/workflow/" + resourceId;
+        }
+        if ("workflow_node".equals(resource)) {
+            return "/workflow?nodeExecutionId=" + resourceId;
+        }
+        if ("security_incident".equals(resource)) {
+            return "/security-compliance/overview?incidentId=" + resourceId;
+        }
+        if ("review_session".equals(resource)) {
+            return "/approval-center?reviewSessionId=" + resourceId;
+        }
+        return "/dashboard?mode=situation";
+    }
+
+    private String extractJsonString(String raw, String field) {
+        if (!StringUtils.hasText(raw) || !StringUtils.hasText(field)) {
+            return null;
+        }
+        Matcher matcher = Pattern.compile(String.format(JSON_STRING_FIELD_PATTERN.pattern(), Pattern.quote(field))).matcher(raw);
+        return matcher.find() ? matcher.group(1) : null;
     }
 }

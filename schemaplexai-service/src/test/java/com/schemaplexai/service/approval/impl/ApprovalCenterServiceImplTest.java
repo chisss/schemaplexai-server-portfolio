@@ -105,6 +105,11 @@ class ApprovalCenterServiceImplTest {
         assertThat(reviewItem.getActionUrl()).isEqualTo("/approval-center?type=workflow_review&id=session-1");
         assertThat(reviewItem.getPending()).isTrue();
         assertThat(reviewItem.getApproverName()).isNull();
+        assertThat(reviewItem.getPriority()).isEqualTo("HIGH");
+        assertThat(reviewItem.getSlaDueAt()).isEqualTo(LocalDateTime.of(2026, 4, 16, 18, 0, 0));
+        assertThat(reviewItem.getImpactScope()).isEqualTo("Spec: 统一审批 Spec");
+        assertThat(reviewItem.getEvidenceSummary()).isEqualTo("共 1 位审批人，审批节点：方案审批");
+        assertThat(reviewItem.getBlockedResource()).isEqualTo("工作流节点: 方案审批");
 
         ApprovalCenterItemVO securityItem = result.getRecords().stream()
                 .filter(item -> "security_incident".equals(item.getApprovalType()))
@@ -113,6 +118,10 @@ class ApprovalCenterServiceImplTest {
         assertThat(securityItem.getAssigneeName()).isEqualTo("安全值班人");
         assertThat(securityItem.getApproverName()).isEqualTo("安全主管");
         assertThat(securityItem.getPending()).isTrue();
+        assertThat(securityItem.getPriority()).isEqualTo("CRITICAL");
+        assertThat(securityItem.getImpactScope()).isEqualTo("Agent 运行时");
+        assertThat(securityItem.getEvidenceSummary()).isEqualTo("策略 security.policy.block 命中，决策 pause，事件号 SEC-1");
+        assertThat(securityItem.getBlockedResource()).isEqualTo("agent_execution: source-1");
     }
 
     @Test
@@ -423,6 +432,7 @@ class ApprovalCenterServiceImplTest {
                 "role", "架构评审",
                 "status", "pending"
         )));
+        session.setDeadline(LocalDateTime.of(2026, 4, 16, 18, 0, 0));
         session.setCreatedAt(createdAt);
         session.setUpdatedAt(createdAt);
         return session;
@@ -474,8 +484,13 @@ class ApprovalCenterServiceImplTest {
         SecurityIncident incident = new SecurityIncident();
         incident.setId("incident-1");
         incident.setTenantId("tenant-1");
+        incident.setIncidentNo("SEC-1");
+        incident.setRiskLevel("critical");
+        incident.setSourceType("agent_execution");
         incident.setSourceId("source-1");
         incident.setSourceName("Agent 运行时");
+        incident.setPolicyCode("security.policy.block");
+        incident.setDecision("pause");
         incident.setEventTitle("敏感信息外泄风险");
         incident.setEventDetail("需要人工确认后继续");
         incident.setStatus("assigned");

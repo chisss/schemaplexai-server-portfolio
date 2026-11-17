@@ -22,7 +22,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -53,7 +55,7 @@ public class AgentRuntimeOrchestrator {
         AgentExecution update = new AgentExecution();
         update.setId(execution.getId());
         update.setRuntimeEngine(runtimeEngine.getCode());
-        update.setSandboxPolicySnapshot(sandboxPolicyResolver.toSnapshot(sandboxPolicy));
+        update.setSandboxPolicySnapshot(buildRuntimeSnapshot(context, sandboxPolicy));
         agentExecutionMapper.updateById(update);
 
         return strategyFactory.getStrategy(agent.getAgentType()).execute(agent, execution, context);
@@ -85,9 +87,17 @@ public class AgentRuntimeOrchestrator {
         AgentExecution update = new AgentExecution();
         update.setId(execution.getId());
         update.setRuntimeEngine(runtimeEngine.getCode());
-        update.setSandboxPolicySnapshot(sandboxPolicyResolver.toSnapshot(sandboxPolicy));
+        update.setSandboxPolicySnapshot(buildRuntimeSnapshot(context, sandboxPolicy));
         agentExecutionMapper.updateById(update);
         return strategyFactory.getStrategy(agent.getAgentType()).resume(agent, execution, input);
+    }
+
+    private Map<String, Object> buildRuntimeSnapshot(AgentExecutionContext context, SandboxPolicy sandboxPolicy) {
+        Map<String, Object> snapshot = new LinkedHashMap<>(sandboxPolicyResolver.toSnapshot(sandboxPolicy));
+        if (context.getBudgetAdmission() != null) {
+            snapshot.put("budgetAdmission", context.getBudgetAdmission());
+        }
+        return snapshot;
     }
 
     /**

@@ -21,6 +21,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -68,12 +69,14 @@ public class SystemController {
 
     @PostMapping("/models")
     @Operation(summary = "创建AI模型")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<AiModel> createAiModel(@Valid @RequestBody AiModelCreateRequest request) {
         return R.ok(systemConfigService.createAiModel(request));
     }
 
     @PutMapping("/models/{id}")
     @Operation(summary = "更新AI模型")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<AiModel> updateAiModel(@PathVariable String id,
                                      @Valid @RequestBody AiModelUpdateRequest request) {
         return R.ok(systemConfigService.updateAiModel(id, request));
@@ -81,6 +84,7 @@ public class SystemController {
 
     @DeleteMapping("/models/{id}")
     @Operation(summary = "删除AI模型")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<Void> deleteAiModel(@PathVariable String id) {
         systemConfigService.deleteAiModel(id);
         return R.ok();
@@ -88,6 +92,7 @@ public class SystemController {
 
     @PutMapping("/models/{id}/disable")
     @Operation(summary = "停用AI模型并清理路由和模型组引用")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<Void> disableAiModel(@PathVariable String id) {
         systemConfigService.disableAiModel(id);
         return R.ok();
@@ -95,12 +100,14 @@ public class SystemController {
 
     @PostMapping("/models/{id}/test-connectivity")
     @Operation(summary = "测试AI模型连通性")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<ConnectivityTestResultVO> testConnectivity(@PathVariable String id) {
         return R.ok(systemConfigService.testConnectivity(id));
     }
 
     @PostMapping("/models/{id}/real-health-check")
     @Operation(summary = "真实协议健康检查AI模型")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<AiModelRealHealthCheckVO> realHealthCheck(@PathVariable String id) {
         return R.ok(aiModelRealHealthCheckService.testRealConnectivity(id));
     }
@@ -121,12 +128,14 @@ public class SystemController {
 
     @PostMapping("/routes")
     @Operation(summary = "创建路由规则")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<AiModelRouteVO> createRoute(@Valid @RequestBody AiModelRouteCreateRequest request) {
         return R.ok(systemConfigService.createRoute(request));
     }
 
     @PutMapping("/routes/{id}")
     @Operation(summary = "更新路由规则")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<AiModelRouteVO> updateRoute(@PathVariable String id,
                                           @Valid @RequestBody AiModelRouteUpdateRequest request) {
         return R.ok(systemConfigService.updateRoute(id, request));
@@ -134,6 +143,7 @@ public class SystemController {
 
     @DeleteMapping("/routes/{id}")
     @Operation(summary = "删除路由规则")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<Void> deleteRoute(@PathVariable String id) {
         systemConfigService.deleteRoute(id);
         return R.ok();
@@ -155,6 +165,7 @@ public class SystemController {
 
     @PutMapping("/rag/config")
     @Operation(summary = "更新当前租户 RAG 配置")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<RagConfigVO> updateRagConfig(@Valid @RequestBody RagConfigUpdateRequest request) {
         return R.ok(ragConfigService.updateCurrentTenantConfig(request));
     }

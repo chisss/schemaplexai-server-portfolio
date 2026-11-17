@@ -14,6 +14,7 @@ public enum AgentExecutionStatusEnum {
     PAUSED("paused", "已暂停"),
     RUNNING("running", "执行中"),
     COMPLETED("completed", "执行完成"),
+    COMPLETED_WITH_FALLBACK("completed_with_fallback", "兜底完成"),
     FAILED("failed", "执行失败"),
     CANCELLED("cancelled", "已取消"),
     STOPPED("stopped", "已停止");

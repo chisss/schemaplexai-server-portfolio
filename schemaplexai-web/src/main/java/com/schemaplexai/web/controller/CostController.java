@@ -6,17 +6,21 @@ import com.schemaplexai.model.dto.cost.BudgetCreateRequest;
 import com.schemaplexai.model.dto.cost.BudgetQueryRequest;
 import com.schemaplexai.model.dto.cost.BudgetUpdateRequest;
 import com.schemaplexai.model.vo.cost.BudgetAlertVO;
+import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
+import com.schemaplexai.model.vo.cost.BudgetBlockEventVO;
 import com.schemaplexai.model.vo.cost.BudgetUsageVO;
 import com.schemaplexai.model.vo.cost.BudgetVO;
 import com.schemaplexai.model.vo.cost.CostByDimensionVO;
 import com.schemaplexai.model.vo.cost.CostOverviewVO;
 import com.schemaplexai.model.vo.cost.CostTrendVO;
+import com.schemaplexai.service.cost.BudgetAdmissionService;
 import com.schemaplexai.service.cost.BudgetService;
 import com.schemaplexai.service.cost.CostAnalysisService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,6 +44,7 @@ public class CostController {
 
     private final CostAnalysisService costAnalysisService;
     private final BudgetService budgetService;
+    private final BudgetAdmissionService budgetAdmissionService;
 
     // ==================== 成本分析 ====================
 
@@ -99,6 +104,7 @@ public class CostController {
 
     @PostMapping("/budgets")
     @Operation(summary = "创建预算")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).COST_BUDGET_MANAGE.getCode())")
     public R<BudgetVO> createBudget(@Valid @RequestBody BudgetCreateRequest request) {
         return R.ok(budgetService.create(request));
     }
@@ -111,6 +117,7 @@ public class CostController {
 
     @PutMapping("/budget")
     @Operation(summary = "更新当前租户预算配置")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).COST_BUDGET_MANAGE.getCode())")
     public R<BudgetVO> upsertCurrentBudget(@RequestBody BudgetUpdateRequest request) {
         return R.ok(budgetService.upsertCurrentBudget(request));
     }
@@ -123,6 +130,7 @@ public class CostController {
 
     @PutMapping("/budgets/{id}")
     @Operation(summary = "更新预算")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).COST_BUDGET_MANAGE.getCode())")
     public R<BudgetVO> updateBudget(@PathVariable String id,
                                     @Valid @RequestBody BudgetUpdateRequest request) {
         return R.ok(budgetService.update(id, request));
@@ -130,6 +138,7 @@ public class CostController {
 
     @DeleteMapping("/budgets/{id}")
     @Operation(summary = "删除预算")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).COST_BUDGET_MANAGE.getCode())")
     public R<Void> deleteBudget(@PathVariable String id) {
         budgetService.delete(id);
         return R.ok();
@@ -145,6 +154,18 @@ public class CostController {
     @Operation(summary = "获取当前租户预算使用情况")
     public R<BudgetUsageVO> getCurrentBudgetUsage() {
         return R.ok(budgetService.getCurrentBudgetUsage());
+    }
+
+    @GetMapping("/budget/admission-status")
+    @Operation(summary = "获取当前预算执行准入状态")
+    public R<BudgetAdmissionVO> getBudgetAdmissionStatus() {
+        return R.ok(budgetAdmissionService.getCurrentAdmissionStatus());
+    }
+
+    @GetMapping("/budget/block-events")
+    @Operation(summary = "获取最近预算阻断记录")
+    public R<List<BudgetBlockEventVO>> getBudgetBlockEvents(@RequestParam(defaultValue = "10") Integer limit) {
+        return R.ok(budgetAdmissionService.listRecentBlockEvents(limit));
     }
 
     @GetMapping("/budgets/alerts")

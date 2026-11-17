@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
 import lombok.Builder;
 import lombok.Data;
@@ -72,6 +73,9 @@ public class AgentExecutionContext {
 
     /** 执行期沙箱策略 */
     private SandboxPolicy sandboxPolicy;
+
+    /** 执行前预算准入快照 */
+    private BudgetAdmissionVO budgetAdmission;
 
     /** 会话标识（前端传入或自动生成，支持多轮对话） */
     private String conversationId;

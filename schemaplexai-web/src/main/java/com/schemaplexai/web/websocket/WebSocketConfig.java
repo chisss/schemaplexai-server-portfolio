@@ -5,6 +5,7 @@ import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
 import com.schemaplexai.web.handler.WebSocketHandler;
+import com.schemaplexai.web.config.SecurityProperties;
 import lombok.RequiredArgsConstructor;
 
 /**
@@ -17,11 +18,12 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     private final WebSocketHandler webSocketHandler;
     private final WebSocketAuthHandshakeInterceptor webSocketAuthHandshakeInterceptor;
+    private final SecurityProperties securityProperties;
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(webSocketHandler, "/ws")
                 .addInterceptors(webSocketAuthHandshakeInterceptor)
-                .setAllowedOriginPatterns("*");
+                .setAllowedOrigins(securityProperties.getAllowedOrigins().toArray(String[]::new));
     }
 }

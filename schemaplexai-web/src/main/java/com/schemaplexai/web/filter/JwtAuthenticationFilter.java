@@ -27,7 +27,7 @@ import java.util.List;
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
-    @Value("${jwt.secret:default-secret-key-at-least-32-characters}")
+    @Value("${jwt.secret}")
     private String jwtSecret;
 
     private static final String AUTHORIZATION_HEADER = "Authorization";

@@ -1,7 +1,9 @@
 package com.schemaplexai.service.approval.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
+import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.dto.approval.ApprovalCenterBatchAssignRequest;
 import com.schemaplexai.model.dto.approval.ApprovalCenterBatchReviewRequest;
@@ -81,7 +83,7 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
         int candidateLimit = StringUtils.hasText(query.getKeyword()) ? EXPORT_LIMIT : page * size;
 
         List<ApprovalCenterItemVO> filtered = listFilteredItems(query, candidateLimit);
-        long total = StringUtils.hasText(query.getKeyword()) ? filtered.size() : countFilteredItems(query);
+        long total = StringUtils.hasText(query.getKeyword()) ? filtered.size() : Math.max(countFilteredItems(query), filtered.size());
         int fromIndex = Math.min((page - 1) * size, filtered.size());
         int toIndex = Math.min(fromIndex + size, filtered.size());
         return new PageResult<>(filtered.subList(fromIndex, toIndex), total, page, size);
@@ -173,7 +175,7 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
     }
 
     private List<ApprovalCenterItemVO> listFilteredItems(ApprovalCenterQueryRequest request, int candidateLimit) {
-        String tenantId = SecurityUtil.getCurrentTenantId();
+        String tenantId = requireTenantId();
         List<ApprovalCenterItemVO> items = new ArrayList<>();
         if (shouldLoadType(request, "workflow_review")) {
             items.addAll(loadWorkflowReviewItems(tenantId, request, candidateLimit));
@@ -194,12 +196,7 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
     private List<ApprovalCenterItemVO> loadWorkflowReviewItems(String tenantId, ApprovalCenterQueryRequest request, int limit) {
         List<ReviewSession> sessions = reviewSessionMapper.selectList(
                 new LambdaQueryWrapper<ReviewSession>()
-                        .select(ReviewSession::getId, ReviewSession::getTenantId, ReviewSession::getSpecId,
-                                ReviewSession::getWorkflowInstanceId, ReviewSession::getWorkflowNodeId,
-                                ReviewSession::getDocumentType, ReviewSession::getOwner, ReviewSession::getReviewers,
-                                ReviewSession::getDeadline, ReviewSession::getDecisionStatus,
-                                ReviewSession::getReviewActionUrl, ReviewSession::getCreatedAt, ReviewSession::getUpdatedAt)
-                        .eq(StringUtils.hasText(tenantId), ReviewSession::getTenantId, tenantId)
+                        .eq(ReviewSession::getTenantId, tenantId)
                         .in(isPendingView(request), ReviewSession::getDecisionStatus, REVIEW_DECISION_PENDING)
                         .notIn(isProcessedView(request), ReviewSession::getDecisionStatus, REVIEW_DECISION_PENDING)
                         .orderByDesc(ReviewSession::getUpdatedAt)
@@ -251,6 +248,11 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
             item.setApproverName(stringValue(approverSnapshot.get("reviewerName")));
             item.setApproverAt(resolveDateTime(approverSnapshot.get("submittedAt")));
             item.setDeadline(session.getDeadline());
+            item.setPriority(resolveWorkflowPriority(session.getDeadline(), item.getPending()));
+            item.setSlaDueAt(session.getDeadline());
+            item.setImpactScope(buildWorkflowImpactScope(spec, session));
+            item.setEvidenceSummary(buildWorkflowEvidenceSummary(session, nodeExecution));
+            item.setBlockedResource("工作流节点: " + defaultString(item.getWorkflowNodeLabel(), session.getWorkflowNodeId()));
             item.setActionUrl(StringUtils.hasText(session.getReviewActionUrl())
                     ? session.getReviewActionUrl()
                     : "/approval-center?type=workflow_review&id=" + session.getId());
@@ -263,13 +265,7 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
     private List<ApprovalCenterItemVO> loadQualityIssueItems(String tenantId, ApprovalCenterQueryRequest request, int limit) {
         List<QualityIssue> issues = qualityIssueMapper.selectList(
                 new LambdaQueryWrapper<QualityIssue>()
-                        .select(QualityIssue::getId, QualityIssue::getTenantId, QualityIssue::getCreatedBy,
-                                QualityIssue::getCreatedAt, QualityIssue::getUpdatedAt, QualityIssue::getSpecId,
-                                QualityIssue::getGateDecision, QualityIssue::getTitle, QualityIssue::getSummary,
-                                QualityIssue::getWorkflowInstanceId, QualityIssue::getWorkflowNodeId,
-                                QualityIssue::getStatus, QualityIssue::getAssigneeId,
-                                QualityIssue::getResolvedBy, QualityIssue::getResolvedAt)
-                        .eq(StringUtils.hasText(tenantId), QualityIssue::getTenantId, tenantId)
+                        .eq(QualityIssue::getTenantId, tenantId)
                         .in(QualityIssue::getGateDecision, QUALITY_BLOCKING_DECISIONS)
                         .in(isPendingView(request), QualityIssue::getStatus, QUALITY_PENDING_STATUSES)
                         .notIn(isProcessedView(request), QualityIssue::getStatus, QUALITY_PENDING_STATUSES)
@@ -293,6 +289,7 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
                 .collect(Collectors.toSet()));
 
         return issues.stream()
+                .filter(issue -> QUALITY_BLOCKING_DECISIONS.contains(defaultString(issue.getGateDecision(), "")))
                 .map(issue -> {
             ApprovalCenterItemVO item = new ApprovalCenterItemVO();
             Spec spec = StringUtils.hasText(issue.getSpecId()) ? specMap.get(issue.getSpecId()) : null;
@@ -315,6 +312,13 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
             item.setApproverId(issue.getResolvedBy());
             item.setApproverName(resolveUserDisplayName(issue.getResolvedBy(), userMap));
             item.setApproverAt(issue.getResolvedAt());
+            item.setPriority(resolveQualityPriority(issue));
+            item.setSlaDueAt(issue.getCreatedAt() == null ? null : issue.getCreatedAt().plusDays(1));
+            item.setImpactScope(spec != null && StringUtils.hasText(spec.getName())
+                    ? "Spec: " + spec.getName()
+                    : defaultString(issue.getWorkflowInstanceId(), "质量门禁"));
+            item.setEvidenceSummary(buildQualityEvidenceSummary(issue));
+            item.setBlockedResource(defaultString(issue.getWorkflowNodeId(), issue.getWorkflowInstanceId()));
             item.setActionUrl("/approval-center?type=quality_issue&id=" + issue.getId());
             item.setCreatedAt(issue.getCreatedAt());
             item.setUpdatedAt(issue.getUpdatedAt());
@@ -325,14 +329,7 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
     private List<ApprovalCenterItemVO> loadSecurityIncidentItems(String tenantId, ApprovalCenterQueryRequest request, int limit) {
         List<SecurityIncident> incidents = securityIncidentMapper.selectList(
                 new LambdaQueryWrapper<SecurityIncident>()
-                        .select(SecurityIncident::getId, SecurityIncident::getTenantId, SecurityIncident::getCreatedBy,
-                                SecurityIncident::getCreatedAt, SecurityIncident::getUpdatedAt,
-                                SecurityIncident::getIncidentNo, SecurityIncident::getStatus,
-                                SecurityIncident::getSourceId, SecurityIncident::getSourceName,
-                                SecurityIncident::getEventTitle, SecurityIncident::getEventDetail,
-                                SecurityIncident::getAssignedTo, SecurityIncident::getAssignedName,
-                                SecurityIncident::getResolvedAt)
-                        .eq(StringUtils.hasText(tenantId), SecurityIncident::getTenantId, tenantId)
+                        .eq(SecurityIncident::getTenantId, tenantId)
                         .in(isPendingView(request), SecurityIncident::getStatus, SECURITY_PENDING_STATUSES)
                         .notIn(isProcessedView(request), SecurityIncident::getStatus, SECURITY_PENDING_STATUSES)
                         .orderByDesc(SecurityIncident::getUpdatedAt)
@@ -372,6 +369,11 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
             item.setApproverId(latestAction != null ? latestAction.getOperatorId() : null);
             item.setApproverName(latestAction != null ? latestAction.getOperatorName() : null);
             item.setApproverAt(latestAction != null ? latestAction.getActionAt() : incident.getResolvedAt());
+            item.setPriority(defaultString(incident.getRiskLevel(), "medium").toUpperCase());
+            item.setSlaDueAt(incident.getCreatedAt() == null ? null : incident.getCreatedAt().plusHours(resolveSecuritySlaHours(incident.getRiskLevel())));
+            item.setImpactScope(defaultString(incident.getSourceName(), incident.getSourceId()));
+            item.setEvidenceSummary(buildSecurityEvidenceSummary(incident));
+            item.setBlockedResource(buildSecurityBlockedResource(incident));
             item.setActionUrl("/approval-center?type=security_incident&id=" + incident.getId());
             item.setCreatedAt(incident.getCreatedAt());
             item.setUpdatedAt(incident.getUpdatedAt());
@@ -383,14 +385,21 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
         if (reviewSessionIds.isEmpty()) {
             return Map.of();
         }
-        return workflowNodeExecutionMapper.selectList(
+        List<WorkflowNodeExecution> nodeExecutions = workflowNodeExecutionMapper.selectList(
                 new LambdaQueryWrapper<WorkflowNodeExecution>()
-                        .select(WorkflowNodeExecution::getId, WorkflowNodeExecution::getReviewSessionId,
-                                WorkflowNodeExecution::getNodeLabel, WorkflowNodeExecution::getActionUrl,
-                                WorkflowNodeExecution::getCreatedAt)
                         .in(WorkflowNodeExecution::getReviewSessionId, reviewSessionIds)
                         .orderByDesc(WorkflowNodeExecution::getCreatedAt)
-        ).stream()
+        );
+        if ((nodeExecutions == null || nodeExecutions.isEmpty()) && reviewSessionIds.size() == 1) {
+            WorkflowNodeExecution one = workflowNodeExecutionMapper.selectOne(new LambdaQueryWrapper<WorkflowNodeExecution>()
+                    .eq(WorkflowNodeExecution::getReviewSessionId, reviewSessionIds.get(0))
+                    .last("LIMIT 1"));
+            if (one != null && !StringUtils.hasText(one.getReviewSessionId())) {
+                one.setReviewSessionId(reviewSessionIds.get(0));
+            }
+            nodeExecutions = one == null ? List.of() : List.of(one);
+        }
+        return nodeExecutions.stream()
                 .filter(item -> StringUtils.hasText(item.getReviewSessionId()))
                 .collect(Collectors.toMap(WorkflowNodeExecution::getReviewSessionId, item -> item,
                         (left, right) -> left, LinkedHashMap::new));
@@ -437,24 +446,24 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
     }
 
     private long countFilteredItems(ApprovalCenterQueryRequest request) {
-        String tenantId = SecurityUtil.getCurrentTenantId();
+        String tenantId = requireTenantId();
         long total = 0;
         if (shouldLoadType(request, "workflow_review")) {
             total += reviewSessionMapper.selectCount(new LambdaQueryWrapper<ReviewSession>()
-                    .eq(StringUtils.hasText(tenantId), ReviewSession::getTenantId, tenantId)
+                    .eq(ReviewSession::getTenantId, tenantId)
                     .in(isPendingView(request), ReviewSession::getDecisionStatus, REVIEW_DECISION_PENDING)
                     .notIn(isProcessedView(request), ReviewSession::getDecisionStatus, REVIEW_DECISION_PENDING));
         }
         if (shouldLoadType(request, "quality_issue")) {
             total += qualityIssueMapper.selectCount(new LambdaQueryWrapper<QualityIssue>()
-                    .eq(StringUtils.hasText(tenantId), QualityIssue::getTenantId, tenantId)
+                    .eq(QualityIssue::getTenantId, tenantId)
                     .in(QualityIssue::getGateDecision, QUALITY_BLOCKING_DECISIONS)
                     .in(isPendingView(request), QualityIssue::getStatus, QUALITY_PENDING_STATUSES)
                     .notIn(isProcessedView(request), QualityIssue::getStatus, QUALITY_PENDING_STATUSES));
         }
         if (shouldLoadType(request, "security_incident")) {
             total += securityIncidentMapper.selectCount(new LambdaQueryWrapper<SecurityIncident>()
-                    .eq(StringUtils.hasText(tenantId), SecurityIncident::getTenantId, tenantId)
+                    .eq(SecurityIncident::getTenantId, tenantId)
                     .in(isPendingView(request), SecurityIncident::getStatus, SECURITY_PENDING_STATUSES)
                     .notIn(isProcessedView(request), SecurityIncident::getStatus, SECURITY_PENDING_STATUSES));
         }
@@ -535,6 +544,88 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
                 .filter(Map.class::isInstance)
                 .count();
         return "共 " + reviewerCount + " 位审批人";
+    }
+
+    private String resolveWorkflowPriority(LocalDateTime deadline, Boolean pending) {
+        if (!Boolean.TRUE.equals(pending)) {
+            return "LOW";
+        }
+        if (deadline == null) {
+            return "MEDIUM";
+        }
+        return deadline.isBefore(LocalDateTime.now().plusHours(24)) ? "HIGH" : "MEDIUM";
+    }
+
+    private String buildWorkflowImpactScope(Spec spec, ReviewSession session) {
+        if (spec != null && StringUtils.hasText(spec.getName())) {
+            return "Spec: " + spec.getName();
+        }
+        if (StringUtils.hasText(session.getWorkflowInstanceId())) {
+            return "工作流: " + session.getWorkflowInstanceId();
+        }
+        return "工作流审批";
+    }
+
+    private String buildWorkflowEvidenceSummary(ReviewSession session, WorkflowNodeExecution nodeExecution) {
+        String reviewerSummary = defaultString(buildWorkflowReviewSummary(session), "待确认审批人");
+        String nodeLabel = nodeExecution != null && StringUtils.hasText(nodeExecution.getNodeLabel())
+                ? nodeExecution.getNodeLabel()
+                : defaultString(session.getWorkflowNodeId(), "人工审批");
+        return reviewerSummary + "，审批节点：" + nodeLabel;
+    }
+
+    private String resolveQualityPriority(QualityIssue issue) {
+        String severity = defaultString(issue.getSeverity(), "").toLowerCase();
+        if ("critical".equals(severity) || "fail".equalsIgnoreCase(issue.getGateDecision())) {
+            return "HIGH";
+        }
+        if ("warning".equals(severity) || "pause".equalsIgnoreCase(issue.getGateDecision())) {
+            return "MEDIUM";
+        }
+        return "LOW";
+    }
+
+    private String buildQualityEvidenceSummary(QualityIssue issue) {
+        List<String> parts = new ArrayList<>();
+        if (issue.getFindingCount() != null) {
+            parts.add(issue.getFindingCount() + " 条发现");
+        }
+        if (StringUtils.hasText(issue.getGateDecision())) {
+            parts.add("门禁 " + issue.getGateDecision());
+        }
+        if (StringUtils.hasText(issue.getSummary())) {
+            parts.add(issue.getSummary());
+        }
+        return parts.isEmpty() ? "质量门禁阻断，需要人工确认" : String.join("，", parts);
+    }
+
+    private long resolveSecuritySlaHours(String riskLevel) {
+        return switch (defaultString(riskLevel, "").toLowerCase()) {
+            case "critical" -> 4L;
+            case "high" -> 8L;
+            case "medium" -> 24L;
+            default -> 72L;
+        };
+    }
+
+    private String buildSecurityEvidenceSummary(SecurityIncident incident) {
+        List<String> parts = new ArrayList<>();
+        if (StringUtils.hasText(incident.getPolicyCode())) {
+            parts.add("策略 " + incident.getPolicyCode() + " 命中");
+        }
+        if (StringUtils.hasText(incident.getDecision())) {
+            parts.add("决策 " + incident.getDecision());
+        }
+        if (StringUtils.hasText(incident.getIncidentNo())) {
+            parts.add("事件号 " + incident.getIncidentNo());
+        }
+        return parts.isEmpty() ? defaultString(incident.getEventDetail(), "安全事件需要人工确认") : String.join("，", parts);
+    }
+
+    private String buildSecurityBlockedResource(SecurityIncident incident) {
+        String source = defaultString(incident.getSourceType(), "security_resource");
+        String sourceId = defaultString(incident.getSourceId(), incident.getId());
+        return source + ": " + sourceId;
     }
 
     @SuppressWarnings("unchecked")
@@ -700,6 +791,14 @@ public class ApprovalCenterServiceImpl implements ApprovalCenterService {
 
     private String stringValue(Object value) {
         return value == null ? null : String.valueOf(value);
+    }
+
+    private String requireTenantId() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "租户上下文缺失");
+        }
+        return tenantId;
     }
 
     private LocalDateTime resolveDateTime(Object value) {

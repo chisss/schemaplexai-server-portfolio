@@ -6,15 +6,21 @@ import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.handler.TenantLineHandler;
 import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor;
+import com.schemaplexai.common.constant.SystemTenantConstant;
+import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.common.util.SystemTenantContext;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.StringValue;
 import org.apache.ibatis.reflection.MetaObject;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.List;
 
 /**
@@ -27,12 +33,10 @@ public class MyBatisPlusConfig {
     private static final List<String> IGNORE_TENANT_TABLES = Arrays.asList(
             // 系统级/租户管理表
             "sf_tenant",
-            "sf_audit_log",
             "sf_i18n_locale",
             "sf_i18n_message",
             // 权限体系表（系统级，不区分租户）
             "sf_permission",
-            "sf_role",
             "sf_user_role",
             "sf_role_permission",
             // 菜单为系统级全局菜单（tenant_id=null），不做租户过滤
@@ -90,11 +94,7 @@ public class MyBatisPlusConfig {
 
             @Override
             public boolean ignoreTable(String tableName) {
-                // 没有租户上下文时（如登录等未认证场景），跳过所有表的租户过滤
-                if (SecurityUtil.getCurrentTenantId() == null) {
-                    return true;
-                }
-                return IGNORE_TENANT_TABLES.contains(tableName);
+                return shouldIgnoreTenantTable(tableName);
             }
         }));
 
@@ -102,6 +102,20 @@ public class MyBatisPlusConfig {
         interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.POSTGRE_SQL));
 
         return interceptor;
+    }
+
+    public static boolean shouldIgnoreTenantTable(String tableName) {
+        String normalizedTableName = tableName == null ? "" : tableName.toLowerCase(Locale.ROOT);
+        if (IGNORE_TENANT_TABLES.contains(normalizedTableName)) {
+            return true;
+        }
+        if (SystemTenantContext.isSystemOperation()) {
+            return true;
+        }
+        if (!StringUtils.hasText(SecurityUtil.getCurrentTenantId())) {
+            throw new BusinessException(ResultCode.FORBIDDEN, SystemTenantConstant.TENANT_CONTEXT_MISSING_MESSAGE);
+        }
+        return false;
     }
 
     /**

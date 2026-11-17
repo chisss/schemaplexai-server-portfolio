@@ -65,10 +65,7 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
     public PageResult<SecurityIncidentVO> page(SecurityIncidentQueryRequest request) {
         var page = new Page<SecurityIncident>(request.getPage(), request.getSize());
         var wrapper = new LambdaQueryWrapper<SecurityIncident>();
-        String tenantId = SecurityUtil.getCurrentTenantId();
-        if (StringUtils.hasText(tenantId)) {
-            wrapper.eq(SecurityIncident::getTenantId, tenantId);
-        }
+        wrapper.eq(SecurityIncident::getTenantId, requireTenantId());
         if (StringUtils.hasText(request.getDomainCode())) {
             wrapper.eq(SecurityIncident::getDomainCode, request.getDomainCode());
         }
@@ -114,10 +111,9 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
     @Override
     public List<SecurityIncidentVO> listRecent(int limit) {
         int finalLimit = Math.min(Math.max(limit, 1), RECENT_LIMIT);
-        String tenantId = SecurityUtil.getCurrentTenantId();
         return securityIncidentMapper.selectList(
                 new LambdaQueryWrapper<SecurityIncident>()
-                        .eq(StringUtils.hasText(tenantId), SecurityIncident::getTenantId, tenantId)
+                        .eq(SecurityIncident::getTenantId, requireTenantId())
                         .orderByDesc(SecurityIncident::getCreatedAt)
                         .last("LIMIT " + finalLimit)
         ).stream().map(this::toVO).toList();
@@ -266,6 +262,14 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
             throw new BusinessException(ResultCode.SECURITY_INCIDENT_NOT_FOUND);
         }
         return incident;
+    }
+
+    private String requireTenantId() {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "租户上下文缺失");
+        }
+        return tenantId;
     }
 
     private void appendAction(SecurityIncident incident,

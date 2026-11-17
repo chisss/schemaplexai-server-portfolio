@@ -1,6 +1,7 @@
 package com.schemaplexai.model.vo.agent;
 
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
+import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -34,4 +35,7 @@ public class AgentExecuteResultVO {
 
     /** 安全检查决策 */
     private SecurityCheckDecisionVO securityDecision;
+
+    /** 预算准入决策 */
+    private BudgetAdmissionVO budgetAdmission;
 }

@@ -159,12 +159,12 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             log.error("Team Agent 执行失败: executionId={}", execution.getId(), exception);
             if (isTransientModelChannelFailure(exception.getMessage())) {
                 String fallbackOutput = buildExecutionLevelFallbackOutput(execution, exception.getMessage());
-                agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED.getCode(),
+                agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
                         null, null, null, fallbackOutput);
-                publishParentEvent(execution, AgentExecutionEventTypeEnum.COMPLETED,
-                        "Team Agent 模型通道异常，已生成规则化兜底交付", Map.of(TeamGraphConstants.EVENT_PAYLOAD_FINAL_OUTPUT, fallbackOutput));
+                publishFallbackUsedEvent(execution, "Team Agent 模型通道异常，已生成规则化兜底交付",
+                        exception.getMessage(), fallbackOutput);
                 return CompletableFuture.completedFuture(AgentExecutionResult.builder()
-                        .status(AgentExecutionStatusEnum.COMPLETED.getCode())
+                        .status(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode())
                         .outputResult(fallbackOutput)
                         .conversationId(execution.getConversationId())
                         .build());
@@ -510,7 +510,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     payload.put(TeamGraphConstants.RESULT_OUTPUT_RESULT, result != null ? result.getOutputResult() : null);
                     payload.put(TeamGraphConstants.RESULT_ERROR_MESSAGE, result != null ? result.getErrorMessage() : null);
                     payload.put(TeamGraphConstants.RESULT_CONVERSATION_ID, result != null ? result.getConversationId() : null);
-                    if (!AgentExecutionStatusEnum.COMPLETED.getCode().equals(status)
+                    if (!isSuccessfulOutputStatus(status)
                             && isTransientModelChannelFailure(result != null ? result.getErrorMessage() : null)) {
                         return buildTransientMemberFallbackPayload(agent, parentExecution, member,
                                 childExecution, modelName, result.getErrorMessage(), payload);
@@ -541,12 +541,12 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                                                                     String errorMessage,
                                                                     Map<String, Object> payload) {
         String fallbackOutput = buildMemberTransientFallbackOutput(member, parentExecution, errorMessage);
-        payload.put(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode());
+        payload.put(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode());
         payload.put(TeamGraphConstants.RESULT_OUTPUT_RESULT, fallbackOutput);
         payload.put(TeamGraphConstants.RESULT_ERROR_MESSAGE,
                 "模型通道异常，已生成成员级规则化兜底结果: " + safeText(errorMessage, ""));
         payload.put(TeamGraphConstants.RESULT_CONVERSATION_ID, childExecution.getConversationId());
-        agentLogService.updateExecutionStatus(childExecution.getId(), AgentExecutionStatusEnum.COMPLETED.getCode(),
+        agentLogService.updateExecutionStatus(childExecution.getId(), AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
                 null, null, null, fallbackOutput);
         agentContextPublisher.publishAgentOutput(
                 agent.getId(),
@@ -555,7 +555,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 parentExecution.getId(),
                 member.getId(),
                 member.getRoleName(),
-                AgentExecutionStatusEnum.COMPLETED.getCode(),
+                AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
                 fallbackOutput,
                 parentExecution.getTenantId(),
                 childExecution.getConversationId()
@@ -607,6 +607,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         List<String> modelSummaries = new ArrayList<>();
         List<String> executionSummaries = new ArrayList<>();
         boolean hasContributor = false;
+        boolean fallbackUsed = false;
         for (Map<String, Object> memberResult : memberResults) {
             String roleName = asText(memberResult.get(TeamGraphConstants.RESULT_ROLE_NAME));
             String roleType = asText(memberResult.get(TeamGraphConstants.RESULT_ROLE_TYPE));
@@ -618,13 +619,16 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             if (AgentExecutionStatusEnum.PAUSED.getCode().equals(status)) {
                 pausedCount++;
             }
-            if (AgentExecutionStatusEnum.COMPLETED.getCode().equals(status) && StringUtils.hasText(outputResult)) {
+            if (isSuccessfulOutputStatus(status) && StringUtils.hasText(outputResult)) {
                 successCount++;
                 if (!leadRole) {
                     contributorSuccessCount++;
                 }
             }
-            if (AgentExecutionStatusEnum.COMPLETED.getCode().equals(status) && !StringUtils.hasText(outputResult)) {
+            if (AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode().equals(status)) {
+                fallbackUsed = true;
+            }
+            if (isSuccessfulOutputStatus(status) && !StringUtils.hasText(outputResult)) {
                 warnings.add("[" + roleName + "] 执行已完成但未产生可用输出");
             }
             if (!leadRole) {
@@ -660,7 +664,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             if (shouldUseRuleBasedFallback(errors)) {
                 String fallbackOutput = buildRuleBasedFallbackOutput(memberResults, retryCount, warnings, errors,
                         modelSummaries, executionSummaries);
-                update.put(TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode());
+                update.put(TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode());
                 update.put(TeamGraphConstants.STATE_FINAL_OUTPUT, fallbackOutput);
                 update.put(TeamGraphConstants.STATE_AGGREGATE_META,
                         buildAggregateOverview(memberResults.size(), 0, retryCount, modelSummaries, executionSummaries));
@@ -680,7 +684,9 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             update.put(TeamGraphConstants.STATE_FINAL_ERROR, StringUtils.collectionToDelimitedString(failureMessages, "\n"));
             return update;
         }
-        update.put(TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode());
+        update.put(TeamGraphConstants.STATE_FINAL_STATUS, fallbackUsed
+                ? AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode()
+                : AgentExecutionStatusEnum.COMPLETED.getCode());
         update.put(TeamGraphConstants.STATE_FINAL_OUTPUT, leadOutput);
         update.put(TeamGraphConstants.STATE_AGGREGATE_META,
                 buildAggregateOverview(memberResults.size(), successCount, retryCount, modelSummaries, executionSummaries));
@@ -694,6 +700,11 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             update.put(TeamGraphConstants.STATE_FINAL_ERROR, StringUtils.collectionToDelimitedString(errors, "\n"));
         }
         return update;
+    }
+
+    private boolean isSuccessfulOutputStatus(String status) {
+        return AgentExecutionStatusEnum.COMPLETED.getCode().equals(status)
+                || AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode().equals(status);
     }
 
     private boolean shouldUseRuleBasedFallback(List<String> errors) {
@@ -936,14 +947,25 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     .conversationId(execution.getConversationId())
                     .build();
         }
+        if (AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode().equals(finalStatus)) {
+            agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
+                    null, tokenUsage.inputTokens(), tokenUsage.outputTokens(), state.finalOutput());
+            publishFallbackUsedEvent(execution, "Team Agent 已启用规则化兜底交付",
+                    state.finalError(), state.finalOutput());
+            return AgentExecutionResult.builder()
+                    .status(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode())
+                    .outputResult(state.finalOutput())
+                    .conversationId(execution.getConversationId())
+                    .build();
+        }
         if (isTransientModelChannelFailure(state.finalError())) {
             String fallbackOutput = buildExecutionLevelFallbackOutput(execution, state.finalError());
-            agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED.getCode(),
+            agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
                     null, tokenUsage.inputTokens(), tokenUsage.outputTokens(), fallbackOutput);
-            publishParentEvent(execution, AgentExecutionEventTypeEnum.COMPLETED,
-                    "Team Agent 模型通道异常，已生成规则化兜底交付", Map.of(TeamGraphConstants.EVENT_PAYLOAD_FINAL_OUTPUT, fallbackOutput));
+            publishFallbackUsedEvent(execution, "Team Agent 模型通道异常，已生成规则化兜底交付",
+                    state.finalError(), fallbackOutput);
             return AgentExecutionResult.builder()
-                    .status(AgentExecutionStatusEnum.COMPLETED.getCode())
+                    .status(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode())
                     .outputResult(fallbackOutput)
                     .conversationId(execution.getConversationId())
                     .build();
@@ -1681,9 +1703,18 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .build());
     }
 
+    private void publishFallbackUsedEvent(AgentExecution execution, String message, String reason, String fallbackOutput) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put(TeamGraphConstants.EVENT_PAYLOAD_FINAL_OUTPUT, fallbackOutput);
+        payload.put("fallbackReason", safeText(reason, "模型通道异常"));
+        payload.put("reviewRequired", true);
+        payload.put("recommendedActions", List.of("重新运行", "转人工复核", "查看 trace"));
+        publishParentEvent(execution, AgentExecutionEventTypeEnum.FALLBACK_USED, message, payload);
+    }
+
     private String resolveParentLogLevel(AgentExecutionEventTypeEnum eventType) {
         return switch (eventType) {
-            case REQUIRE_INPUT, SECURITY_WARN, PAUSED -> LOG_LEVEL_WARN;
+            case REQUIRE_INPUT, SECURITY_WARN, PAUSED, FALLBACK_USED -> LOG_LEVEL_WARN;
             case FAILED, BLOCKED, CANCELLED -> LOG_LEVEL_ERROR;
             default -> LOG_LEVEL_INFO;
         };

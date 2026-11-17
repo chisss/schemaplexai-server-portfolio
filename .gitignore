@@ -42,3 +42,18 @@ logs/
 .spec-workflow
 .serena
 sql
+
+# 公开版本不包含运行时配置、数据库定义和 SQL 模板
+schemaplexai-web/src/main/resources/application*.yml
+schemaplexai-web/src/main/resources/application*.yaml
+schemaplexai-web/src/main/resources/application*.properties
+!schemaplexai-web/src/main/resources/application.example.yml
+schemaplexai-web/src/main/resources/db/**/*.sql
+schemaplexai-service/src/main/resources/sql-templates/**/*.sql
+
+# 本地工作记录与工具缓存
+.ccg/
+.claude/
+docs/superpowers/
+.mvn/settings.xml
+BACKEND_CONFIG.md

@@ -13,6 +13,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -52,18 +53,21 @@ public class TenantController {
 
     @PostMapping
     @Operation(summary = "创建租户")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_TENANT_MANAGE.getCode())")
     public R<TenantVO> create(@Valid @RequestBody TenantCreateRequest request) {
         return R.ok(tenantService.createTenant(request));
     }
 
     @PutMapping("/{id}")
     @Operation(summary = "更新租户")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_TENANT_MANAGE.getCode())")
     public R<TenantVO> update(@PathVariable String id, @Valid @RequestBody TenantUpdateRequest request) {
         return R.ok(tenantService.updateTenant(id, request));
     }
 
     @PutMapping("/{id}/status")
     @Operation(summary = "更新租户状态")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_TENANT_MANAGE.getCode())")
     public R<Void> updateStatus(@PathVariable String id, @Valid @RequestBody StatusUpdateRequest request) {
         tenantService.updateStatus(id, request.getStatus());
         return R.ok();
@@ -71,6 +75,7 @@ public class TenantController {
 
     @DeleteMapping("/{id}")
     @Operation(summary = "删除租户")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_TENANT_MANAGE.getCode())")
     public R<Void> delete(@PathVariable String id) {
         tenantService.deleteTenant(id);
         return R.ok();
@@ -78,12 +83,14 @@ public class TenantController {
 
     @PutMapping("/{id}/profile")
     @Operation(summary = "更新租户行业配置（行业、场景、能力）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_TENANT_MANAGE.getCode())")
     public R<TenantVO> updateProfile(@PathVariable String id, @RequestBody TenantProfileUpdateRequest request) {
         return R.ok(tenantTemplateService.updateProfile(id, request));
     }
 
     @PostMapping("/{id}/init-template")
     @Operation(summary = "触发租户行业模板初始化（异步）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_TENANT_MANAGE.getCode())")
     public R<String> initTemplate(@PathVariable String id) {
         return R.ok(tenantTemplateService.initializeTemplate(id));
     }
