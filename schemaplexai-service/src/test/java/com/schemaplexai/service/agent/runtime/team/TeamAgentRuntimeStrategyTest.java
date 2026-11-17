@@ -26,7 +26,9 @@ import org.mockito.ArgumentCaptor;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Method;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -272,6 +274,25 @@ class TeamAgentRuntimeStrategyTest {
         verify(eventStreamService).publish(eventCaptor.capture());
         assertThat(eventCaptor.getValue().getEventType())
                 .isEqualTo(AgentExecutionEventTypeEnum.FALLBACK_USED.getCode());
+    }
+
+    @Test
+    void shouldReuseCompletedMemberResultsAcrossRetry() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        Map<String, Object> completed = new LinkedHashMap<>();
+        completed.put(TeamGraphConstants.RESULT_MEMBER_ID, "member-1");
+        completed.put(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode());
+        Map<String, Object> completedWithFallback = new LinkedHashMap<>();
+        completedWithFallback.put(TeamGraphConstants.RESULT_MEMBER_ID, "member-2");
+        completedWithFallback.put(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode());
+        Map<String, Object> failed = new LinkedHashMap<>();
+        failed.put(TeamGraphConstants.RESULT_MEMBER_ID, "member-3");
+        failed.put(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.FAILED.getCode());
+
+        Set<String> completedIds = strategy.resolveCompletedMemberIds(
+                List.of(completed, completedWithFallback, failed));
+
+        assertThat(completedIds).containsExactlyInAnyOrder("member-1", "member-2");
     }
 
     @Test
