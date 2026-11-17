@@ -7,11 +7,13 @@ import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.common.enums.ToolIoTypeEnum;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
+import com.schemaplexai.model.entity.ExecutionSteering;
 import com.schemaplexai.model.entity.PendingToolApproval;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
 import com.schemaplexai.service.agent.execution.approval.CreatePendingToolApprovalCommand;
 import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
 import com.schemaplexai.service.agent.execution.approval.ToolApprovalBatchService;
+import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringService;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicyResolver;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePromptContributor;
 import com.schemaplexai.service.agent.execution.policy.ToolExecutionGate;
@@ -56,6 +58,7 @@ import java.util.concurrent.TimeoutException;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.*;
 
 class AgentExecutionEngineTest {
@@ -997,6 +1000,28 @@ class AgentExecutionEngineTest {
     }
 
     @Test
+    void shouldInjectPendingSteeringIntoChatMemory() {
+        ExecutionSteeringService steeringService = mock(ExecutionSteeringService.class);
+        ExecutionSteering steering = new ExecutionSteering();
+        steering.setId("steering-1");
+        steering.setSeq(1);
+        steering.setContent("只做 A，不要做 B");
+        when(steeringService.findPending("exec-1")).thenReturn(List.of(steering));
+        when(steeringService.markApplied("steering-1")).thenReturn(true);
+        AgentExecutionEngine engine = buildMinimalEngine(mock(AgentLogService.class),
+                mock(ExecutionEventStreamService.class), null, mock(PendingToolApprovalService.class), steeringService);
+        ChatMemory chatMemory = mock(ChatMemory.class);
+
+        engine.consumePendingSteeringIfAny("exec-1", "agent-1", "tenant-1", chatMemory, 1, 100L);
+
+        verify(chatMemory).add(org.mockito.ArgumentMatchers.<ChatMessage>argThat(message ->
+                message instanceof UserMessage userMessage
+                        && userMessage.singleText().contains("【用户最新引导】")
+                        && userMessage.singleText().contains("只做 A，不要做 B")));
+        verify(steeringService).markApplied("steering-1");
+    }
+
+    @Test
     void shouldPrefixConversationIdWithTenant() {
         AgentExecutionEngine engine = buildMinimalEngine(null, null, null, mock(PendingToolApprovalService.class));
         AgentExecutionContext context = AgentExecutionContext.builder()
@@ -1038,6 +1063,15 @@ class AgentExecutionEngineTest {
                                                      ExecutionEventStreamService eventStreamService,
                                                      QualityOrchestrator qualityOrchestrator,
                                                      PendingToolApprovalService pendingToolApprovalService) {
+        return buildMinimalEngine(agentLogService, eventStreamService, qualityOrchestrator, pendingToolApprovalService,
+                mock(ExecutionSteeringService.class));
+    }
+
+    private AgentExecutionEngine buildMinimalEngine(AgentLogService agentLogService,
+                                                     ExecutionEventStreamService eventStreamService,
+                                                     QualityOrchestrator qualityOrchestrator,
+                                                     PendingToolApprovalService pendingToolApprovalService,
+                                                     ExecutionSteeringService executionSteeringService) {
         AgentLoopQualityChecker checker = new AgentLoopQualityChecker(qualityOrchestrator);
         AgentLoopShadowReviewService shadowReviewService = new AgentLoopShadowReviewService(checker, Runnable::run);
         AgentLoopCompletionHandler completionHandler = new AgentLoopCompletionHandler(null, checker, qualityOrchestrator);
@@ -1051,7 +1085,8 @@ class AgentExecutionEngineTest {
                 mock(AgentContextBudgetService.class), mock(MultimodalMessageBuilder.class),
                 mock(ObjectProvider.class), new ToolExecutionGate(mock(ToolApprovalAmendmentService.class)),
                 new ExecutionModePolicyResolver(), new ExecutionModePromptContributor(), pendingToolApprovalService,
-                mock(ToolApprovalBatchService.class));
+                mock(ToolApprovalBatchService.class),
+                executionSteeringService);
     }
 
     private AgentToolSessionFactory.RoundToolContext roundToolContext(
