@@ -59,6 +59,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -111,6 +112,13 @@ public class AgentExecutionEngine {
     private static final String STATUS_STOPPED   = AgentExecutionStatusEnum.STOPPED.getCode();
     private static final String STATUS_COMPLETED = AgentExecutionStatusEnum.COMPLETED.getCode();
     private static final String STATUS_FAILED    = AgentExecutionStatusEnum.FAILED.getCode();
+
+    /** 执行硬边界默认值（策略缺失时兜底，与 SandboxPolicyResolver 默认一致） */
+    @Value("${schemaplexai.execution.default-max-minutes:30}")
+    private int defaultMaxExecutionMinutes = 30;
+
+    @Value("${schemaplexai.execution.default-max-token-budget:200000}")
+    private long defaultMaxTokenBudget = 200_000L;
 
     private final AgentLogService              agentLogService;
     private final ContextInjector              contextInjector;
@@ -294,6 +302,10 @@ public class AgentExecutionEngine {
         String tenantId    = ctx.getTenantId();
         AgentLoopState state = new AgentLoopState();
         int maxLoopRounds = params.getMaxRounds() + params.getMaxQualityReflections();
+        // 真实执行硬边界（审计 P1-4）：截止时间与累计 Token 预算，策略缺失用默认常量兜底
+        int maxExecutionMinutes = resolveMaxExecutionMinutes(ctx);
+        long deadlineMs = startMs + maxExecutionMinutes * 60_000L;
+        long maxTokenBudget = resolveMaxTokenBudget(ctx);
 
         try (AgentToolSessionFactory.AgentToolSession toolSession = agentToolSessionFactory.openSession(ctx, conversationId)) {
             String effectiveSystemPrompt = toolSession.augmentSystemPrompt(systemPrompt);
@@ -309,6 +321,15 @@ public class AgentExecutionEngine {
                 // 检查是否被用户停止
                 if (isStopped(executionId)) {
                     return buildStoppedResult(executionId, agentId, tenantId, round, startMs);
+                }
+
+                // 执行截止时间硬边界（超时强制终止）
+                if (System.currentTimeMillis() > deadlineMs) {
+                    agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                            AgentLoopLogTypeEnum.EXECUTION_FAILED.getCode(), round, null,
+                            "执行超时: maxExecutionMinutes=" + maxExecutionMinutes, null, elapsed(startMs));
+                    return buildFailedResult(executionId, agentId, tenantId, round, state, startMs,
+                            "执行超时（maxExecutionMinutes=" + maxExecutionMinutes + "）");
                 }
 
                 consumePendingShadowReviewIfReady(chatMemory, state, params,
@@ -357,6 +378,15 @@ public class AgentExecutionEngine {
                 // 处理 AI 响应
                 ChatResponse response = callResult.response();
                 updateTokenUsage(state, response);
+                // 累计 Token 硬预算（超预算强制收敛，不再发起新一轮模型调用）
+                long totalTokens = state.getTotalTokenInput() + state.getTotalTokenOutput();
+                if (totalTokens > maxTokenBudget) {
+                    agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                            AgentLoopLogTypeEnum.EXECUTION_FAILED.getCode(), round, null,
+                            "累计 Token 超过硬预算: total=" + totalTokens + ", budget=" + maxTokenBudget, null, elapsed(startMs));
+                    state.setForceCompletionRequested(true);
+                    break;
+                }
                 AiMessage aiMsg = response.aiMessage();
                 String lastContent = aiMsg != null && aiMsg.text() != null ? aiMsg.text() : "";
                 state.setLastContent(lastContent);
@@ -1538,6 +1568,22 @@ public class AgentExecutionEngine {
     }
 
     /** 更新 state 中的 token 用量 */
+    int resolveMaxExecutionMinutes(AgentExecutionContext ctx) {
+        SandboxPolicy policy = ctx.getSandboxPolicy();
+        if (policy != null && policy.getMaxExecutionMinutes() > 0) {
+            return policy.getMaxExecutionMinutes();
+        }
+        return defaultMaxExecutionMinutes;
+    }
+
+    long resolveMaxTokenBudget(AgentExecutionContext ctx) {
+        SandboxPolicy policy = ctx.getSandboxPolicy();
+        if (policy != null && policy.getMaxTokenBudget() > 0) {
+            return policy.getMaxTokenBudget();
+        }
+        return defaultMaxTokenBudget;
+    }
+
     private void updateTokenUsage(AgentLoopState state, ChatResponse response) {
         if (response == null || response.metadata() == null || response.metadata().tokenUsage() == null) return;
         state.addTokenUsage(

@@ -966,6 +966,36 @@ class AgentExecutionEngineTest {
                 mock(PendingToolApprovalService.class));
     }
 
+    @Test
+    void shouldResolveDeadlineAndTokenBudgetFromSandboxPolicy() {
+        AgentExecutionEngine engine = buildMinimalEngine(null, null, null, mock(PendingToolApprovalService.class));
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("exec-1")
+                .sandboxPolicy(SandboxPolicy.builder()
+                        .maxExecutionMinutes(45)
+                        .maxTokenBudget(99_000L)
+                        .build())
+                .build();
+
+        assertThat(engine.resolveMaxExecutionMinutes(context)).isEqualTo(45);
+        assertThat(engine.resolveMaxTokenBudget(context)).isEqualTo(99_000L);
+    }
+
+    @Test
+    void shouldFallBackToDefaultBudgetWhenPolicyMissing() {
+        AgentExecutionEngine engine = buildMinimalEngine(null, null, null, mock(PendingToolApprovalService.class));
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .tenantId("tenant-1")
+                .agentId("agent-1")
+                .executionId("exec-1")
+                .build();
+
+        assertThat(engine.resolveMaxExecutionMinutes(context)).isEqualTo(30);
+        assertThat(engine.resolveMaxTokenBudget(context)).isEqualTo(200_000L);
+    }
+
     private AgentExecutionEngine buildMinimalEngine(AgentLogService agentLogService,
                                                      ExecutionEventStreamService eventStreamService,
                                                      QualityOrchestrator qualityOrchestrator,
