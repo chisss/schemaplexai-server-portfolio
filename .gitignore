@@ -57,3 +57,4 @@ schemaplexai-service/src/main/resources/sql-templates/**/*.sql
 docs/superpowers/
 .mvn/settings.xml
 BACKEND_CONFIG.md
+harness-progress.txt
