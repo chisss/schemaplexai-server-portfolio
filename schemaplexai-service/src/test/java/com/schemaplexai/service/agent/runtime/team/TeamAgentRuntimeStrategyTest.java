@@ -363,7 +363,8 @@ class TeamAgentRuntimeStrategyTest {
                 mock(AgentContextPublisher.class),
                 mock(DataSource.class),
                 mock(SandboxPolicyResolver.class),
-                mock(ExecutionSteeringService.class)
+                mock(ExecutionSteeringService.class),
+                new DefaultTeamQualityDetector()
         );
     }
 }
