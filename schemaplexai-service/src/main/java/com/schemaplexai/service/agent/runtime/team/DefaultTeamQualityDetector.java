@@ -11,11 +11,14 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.springframework.stereotype.Component;
+
 /**
  * Team 质量判据与规则化兜底的默认实现（审计 P2-1 拆分）。
  *
  * <p>聚合判据纯函数与「公司/联系人/获客」业务规则全部收敛于此，支持插拔替换。</p>
  */
+@Component
 public class DefaultTeamQualityDetector implements TeamQualityDetector {
 
     private static final Pattern MIN_COMPANY_COUNT_PATTERN = Pattern.compile(

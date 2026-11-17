@@ -2,6 +2,7 @@ package com.schemaplexai.service.workflow.flowable;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
+import com.schemaplexai.common.util.SystemTenantContext;
 import com.schemaplexai.model.entity.WorkflowTemplate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,6 +27,11 @@ public class FlowableTemplateMigrator {
 
     @EventListener(ApplicationReadyEvent.class)
     public void migrateTemplatesOnStartup() {
+        // 启动期迁移不依赖请求租户上下文，走系统操作豁免
+        SystemTenantContext.runAsSystem(this::doMigrate);
+    }
+
+    private void doMigrate() {
         log.info("开始检查并迁移未部署到 Flowable 的工作流模板...");
 
         List<WorkflowTemplate> undeployed = templateMapper.selectList(

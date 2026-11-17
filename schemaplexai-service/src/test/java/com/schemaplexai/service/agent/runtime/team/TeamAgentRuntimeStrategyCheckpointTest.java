@@ -301,6 +301,12 @@ class TeamAgentRuntimeStrategyCheckpointTest {
             deleteCheckpoint.executeUpdate();
             deleteThread.setString(1, threadName);
             deleteThread.executeUpdate();
+        } catch (java.sql.SQLException e) {
+            // 首次运行表尚未创建（langgraph4j PostgresSaver 首次执行时自建），跳过清理
+            if ("42P01".equals(e.getSQLState())) {
+                return;
+            }
+            throw e;
         }
     }
 
