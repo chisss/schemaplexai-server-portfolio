@@ -19,6 +19,7 @@ import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
+import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.mq.AgentContextPublisher;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -89,7 +90,8 @@ class TeamAgentRuntimeStrategyCheckpointTest {
                 qualityChecker,
                 executionEventStreamService,
                 agentContextPublisher,
-                buildCheckpointDataSource()
+                buildCheckpointDataSource(),
+                mock(SandboxPolicyResolver.class)
         );
         ReflectionTestUtils.setField(strategy, "datasourceUrl", DATASOURCE_URL);
         ReflectionTestUtils.setField(strategy, "datasourceUsername", DATASOURCE_USERNAME);
