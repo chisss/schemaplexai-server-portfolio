@@ -37,6 +37,9 @@ public class AgentExecution implements Serializable {
     /** 会话标识，支持多轮对话 */
     private String conversationId;
 
+    /** 会话消息版本号（PG ChatMemoryStore 乐观锁） */
+    private Integer chatVersion;
+
     /** 运行时引擎 */
     private String runtimeEngine;
 

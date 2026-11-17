@@ -60,6 +60,8 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
         }
     }
 
+    private static final int MAX_VERSION_CAS_ATTEMPTS = 3;
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateMessages(Object memoryId, List<ChatMessage> messages) {
@@ -71,23 +73,40 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
                 return;
             }
 
-            // 删除旧消息（物理删除，因为 ChatMemory 的 eviction 机制需要精确覆盖）
-            chatMessageMapper.delete(
-                    new LambdaQueryWrapper<ChatMessageEntity>()
-                            .eq(ChatMessageEntity::getConversationId, conversationId));
-
-            // 批量插入新消息
-            for (int i = 0; i < messages.size(); i++) {
-                ChatMessage msg = messages.get(i);
-                ChatMessageEntity entity = fromLangChain4jMessage(msg, messageOwner, conversationId, i);
-                if (entity != null) {
-                    chatMessageMapper.insert(entity);
+            // 会话版本乐观锁：CAS 成功后在同一事务内全删全插，并发写冲突时重读版本重试
+            for (int attempt = 1; attempt <= MAX_VERSION_CAS_ATTEMPTS; attempt++) {
+                int expectedVersion = messageOwner.getChatVersion() != null ? messageOwner.getChatVersion() : 0;
+                int rows = agentExecutionMapper.casIncrementChatVersion(messageOwner.getId(), expectedVersion);
+                if (rows == 1) {
+                    writeMessages(conversationId, messageOwner, messages);
+                    log.debug("更新 PostgreSQL 对话历史: conversationId={}, count={}, attempt={}",
+                            conversationId, messages.size(), attempt);
+                    return;
                 }
+                log.warn("会话写入版本冲突，重试: conversationId={}, attempt={}/{}",
+                        conversationId, attempt, MAX_VERSION_CAS_ATTEMPTS);
+                messageOwner = agentExecutionMapper.selectById(messageOwner.getId());
             }
-
-            log.debug("更新 PostgreSQL 对话历史: conversationId={}, count={}", conversationId, messages.size());
+            log.error("会话写入版本冲突超限，放弃本次写入（保留上一版消息）: conversationId={}", conversationId);
         } catch (Exception e) {
             log.error("更新 PostgreSQL 对话历史失败: conversationId={}", conversationId, e);
+        }
+    }
+
+    /**
+     * 删除旧消息并批量插入新消息（物理删除，因为 ChatMemory 的 eviction 机制需要精确覆盖）
+     */
+    private void writeMessages(String conversationId, AgentExecution messageOwner, List<ChatMessage> messages) {
+        chatMessageMapper.delete(
+                new LambdaQueryWrapper<ChatMessageEntity>()
+                        .eq(ChatMessageEntity::getConversationId, conversationId));
+
+        for (int i = 0; i < messages.size(); i++) {
+            ChatMessage msg = messages.get(i);
+            ChatMessageEntity entity = fromLangChain4jMessage(msg, messageOwner, conversationId, i);
+            if (entity != null) {
+                chatMessageMapper.insert(entity);
+            }
         }
     }
 
