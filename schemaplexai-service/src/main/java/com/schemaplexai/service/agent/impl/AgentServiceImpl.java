@@ -1601,8 +1601,15 @@ public class AgentServiceImpl implements AgentService {
             }
             PendingToolApproval pending = pendingOpt.get();
             dto.setApprovalId(pending.getId());
+            // 归属四元组：租户/执行从独立来源取，agent/conversation 从执行记录取（防跨租户/跨执行决策）
+            AgentExecution execution = agentExecutionMapper.selectById(executionId);
+            if (execution == null) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "执行记录不存在: " + executionId);
+            }
             PendingToolApproval decided = pendingToolApprovalService.decide(
-                    pending.getId(), dto, SecurityUtil.getCurrentUserId());
+                    pending.getId(), dto, SecurityUtil.getCurrentUserId(),
+                    SecurityUtil.getCurrentTenantId(), execution.getAgentId(),
+                    executionId, execution.getConversationId());
             dto.setToolCode(resolveApprovalToolCode(dto, decided));
             dto.setToolCommand(resolveApprovalToolCommand(dto, decided));
             return decided;

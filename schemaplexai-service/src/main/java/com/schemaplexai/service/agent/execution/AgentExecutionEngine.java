@@ -20,6 +20,8 @@ import com.schemaplexai.service.agent.execution.AgentLoopToolHandler.ToolExecuti
 import com.schemaplexai.service.agent.execution.AgentModelInvoker.ModelCallResult;
 import com.schemaplexai.service.agent.execution.approval.CreatePendingToolApprovalCommand;
 import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
+import com.schemaplexai.service.agent.execution.approval.ToolApprovalBatchService;
+import com.schemaplexai.model.entity.ToolApprovalBatch;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicyResolver;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePromptContributor;
@@ -134,6 +136,7 @@ public class AgentExecutionEngine {
     private final ExecutionModePolicyResolver  executionModePolicyResolver;
     private final ExecutionModePromptContributor executionModePromptContributor;
     private final PendingToolApprovalService   pendingToolApprovalService;
+    private final ToolApprovalBatchService     toolApprovalBatchService;
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
     private final AgentChatMemoryCompactor     chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport);
 
@@ -607,7 +610,12 @@ public class AgentExecutionEngine {
                 continue;
             }
             if (decision.getDecision() == ToolExecutionDecisionEnum.PAUSE_APPROVAL) {
-                PendingToolApproval approval = createPendingApprovalForTool(ctx, req, ioType, round, conversationId);
+                // 持久化该轮整批 toolCalls 快照（暂停点起剩余全部请求），防同轮其余工具静默丢失
+                List<ToolExecutionRequest> remainingRequests = new ArrayList<>(
+                        executableSubList.subList(executableSubList.indexOf(req), executableSubList.size()));
+                ToolApprovalBatch batch = toolApprovalBatchService.createBatch(
+                        tenantId, agentId, executionId, ctx.getConversationId(), round, remainingRequests, req.id());
+                PendingToolApproval approval = createPendingApprovalForTool(ctx, req, ioType, round, conversationId, batch.getId());
                 // 需要审批：发送审批事件，暂停执行
                 executionEventStreamService.publishWithPayload(executionId,
                         AgentExecutionEventTypeEnum.APPROVAL_REQUIRED.getCode(), round,
@@ -763,6 +771,13 @@ public class AgentExecutionEngine {
             return null;
         }
         PendingToolApproval approval = approvalOpt.get();
+        // 归属校验：审批必须属于当前租户与当前执行，防跨租户/跨执行恢复
+        if (!tenantId.equals(approval.getTenantId()) || !executionId.equals(approval.getExecutionId())) {
+            log.warn("审批归属校验失败，拒绝恢复: executionId={}, approvalId={}", executionId, input.getApprovalId());
+            return buildFailedResult(executionId, agentId, tenantId,
+                    approval.getRoundNum() != null ? approval.getRoundNum() : 0, state, startMs,
+                    "审批归属校验失败，拒绝恢复该审批");
+        }
         int round = approval.getRoundNum() != null ? approval.getRoundNum() : 0;
         AgentToolSessionFactory.RoundToolContext roundCtx = toolSession.buildRoundContext(chatMemory, round);
         AgentExecutionResult interrupted = applyPendingApprovalDecision(
@@ -797,8 +812,22 @@ public class AgentExecutionEngine {
                 );
 
         if (pendingToolApprovalService.isApproved(approval)) {
+            // 一次性消费（CAS approved/edited→consumed）：重复恢复同 approvalId 不得重复执行写工具
+            if (!pendingToolApprovalService.consume(approval.getId())) {
+                log.warn("审批已消费，跳过重复执行（幂等保护）: approvalId={}", approval.getId());
+                ToolResult alreadyConsumed = buildApprovalConsumedResult(request, approval);
+                chatMemory.add(toolHandler.buildResultMessage(
+                        request, alreadyConsumed, Map.of("approvalId", approval.getId()), true,
+                        null, compressionOptions));
+                publishApprovalResumeEvent(executionId, round, approval, false, false, startMs);
+                return null;
+            }
             ToolExecutionOutcome outcome = toolHandler.executeOne(roundCtx, request, compressionOptions);
             chatMemory.add(outcome.resultMessage());
+            // 批次账本：当前 callId 标记 consumed，其余未决策 callId 显式记账（restored_skipped）
+            toolApprovalBatchService.markCallStatus(
+                    approval.getBatchId(), approval.getToolCallId(), ToolApprovalBatchService.CALL_STATUS_CONSUMED);
+            toolApprovalBatchService.markOthersSkippedAfterRestore(approval.getBatchId(), approval.getToolCallId());
             publishApprovalResumeEvent(executionId, round, approval, outcome.toolResult().isSuccess(), true, startMs);
             agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
                     AgentLoopLogTypeEnum.TOOL_RESULT.getCode(), round, request.name(),
@@ -837,7 +866,8 @@ public class AgentExecutionEngine {
                                                      ToolExecutionRequest request,
                                                      ToolIoTypeEnum ioType,
                                                      int round,
-                                                     String conversationId) {
+                                                     String conversationId,
+                                                     String batchId) {
         PendingToolApproval approval = pendingToolApprovalService.createPending(CreatePendingToolApprovalCommand.builder()
                 .tenantId(ctx.getTenantId())
                 .agentId(ctx.getAgentId())
@@ -848,6 +878,7 @@ public class AgentExecutionEngine {
                 .ioType(ioType)
                 .riskLevel("MEDIUM")
                 .toolRequest(request)
+                .batchId(batchId)
                 .build());
         log.info("已创建待审批工具调用: executionId={}, approvalId={}, toolCode={}, ioType={}",
                 ctx.getExecutionId(), approval.getId(), request.name(), ioType != null ? ioType.getCode() : null);
@@ -871,6 +902,23 @@ public class AgentExecutionEngine {
                 .result(objectMapper.valueToTree(payload))
                 .errorMessage(message)
                 .controlAction("DENIED_BY_USER")
+                .build();
+    }
+
+    private ToolResult buildApprovalConsumedResult(ToolExecutionRequest request, PendingToolApproval approval) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", false);
+        payload.put("executed", false);
+        payload.put("controlAction", "ALREADY_CONSUMED");
+        payload.put("message", "该审批已消费，跳过重复执行（幂等保护）");
+        payload.put("approvalId", approval.getId());
+        return ToolResult.builder()
+                .callId(request.id())
+                .toolCode(request.name())
+                .success(false)
+                .result(objectMapper.valueToTree(payload))
+                .errorMessage("该审批已消费，跳过重复执行（幂等保护）")
+                .controlAction("ALREADY_CONSUMED")
                 .build();
     }
 

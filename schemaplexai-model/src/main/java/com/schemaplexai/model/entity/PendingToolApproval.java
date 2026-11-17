@@ -17,6 +17,9 @@ import java.util.Map;
 @TableName(value = "sf_pending_tool_approval", autoResultMap = true)
 public class PendingToolApproval extends BaseEntity {
 
+    /** 审批批次 ID（暂停时持久化的整批 toolCalls 快照） */
+    private String batchId;
+
     /** 关联执行 ID */
     private String executionId;
 

@@ -9,8 +9,10 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +57,7 @@ class PendingToolApprovalServiceTest {
     void shouldApprovePendingApprovalAndRebuildOriginalToolRequest() {
         PendingToolApproval approval = pendingApproval();
         when(approvalMapper.selectById("approval-1")).thenReturn(approval);
+        when(approvalMapper.update(any(PendingToolApproval.class), any())).thenReturn(1);
 
         AgentExecutionInputDTO input = new AgentExecutionInputDTO();
         input.setApprovalDecision("approve");
@@ -71,13 +74,14 @@ class PendingToolApprovalServiceTest {
         assertThat(rebuilt.id()).isEqualTo("call-1");
         assertThat(rebuilt.name()).isEqualTo("sys.write");
         assertThat(rebuilt.arguments()).isEqualTo("{\"path\":\"README.md\"}");
-        verify(approvalMapper).updateById(approval);
+        verify(approvalMapper).update(any(PendingToolApproval.class), any());
     }
 
     @Test
     void shouldDenyPendingApproval() {
         PendingToolApproval approval = pendingApproval();
         when(approvalMapper.selectById("approval-1")).thenReturn(approval);
+        when(approvalMapper.update(any(PendingToolApproval.class), any())).thenReturn(1);
 
         AgentExecutionInputDTO input = new AgentExecutionInputDTO();
         input.setApprovalDecision("deny");
@@ -88,7 +92,47 @@ class PendingToolApprovalServiceTest {
         assertThat(decided.getDecisionStatus()).isEqualTo(PendingToolApprovalService.STATUS_DENIED);
         assertThat(decided.getDecision()).isEqualTo("deny");
         assertThat(decided.getDecisionReason()).isEqualTo("不允许修改");
-        verify(approvalMapper).updateById(approval);
+        verify(approvalMapper).update(any(PendingToolApproval.class), any());
+    }
+
+    @Test
+    void shouldRejectOwnershipMismatchOnDecide() {
+        PendingToolApproval approval = pendingApproval();
+        when(approvalMapper.selectById("approval-1")).thenReturn(approval);
+
+        AgentExecutionInputDTO input = new AgentExecutionInputDTO();
+        input.setApprovalDecision("approve");
+
+        assertThatThrownBy(() -> service.decide("approval-1", input, "user-1",
+                "other-tenant", "agent-1", "exec-1", "conv-1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("归属校验失败");
+        verify(approvalMapper, never()).update(any(PendingToolApproval.class), any());
+    }
+
+    @Test
+    void shouldRejectDuplicateDecisionAfterFirstDecide() {
+        PendingToolApproval approval = pendingApproval();
+        when(approvalMapper.selectById("approval-1")).thenReturn(approval);
+        when(approvalMapper.update(any(PendingToolApproval.class), any())).thenReturn(1, 0);
+
+        AgentExecutionInputDTO input = new AgentExecutionInputDTO();
+        input.setApprovalDecision("approve");
+
+        PendingToolApproval first = service.decide("approval-1", input, "user-1");
+        assertThat(first.getDecisionStatus()).isEqualTo(PendingToolApprovalService.STATUS_APPROVED);
+
+        assertThatThrownBy(() -> service.decide("approval-1", input, "user-1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("已处理");
+    }
+
+    @Test
+    void shouldConsumeApprovalExactlyOnce() {
+        when(approvalMapper.update(any(PendingToolApproval.class), any())).thenReturn(1, 0);
+
+        assertThat(service.consume("approval-1")).isTrue();
+        assertThat(service.consume("approval-1")).isFalse();
     }
 
     private PendingToolApproval pendingApproval() {
