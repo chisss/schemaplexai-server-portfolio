@@ -2,6 +2,7 @@ package com.schemaplexai.web.config;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.util.SystemTenantContext;
 import com.schemaplexai.dao.mapper.RoleMapper;
 import com.schemaplexai.dao.mapper.TenantMapper;
 import com.schemaplexai.dao.mapper.UserMapper;
@@ -35,6 +36,11 @@ public class DataInitializer implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
+        // 系统预设数据初始化不依赖请求租户上下文，走系统操作豁免（TenantInterceptor 强校验兼容）
+        SystemTenantContext.runAsSystem(this::doRun);
+    }
+
+    private void doRun() {
         log.info("===== 开始检查系统预设数据 =====");
         String tenantId = ensureDefaultTenant();
         String roleId = ensureSuperAdminRole(tenantId);

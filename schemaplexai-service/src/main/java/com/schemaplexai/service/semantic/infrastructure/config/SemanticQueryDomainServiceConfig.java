@@ -19,6 +19,7 @@ import org.springframework.beans.factory.annotation.Value;
 import com.schemaplexai.service.semantic.domain.service.SemanticQueryInterpretationService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 
 /** 将无框架领域服务以 Bean 暴露给 application 编排层。 */
 @Configuration
@@ -46,6 +47,7 @@ public class SemanticQueryDomainServiceConfig {
     }
 
     @Bean
+    @Primary
     public SemanticQueryExecutorPort semanticQueryExecutorPort(
             DatabaseSourceService databaseSourceService,
             MongoAggregationSemanticQueryExecutorAdapter mongoAdapter) {
