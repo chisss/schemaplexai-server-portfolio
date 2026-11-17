@@ -40,6 +40,12 @@ public class SandboxGuard {
     @Value("${schemaplexai.sandbox.allowed-commands:ls,cat,head,tail,grep,find,wc,sort,uniq,diff,echo,pwd,date,whoami}")
     private String allowedCommandsConfig;
 
+    /**
+     * 逃生阀：策略缺失时是否放行（默认 false = fail-closed，仅运维应急可开启）
+     */
+    @Value("${schemaplexai.sandbox.fail-open-on-null:false}")
+    private boolean failOpenOnNull;
+
     @Lazy
     @Autowired(required = false)
     private ToolApprovalAmendmentService amendmentService;
@@ -51,18 +57,35 @@ public class SandboxGuard {
         configuredAllowedCommands = parseAllowedCommands(allowedCommandsConfig);
     }
 
+    /**
+     * 校验工具调用（sourceType 从 binding 派生）。
+     * 策略缺失时默认拒绝（fail-closed），可用 {@code schemaplexai.sandbox.fail-open-on-null} 逃生阀回退旧行为。
+     */
     public String validateTool(SandboxPolicy policy, AgentToolBinding binding, ToolCall toolCall) {
-        if (policy == null || toolCall == null || !StringUtils.hasText(toolCall.getToolCode())) {
+        String sourceType = binding != null && StringUtils.hasText(binding.getSourceType())
+                ? binding.getSourceType().trim().toLowerCase()
+                : SourceTypeEnum.BUILTIN.getCode();
+        return validateTool(policy, sourceType, toolCall);
+    }
+
+    /**
+     * 校验工具调用（显式 sourceType，供无 AgentToolBinding 的 MCP/Skill 原生工具使用）。
+     */
+    public String validateTool(SandboxPolicy policy, String sourceType, ToolCall toolCall) {
+        if (toolCall == null || !StringUtils.hasText(toolCall.getToolCode())) {
             return null;
+        }
+        if (policy == null) {
+            return failOpenOnNull ? null : "沙箱策略缺失，工具执行被拒绝（fail-closed）";
         }
         Set<String> allowedToolCodes = policy.getAllowedToolCodes();
         if (!CollectionUtils.isEmpty(allowedToolCodes) && !allowedToolCodes.contains(toolCall.getToolCode())) {
             return "工具未在沙箱白名单内: " + toolCall.getToolCode();
         }
-        String sourceType = binding != null && StringUtils.hasText(binding.getSourceType())
-                ? binding.getSourceType().trim().toLowerCase()
+        String effectiveSourceType = StringUtils.hasText(sourceType)
+                ? sourceType.trim().toLowerCase()
                 : SourceTypeEnum.BUILTIN.getCode();
-        if (!policy.isNetworkEgressEnabled() && !SourceTypeEnum.BUILTIN.getCode().equals(sourceType)) {
+        if (!policy.isNetworkEgressEnabled() && !SourceTypeEnum.BUILTIN.getCode().equals(effectiveSourceType)) {
             return "当前沙箱策略禁止外部网络工具: " + toolCall.getToolCode();
         }
         if (!policy.isNetworkEgressEnabled() && isNetworkBuiltinTool(toolCall.getToolCode())) {
@@ -79,6 +102,9 @@ public class SandboxGuard {
 
     public void validateBuiltinExecution(SandboxPolicy policy, String toolCode, Map<String, Object> args, Path workingDirectory, String command) {
         if (policy == null) {
+            if (!failOpenOnNull) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "沙箱策略缺失，禁止执行（fail-closed）");
+            }
             return;
         }
         if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "sys.bash".equalsIgnoreCase(toolCode)) {
