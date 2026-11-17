@@ -59,16 +59,18 @@ final class AgentChatMemoryCompactor {
             """;
 
     private final TokenEstimatorSupport tokenEstimatorSupport;
-    private ChatModel compactionModel;
+    private final ChatModel compactionModel;
 
     AgentChatMemoryCompactor(TokenEstimatorSupport tokenEstimatorSupport) {
-        this.tokenEstimatorSupport = tokenEstimatorSupport;
+        this(tokenEstimatorSupport, null);
     }
 
     /**
-     * 设置用于上下文压缩的小模型（可选，未设置时降级到字符串提取）
+     * @param compactionModel 用于上下文压缩的小模型（可选，null 时降级到字符串提取）；
+     *                        执行级注入，实例无共享可变状态，并发安全
      */
-    void setCompactionModel(ChatModel compactionModel) {
+    AgentChatMemoryCompactor(TokenEstimatorSupport tokenEstimatorSupport, ChatModel compactionModel) {
+        this.tokenEstimatorSupport = tokenEstimatorSupport;
         this.compactionModel = compactionModel;
     }
 
