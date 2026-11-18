@@ -1,5 +1,6 @@
 package com.schemaplexai.web.controller;
 
+import com.schemaplexai.common.enums.PermissionCodeEnum;
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.entity.SysDict;
 import com.schemaplexai.model.entity.SysDictItem;
@@ -13,6 +14,7 @@ import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -51,6 +53,7 @@ public class DictController {
         return R.ok(dictService.listItemsByDictCode(code));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_DICT_MANAGE.getCode())")
     @PostMapping("/dicts")
     @Operation(summary = "创建字典")
     public R<SysDict> createDict(@Valid @RequestBody DictCreateReq req) {
@@ -63,6 +66,7 @@ public class DictController {
         return R.ok(dictService.createDict(entity));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_DICT_MANAGE.getCode())")
     @PutMapping("/dicts/{id}")
     @Operation(summary = "更新字典")
     public R<SysDict> updateDict(@PathVariable String id, @RequestBody DictUpdateReq req) {
@@ -75,6 +79,7 @@ public class DictController {
         return R.ok(dictService.updateDict(id, entity));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_DICT_MANAGE.getCode())")
     @DeleteMapping("/dicts/{id}")
     @Operation(summary = "删除字典")
     public R<Void> deleteDict(@PathVariable String id) {
@@ -82,6 +87,7 @@ public class DictController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_DICT_MANAGE.getCode())")
     @PostMapping("/dicts/{code}/items")
     @Operation(summary = "创建字典项")
     public R<SysDictItem> createDictItem(@PathVariable String code,
@@ -91,6 +97,7 @@ public class DictController {
         return R.ok(dictService.createDictItem(code, entity));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_DICT_MANAGE.getCode())")
     @PutMapping("/dicts/items/{id}")
     @Operation(summary = "更新字典项")
     public R<SysDictItem> updateDictItem(@PathVariable String id,
@@ -100,6 +107,7 @@ public class DictController {
         return R.ok(dictService.updateDictItem(id, entity));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_DICT_MANAGE.getCode())")
     @DeleteMapping("/dicts/items/{id}")
     @Operation(summary = "删除字典项")
     public R<Void> deleteDictItem(@PathVariable String id) {

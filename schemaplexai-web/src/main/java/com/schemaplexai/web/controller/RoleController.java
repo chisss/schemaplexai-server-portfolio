@@ -1,6 +1,7 @@
 package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.result.PageResult;
+import com.schemaplexai.common.enums.PermissionCodeEnum;
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.dto.system.RoleCreateRequest;
 import com.schemaplexai.model.dto.system.RoleQueryRequest;
@@ -12,6 +13,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -52,18 +54,21 @@ public class RoleController {
         return R.ok(roleService.getRoleById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_ROLE_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建角色")
     public R<RoleVO> create(@Valid @RequestBody RoleCreateRequest request) {
         return R.ok(roleService.createRole(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_ROLE_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新角色")
     public R<RoleVO> update(@PathVariable String id, @Valid @RequestBody RoleUpdateRequest request) {
         return R.ok(roleService.updateRole(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_ROLE_MANAGE.getCode())")
     @PutMapping("/{id}/status")
     @Operation(summary = "更新角色状态")
     public R<Void> updateStatus(@PathVariable String id, @Valid @RequestBody StatusUpdateRequest request) {
@@ -71,6 +76,7 @@ public class RoleController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_ROLE_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除角色")
     public R<Void> delete(@PathVariable String id) {

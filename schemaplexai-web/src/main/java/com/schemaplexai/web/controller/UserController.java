@@ -1,6 +1,7 @@
 package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.result.PageResult;
+import com.schemaplexai.common.enums.PermissionCodeEnum;
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.dto.system.UserCreateRequest;
 import com.schemaplexai.model.dto.system.UserQueryRequest;
@@ -11,6 +12,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -43,18 +45,21 @@ public class UserController {
         return R.ok(userService.getUserById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_USER_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建用户")
     public R<UserVO> create(@Valid @RequestBody UserCreateRequest request) {
         return R.ok(userService.createUser(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_USER_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新用户")
     public R<UserVO> update(@PathVariable String id, @Valid @RequestBody UserUpdateRequest request) {
         return R.ok(userService.updateUser(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_USER_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除用户")
     public R<Void> delete(@PathVariable String id) {
@@ -62,6 +67,7 @@ public class UserController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_USER_MANAGE.getCode())")
     @PutMapping("/{id}/password/reset")
     @Operation(summary = "重置用户密码")
     public R<Void> resetPassword(@PathVariable String id, @RequestBody String newPassword) {
