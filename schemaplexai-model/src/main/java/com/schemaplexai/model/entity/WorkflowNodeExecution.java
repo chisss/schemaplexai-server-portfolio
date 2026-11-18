@@ -22,6 +22,9 @@ public class WorkflowNodeExecution implements Serializable {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
+    /** 租户ID（历史孤儿记录允许为空，租户过滤后不可见） */
+    private String tenantId;
+
     /** 所属实例ID */
     private String instanceId;
 

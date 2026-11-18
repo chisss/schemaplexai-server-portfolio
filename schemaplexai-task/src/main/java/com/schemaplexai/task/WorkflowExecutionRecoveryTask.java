@@ -1,5 +1,6 @@
 package com.schemaplexai.task;
 
+import com.schemaplexai.common.util.SystemTenantContext;
 import com.schemaplexai.service.workflow.runtime.WorkflowExecutionRecoveryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -24,7 +25,9 @@ public class WorkflowExecutionRecoveryTask {
     @Scheduled(fixedDelayString = "${schemaplexai.workflow.recovery-interval-ms:60000}")
     public void recoverDetachedAgentCallbacks() {
         try {
-            int recoveredCount = workflowExecutionRecoveryService.recoverDetachedAgentCallbacks(50);
+            // 节点执行表已纳入租户过滤，恢复任务需以系统上下文跨租户扫描（保持全租户兜底恢复语义）
+            int recoveredCount = SystemTenantContext.callAsSystem(
+                    () -> workflowExecutionRecoveryService.recoverDetachedAgentCallbacks(50));
             if (recoveredCount > 0) {
                 log.warn("工作流执行恢复任务完成，本轮共恢复 {} 个脱节节点", recoveredCount);
             } else {
