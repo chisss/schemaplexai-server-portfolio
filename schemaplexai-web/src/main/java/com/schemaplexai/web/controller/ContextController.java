@@ -9,6 +9,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -27,6 +28,7 @@ public class ContextController {
 
     // ===== 上下文 CRUD =====
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建上下文")
     public R<ContextVO> create(@Valid @RequestBody ContextCreateRequest request) {
@@ -45,6 +47,7 @@ public class ContextController {
         return R.ok(contextService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新上下文")
     public R<ContextVO> update(@PathVariable String id,
@@ -52,6 +55,7 @@ public class ContextController {
         return R.ok(contextService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除上下文（级联删除条目和快照）")
     public R<Void> delete(@PathVariable String id) {
@@ -61,6 +65,7 @@ public class ContextController {
 
     // ===== 条目管理 =====
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @PostMapping("/{id}/items")
     @Operation(summary = "添加上下文条目")
     public R<ContextItemVO> addItem(@PathVariable String id,
@@ -75,6 +80,7 @@ public class ContextController {
         return R.ok(contextService.listItems(id, itemType));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @PutMapping("/{id}/items/{itemId}")
     @Operation(summary = "更新上下文条目")
     public R<ContextItemVO> updateItem(@PathVariable String id,
@@ -83,6 +89,7 @@ public class ContextController {
         return R.ok(contextService.updateItem(id, itemId, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @DeleteMapping("/{id}/items/{itemId}")
     @Operation(summary = "删除上下文条目")
     public R<Void> deleteItem(@PathVariable String id, @PathVariable String itemId) {
@@ -98,6 +105,7 @@ public class ContextController {
         return R.ok(contextService.listSnapshots(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @PostMapping("/{id}/snapshots")
     @Operation(summary = "创建上下文快照")
     public R<ContextSnapshotVO> createSnapshot(@PathVariable String id,
@@ -112,6 +120,7 @@ public class ContextController {
         return R.ok(contextService.getSnapshotById(id, snapId));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @PostMapping("/{id}/snapshots/{snapId}/restore")
     @Operation(summary = "恢复上下文快照")
     public R<Map<String, Object>> restoreSnapshot(@PathVariable String id,
@@ -121,6 +130,7 @@ public class ContextController {
 
     // ===== 上下文解析（核心） =====
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CONTEXT_MANAGE.getCode())")
     @PostMapping("/resolve")
     @Operation(summary = "上下文解析 - 为Agent执行任务组装四层上下文")
     public R<ContextResolvedVO> resolve(@RequestBody ContextResolveRequest request) {

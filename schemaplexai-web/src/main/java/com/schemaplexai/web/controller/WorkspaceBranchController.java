@@ -12,6 +12,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -55,18 +56,21 @@ public class WorkspaceBranchController {
         return R.ok(workspaceBranchService.listBranchRules(workspaceId));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @PostMapping("/rules")
     @Operation(summary = "创建分支规则")
     public R<BranchRuleVO> createRule(@Valid @RequestBody BranchRuleSaveRequest request) {
         return R.ok(workspaceBranchService.createBranchRule(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @PutMapping("/rules/{id}")
     @Operation(summary = "更新分支规则")
     public R<BranchRuleVO> updateRule(@PathVariable String id, @Valid @RequestBody BranchRuleSaveRequest request) {
         return R.ok(workspaceBranchService.updateBranchRule(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @DeleteMapping("/rules/{id}")
     @Operation(summary = "删除分支规则")
     public R<Void> deleteRule(@PathVariable String id) {

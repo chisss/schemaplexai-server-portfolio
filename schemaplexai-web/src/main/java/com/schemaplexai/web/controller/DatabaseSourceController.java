@@ -13,6 +13,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -45,18 +46,21 @@ public class DatabaseSourceController {
         return R.ok(databaseSourceService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).DATABASE_SOURCE_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建数据库数据源")
     public R<DatabaseSourceVO> create(@Valid @RequestBody DatabaseSourceSaveRequest request) {
         return R.ok(databaseSourceService.create(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).DATABASE_SOURCE_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新数据库数据源")
     public R<DatabaseSourceVO> update(@PathVariable String id, @Valid @RequestBody DatabaseSourceSaveRequest request) {
         return R.ok(databaseSourceService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).DATABASE_SOURCE_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除数据库数据源")
     public R<Void> delete(@PathVariable String id) {
@@ -64,18 +68,21 @@ public class DatabaseSourceController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).DATABASE_SOURCE_MANAGE.getCode())")
     @PostMapping("/test-draft")
     @Operation(summary = "测试草稿数据库数据源")
     public R<DatabaseSourceTestVO> testDraft(@Valid @RequestBody DatabaseSourceSaveRequest request) {
         return R.ok(databaseSourceService.testDraft(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).DATABASE_SOURCE_MANAGE.getCode())")
     @PostMapping("/{id}/test")
     @Operation(summary = "测试已保存数据库数据源")
     public R<DatabaseSourceTestVO> test(@PathVariable String id) {
         return R.ok(databaseSourceService.test(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).DATABASE_SOURCE_MANAGE.getCode())")
     @PostMapping("/{id}/query")
     @Operation(summary = "执行数据库查询")
     public R<DatabaseQueryResultVO> executeQuery(@PathVariable String id,
