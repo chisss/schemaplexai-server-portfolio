@@ -17,6 +17,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -36,6 +37,7 @@ public class ApiGatewayController {
 
     private final ApiGatewayService apiGatewayService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).API_GATEWAY_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建API网关")
     public R<ApiGatewayVO> create(@Valid @RequestBody ApiGatewayCreateRequest request) {
@@ -54,6 +56,7 @@ public class ApiGatewayController {
         return R.ok(apiGatewayService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).API_GATEWAY_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新API网关")
     public R<ApiGatewayVO> update(@PathVariable String id,
@@ -61,6 +64,7 @@ public class ApiGatewayController {
         return R.ok(apiGatewayService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).API_GATEWAY_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除API网关")
     public R<Void> delete(@PathVariable String id) {
@@ -68,6 +72,7 @@ public class ApiGatewayController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).GATEWAY_EXECUTE.getCode())")
     @PostMapping("/{id}/test")
     @Operation(summary = "测试API调用")
     public R<ApiGatewayTestResult> test(@PathVariable String id,
@@ -75,6 +80,7 @@ public class ApiGatewayController {
         return R.ok(apiGatewayService.test(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).GATEWAY_EXECUTE.getCode())")
     @PostMapping("/{id}/execute")
     @Operation(summary = "代理执行API调用")
     public R<ApiGatewayTestResult> execute(@PathVariable String id,
@@ -88,6 +94,7 @@ public class ApiGatewayController {
         return R.ok(apiGatewayService.getPolicy(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).API_GATEWAY_MANAGE.getCode())")
     @PutMapping("/{id}/policy")
     @Operation(summary = "更新API网关策略")
     public R<ApiGatewayPolicyVO> updatePolicy(@PathVariable String id,

@@ -54,17 +54,11 @@ class ControllerPermissionAnnotationTest {
      * 历史欠账豁免清单：尚未完成权限码设计的 controller（写端点暂无 @PreAuthorize）。
      * 新增端点落入非豁免 controller 时本测试即红；豁免清单只减不增，逐步治理。
      */
-    private static final Set<String> EXEMPT_CONTROLLERS = Set.of(
-            "ApiGatewayController",   // 网关转发，鉴权在网关层
-            "AuthController",         // 登录/注册公开端点
+    private static final Set<String> EXEMPT_CONTROLLERS = Set.of(            "AuthController",         // 登录/注册公开端点
             "ConversationController",
             "DirectChatController",
             "EvaluationController",
             "InAppMessageController",
-            "IntegrationController",
-            "KnowledgeDocumentController",
-            "MarketplaceController",
-            "McpServerController",
             "MessageTemplateController",
             "MonitorController",
             "NotificationChannelController",
