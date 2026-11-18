@@ -7,6 +7,7 @@ import com.schemaplexai.service.agent.memory.AgentMemoryExtractionService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -34,6 +35,7 @@ public class AgentMemoryController {
         return R.ok(memoryService.listMemories(tenantId, agentId));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MEMORY_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除Agent记忆")
     public R<Void> delete(@PathVariable String id) {

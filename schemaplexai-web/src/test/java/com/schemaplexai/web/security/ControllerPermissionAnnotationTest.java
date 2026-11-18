@@ -55,10 +55,6 @@ class ControllerPermissionAnnotationTest {
      * 新增端点落入非豁免 controller 时本测试即红；豁免清单只减不增，逐步治理。
      */
     private static final Set<String> EXEMPT_CONTROLLERS = Set.of(
-            "AgentMemberContextController",
-            "AgentMemberToolController",
-            "AgentMemoryController",
-            "AiModelGroupController",
             "ApiGatewayController",   // 网关转发，鉴权在网关层
             "AuthController",         // 登录/注册公开端点
             "CicdPipelineController",

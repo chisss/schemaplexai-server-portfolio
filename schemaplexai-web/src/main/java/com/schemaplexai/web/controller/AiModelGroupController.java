@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -45,18 +46,21 @@ public class AiModelGroupController {
         return R.ok(aiModelGroupService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AI_MODEL_GROUP_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建模型组")
     public R<AiModelGroupVO> create(@Valid @RequestBody AiModelGroupCreateRequest request) {
         return R.ok(aiModelGroupService.create(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AI_MODEL_GROUP_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新模型组基本信息")
     public R<AiModelGroupVO> update(@PathVariable String id, @RequestBody AiModelGroupUpdateRequest request) {
         return R.ok(aiModelGroupService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AI_MODEL_GROUP_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除模型组")
     public R<Void> delete(@PathVariable String id) {
@@ -64,12 +68,14 @@ public class AiModelGroupController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AI_MODEL_GROUP_MANAGE.getCode())")
     @PutMapping("/{id}/items")
     @Operation(summary = "保存模型组成员排序（整体替换）")
     public R<AiModelGroupVO> saveItems(@PathVariable String id, @RequestBody AiModelGroupItemSaveRequest request) {
         return R.ok(aiModelGroupService.saveItems(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AI_MODEL_GROUP_MANAGE.getCode())")
     @PostMapping("/auto-generate")
     @Operation(summary = "按策略自动生成模型组（by_price/by_performance）")
     public R<AiModelGroupVO> autoGenerate(@Valid @RequestBody AiModelGroupAutoGenerateRequest request) {
