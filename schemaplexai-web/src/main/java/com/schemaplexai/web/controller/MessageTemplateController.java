@@ -12,6 +12,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -34,6 +35,7 @@ public class MessageTemplateController {
 
     private final MessageTemplateService messageTemplateService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MESSAGE_TEMPLATE_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建消息模板")
     public R<MessageTemplateVO> create(@Valid @RequestBody MessageTemplateCreateRequest request) {
@@ -52,6 +54,7 @@ public class MessageTemplateController {
         return R.ok(messageTemplateService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MESSAGE_TEMPLATE_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新消息模板")
     public R<MessageTemplateVO> update(@PathVariable String id,
@@ -59,6 +62,7 @@ public class MessageTemplateController {
         return R.ok(messageTemplateService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MESSAGE_TEMPLATE_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除消息模板")
     public R<Void> delete(@PathVariable String id) {

@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,12 +40,14 @@ public class UserMemoryController {
         return R.ok(userMemoryService.list(currentTenantId(), currentUserId(), request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).USER_MEMORY_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建当前用户记忆")
     public R<UserMemory> create(@Valid @RequestBody UserMemoryCreateRequest request) {
         return R.ok(userMemoryService.createExplicitMemory(currentTenantId(), currentUserId(), request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).USER_MEMORY_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新当前用户记忆")
     public R<UserMemory> update(@PathVariable String id,
@@ -52,6 +55,7 @@ public class UserMemoryController {
         return R.ok(userMemoryService.update(currentTenantId(), currentUserId(), id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).USER_MEMORY_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除当前用户记忆")
     public R<Void> delete(@PathVariable String id) {

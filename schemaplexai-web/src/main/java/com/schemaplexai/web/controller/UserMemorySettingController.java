@@ -8,6 +8,7 @@ import com.schemaplexai.service.user.UserMemoryService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,6 +33,7 @@ public class UserMemorySettingController {
                 SecurityUtil.getCurrentTenantId(), SecurityUtil.getCurrentUserId()));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SELF_SERVICE.getCode())")
     @PutMapping("/me")
     @Operation(summary = "更新当前用户记忆设置")
     public R<UserMemorySetting> updateMine(@RequestBody UserMemorySettingUpdateRequest request) {

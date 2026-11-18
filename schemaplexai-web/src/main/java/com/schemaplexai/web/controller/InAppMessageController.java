@@ -8,6 +8,7 @@ import com.schemaplexai.service.notification.InAppMessageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -37,6 +38,7 @@ public class InAppMessageController {
         return R.ok(inAppMessageService.countUnread());
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SELF_SERVICE.getCode())")
     @PostMapping("/{recipientId}/read")
     @Operation(summary = "标记站内信为已读")
     public R<Void> markRead(@PathVariable String recipientId) {
@@ -44,6 +46,7 @@ public class InAppMessageController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SELF_SERVICE.getCode())")
     @PostMapping("/{recipientId}/archive")
     @Operation(summary = "归档站内信")
     public R<Void> archive(@PathVariable String recipientId) {
