@@ -121,30 +121,35 @@ public class AgentRuntimeOrchestrator {
         execution.setStatus("queued");
         agentExecutionMapper.insert(execution);
 
+        CompletableFuture<AgentExecutionResult> future = execute(AgentExecutionContext.builder()
+                .executionId(execution.getId())
+                .agentId(agent.getId())
+                .tenantId(execution.getTenantId())
+                .userId(execution.getCreatedBy())
+                .inputPrompt(dto.getPrompt())
+                .model(execution.getAiModel())
+                .agentModelType(agent.getAiModelType())
+                .agentModelGroupId(agent.getAiModelGroupId())
+                .inputContext(dto.getContext())
+                .conversationId(execution.getConversationId())
+                .attachmentIds(dto.getAttachmentIds())
+                .reasoningStrength(dto.getReasoningStrength())
+                .skillCode(dto.getSkillCode())
+                .outputFormat(dto.getOutputFormat())
+                .stream(Boolean.TRUE.equals(dto.getStream()))
+                .temporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()))
+                .memoryWriteEnabled(dto.getMemoryWriteEnabled())
+                .build());
         try {
-            return execute(AgentExecutionContext.builder()
-                    .executionId(execution.getId())
-                    .agentId(agent.getId())
-                    .tenantId(execution.getTenantId())
-                    .userId(execution.getCreatedBy())
-                    .inputPrompt(dto.getPrompt())
-                    .model(execution.getAiModel())
-                    .agentModelType(agent.getAiModelType())
-                    .agentModelGroupId(agent.getAiModelGroupId())
-                    .inputContext(dto.getContext())
-                    .conversationId(execution.getConversationId())
-                    .attachmentIds(dto.getAttachmentIds())
-                    .reasoningStrength(dto.getReasoningStrength())
-                    .skillCode(dto.getSkillCode())
-                    .outputFormat(dto.getOutputFormat())
-                    .stream(Boolean.TRUE.equals(dto.getStream()))
-                    .temporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()))
-                    .memoryWriteEnabled(dto.getMemoryWriteEnabled())
-                    .build()).get(90, TimeUnit.SECONDS);
+            return future.get(90, TimeUnit.SECONDS);
         } catch (TimeoutException exception) {
+            // 取消等待者，并复用停止机制：写 stopped 状态后，后台任务在轮边界
+            // isStopped 检查处自动退出（buildStoppedResult），不再继续产生副作用，
+            // 也避免后台完成后用 COMPLETED 覆盖超时状态。
+            future.cancel(true);
             AgentExecution update = new AgentExecution();
             update.setId(execution.getId());
-            update.setStatus("failed");
+            update.setStatus("stopped");
             update.setErrorMessage("工作流编排 Agent 执行超时");
             agentExecutionMapper.updateById(update);
             throw new BusinessException(ResultCode.AI_MODEL_TIMEOUT, "工作流编排 Agent 执行超时");
