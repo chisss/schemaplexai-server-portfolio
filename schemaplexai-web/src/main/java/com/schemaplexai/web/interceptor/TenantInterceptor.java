@@ -12,6 +12,8 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+
+import java.util.Set;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 /**
@@ -21,18 +23,23 @@ import org.springframework.web.servlet.HandlerInterceptor;
 @Component
 public class TenantInterceptor implements HandlerInterceptor {
 
-    private static final String[] PUBLIC_PATH_PREFIXES = {
+    /** 精确匹配的公开路径（不匹配同名前缀端点，如 /health 不匹配 /health-xxx） */
+    private static final Set<String> EXACT_PUBLIC_PATHS = Set.of(
             "/auth/login",
             "/auth/register",
             "/auth/refresh",
             "/health",
             "/actuator/health",
+            "/doc.html"
+    );
+
+    /** 前缀匹配的公开路径（以 '/' 结尾，路径段边界语义，如 /ws/ 不匹配 /wsocket） */
+    private static final String[] PUBLIC_PATH_PREFIXES = {
             "/i18n/",
-            "/doc.html",
-            "/swagger-resources",
-            "/v3/api-docs",
-            "/webjars",
-            "/ws"
+            "/swagger-resources/",
+            "/v3/api-docs/",
+            "/webjars/",
+            "/ws/"
     };
 
     @Override
@@ -83,6 +90,11 @@ public class TenantInterceptor implements HandlerInterceptor {
         if (!StringUtils.hasText(path)) {
             path = request.getRequestURI();
         }
+        // 精确匹配优先（/health 不匹配 /health-check）
+        if (EXACT_PUBLIC_PATHS.contains(path)) {
+            return true;
+        }
+        // 前缀清单均以 '/' 结尾，仅匹配完整路径段边界（/ws/ 不匹配 /wsocket）
         for (String prefix : PUBLIC_PATH_PREFIXES) {
             if (path.startsWith(prefix)) {
                 return true;

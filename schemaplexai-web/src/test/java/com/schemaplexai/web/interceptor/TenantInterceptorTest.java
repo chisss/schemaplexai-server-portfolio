@@ -37,6 +37,36 @@ class TenantInterceptorTest {
     }
 
     @Test
+    void shouldNotTreatSamePrefixEndpointAsPublic() {
+        // /health 前缀不得放行 /health-check 等同名前缀端点（审计 L2 防绕过）
+        authenticate("user-1", "OPERATOR");
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/health-check");
+
+        assertThatThrownBy(() -> interceptor.preHandle(request, new MockHttpServletResponse(), new Object()))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception).hasMessage("租户上下文缺失"));
+    }
+
+    @Test
+    void shouldNotTreatWsPrefixWithoutSlashAsPublic() {
+        // /ws 前缀不得放行 /wsocket 等同名前缀端点
+        authenticate("user-1", "OPERATOR");
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/wsocket");
+
+        assertThatThrownBy(() -> interceptor.preHandle(request, new MockHttpServletResponse(), new Object()))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception).hasMessage("租户上下文缺失"));
+    }
+
+    @Test
+    void shouldAllowWsSubPathWithoutTenant() {
+        // /ws/ 段边界内的子路径仍为公开路径
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/ws/chat");
+
+        assertThat(interceptor.preHandle(request, new MockHttpServletResponse(), new Object())).isTrue();
+    }
+
+    @Test
     void shouldRejectAuthenticatedRequestWhenTenantMissing() {
         authenticate("user-1", "OPERATOR");
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/agents");
