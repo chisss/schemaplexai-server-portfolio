@@ -18,7 +18,10 @@ public interface AgentRuntimeStrategy {
 
     CompletableFuture<AgentExecutionResult> execute(Agent agent, AgentExecution execution, AgentExecutionContext context);
 
-    default CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution, AgentExecutionInputDTO input) {
-        return CompletableFuture.completedFuture(null);
-    }
+    /**
+     * 恢复执行：context 由编排器统一构建（含 sandboxPolicy/executionMode 恢复），
+     * 策略实现不得重建上下文，避免恢复路径丢失执行策略。
+     */
+    CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution,
+                                                   AgentExecutionContext context, AgentExecutionInputDTO input);
 }

@@ -183,23 +183,12 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
 
     @Override
     @Async("agentExecutorPool")
-    public CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution, AgentExecutionInputDTO input) {
+    public CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution,
+                                                          AgentExecutionContext context, AgentExecutionInputDTO input) {
         try {
             // 消费执行中用户引导：追加到恢复输入，下一成员执行轮自然注入（轮边界消费语义）
             input = mergePendingSteering(execution.getId(), input);
-            AgentExecutionContext context = AgentExecutionContext.builder()
-                    .executionId(execution.getId())
-                    .agentId(execution.getAgentId())
-                    .tenantId(execution.getTenantId())
-                    .userId(execution.getCreatedBy())
-                    .inputPrompt(execution.getInputPrompt())
-                    .inputContext(execution.getInputContext())
-                    .model(execution.getAiModel())
-                    .conversationId(execution.getConversationId())
-                    .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
-                    .temporaryChat(Boolean.TRUE.equals(input.getTemporaryChat()))
-                    .memoryWriteEnabled(input.getMemoryWriteEnabled())
-                    .build();
+            // 直接使用编排器构建的上下文（含 sandboxPolicy/executionMode），恢复路径不回退默认策略
             return CompletableFuture.completedFuture(run(agent, execution, context, input));
         } catch (Exception exception) {
             log.error("恢复 Team Agent 执行失败: executionId={}", execution.getId(), exception);
