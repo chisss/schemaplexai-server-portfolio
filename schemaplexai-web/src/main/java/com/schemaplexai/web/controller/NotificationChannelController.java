@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,6 +32,7 @@ public class NotificationChannelController {
 
     private final NotificationChannelService channelService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).NOTIFICATION_CHANNEL_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建通知渠道")
     public R<NotificationChannelVO> create(@Valid @RequestBody NotificationChannelCreateRequest request) {
@@ -49,6 +51,7 @@ public class NotificationChannelController {
         return R.ok(channelService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).NOTIFICATION_CHANNEL_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新通知渠道")
     public R<NotificationChannelVO> update(@PathVariable String id,
@@ -56,6 +59,7 @@ public class NotificationChannelController {
         return R.ok(channelService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).NOTIFICATION_CHANNEL_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除通知渠道")
     public R<Void> delete(@PathVariable String id) {
@@ -63,6 +67,7 @@ public class NotificationChannelController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).NOTIFICATION_CHANNEL_MANAGE.getCode())")
     @PostMapping("/{id}/test")
     @Operation(summary = "测试通知渠道")
     public R<NotificationChannelVO> testChannel(@PathVariable String id) {

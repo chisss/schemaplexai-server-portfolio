@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,6 +32,7 @@ public class SkillController {
 
     private final SkillService skillService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建技能")
     public R<SkillVO> create(@Valid @RequestBody SkillCreateRequest request) {
@@ -49,6 +51,7 @@ public class SkillController {
         return R.ok(skillService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新技能")
     public R<SkillVO> update(@PathVariable String id,
@@ -56,6 +59,7 @@ public class SkillController {
         return R.ok(skillService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除技能")
     public R<Void> delete(@PathVariable String id) {

@@ -31,6 +31,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.util.StringUtils;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -59,6 +60,7 @@ public class DirectChatController {
     private final MultimodalMessageBuilder multimodalMessageBuilder;
     private final ImageGenerationService imageGenerationService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     @PostMapping("/direct")
     @Operation(summary = "直接调用模型进行对话")
     public R<DirectChatResponse> directChat(@Valid @RequestBody DirectChatRequest request) {
@@ -104,12 +106,14 @@ public class DirectChatController {
         return R.ok(new DirectChatResponse(conversationId, aiModel.getId(), aiModel.getName(), reply, LocalDateTime.now()));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     @PostMapping(value = "/direct/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     @Operation(summary = "流式直接调用模型进行对话")
     public SseEmitter directChatStream(@Valid @RequestBody DirectChatStreamRequest request) {
         return directChatStreamService.streamChat(request);
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     @PostMapping("/images/generations")
     @Operation(summary = "调用生图模型生成图片")
     public R<ImageGenerationService.ImageGenerationResult> generateImage(
