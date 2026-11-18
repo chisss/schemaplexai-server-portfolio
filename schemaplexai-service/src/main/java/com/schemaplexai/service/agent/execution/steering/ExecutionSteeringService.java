@@ -11,6 +11,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 执行中用户引导（Steering）服务。
@@ -39,26 +40,29 @@ public class ExecutionSteeringService {
     private final ExecutionSteeringMapper steeringMapper;
 
     /**
-     * 投递一条引导（运行中/暂停中均可投递），seq 在同执行内单调递增
+     * 投递一条引导（运行中/暂停中均可投递），seq 在同执行内单调递增。
+     *
+     * <p>seq 生成走原子插入（advisory lock + INSERT...SELECT MAX+1），
+     * 并发投递同一执行不会产生重复 seq。
      */
     public ExecutionSteering create(String tenantId, String executionId, String content) {
         if (!StringUtils.hasText(executionId) || !StringUtils.hasText(content)) {
             throw new IllegalArgumentException("executionId 与引导内容不能为空");
         }
-        ExecutionSteering latest = steeringMapper.selectOne(new LambdaQueryWrapper<ExecutionSteering>()
+        ExecutionSteering steering = new ExecutionSteering();
+        steering.setId(UUID.randomUUID().toString());
+        steering.setTenantId(tenantId);
+        steering.setExecutionId(executionId);
+        steering.setContent(content.trim());
+        steering.setStatus(STATUS_PENDING);
+        steeringMapper.insertWithAutoSeq(steering.getId(), tenantId, executionId, steering.getContent());
+        // 回读本次生成的 seq（刚插入的行即同执行内最大 seq）
+        ExecutionSteering persisted = steeringMapper.selectOne(new LambdaQueryWrapper<ExecutionSteering>()
                 .eq(ExecutionSteering::getExecutionId, executionId)
                 .orderByDesc(ExecutionSteering::getSeq)
                 .last("LIMIT 1"));
-        int nextSeq = latest != null && latest.getSeq() != null ? latest.getSeq() + 1 : 1;
-
-        ExecutionSteering steering = new ExecutionSteering();
-        steering.setTenantId(tenantId);
-        steering.setExecutionId(executionId);
-        steering.setSeq(nextSeq);
-        steering.setContent(content.trim());
-        steering.setStatus(STATUS_PENDING);
-        steeringMapper.insert(steering);
-        log.info("投递执行引导: executionId={}, seq={}, steeringId={}", executionId, nextSeq, steering.getId());
+        steering.setSeq(persisted != null ? persisted.getSeq() : 1);
+        log.info("投递执行引导: executionId={}, seq={}, steeringId={}", executionId, steering.getSeq(), steering.getId());
         return steering;
     }
 

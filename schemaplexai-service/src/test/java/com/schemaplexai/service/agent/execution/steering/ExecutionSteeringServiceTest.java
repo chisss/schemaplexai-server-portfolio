@@ -3,12 +3,12 @@ package com.schemaplexai.service.agent.execution.steering;
 import com.schemaplexai.dao.mapper.ExecutionSteeringMapper;
 import com.schemaplexai.model.entity.ExecutionSteering;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -19,32 +19,28 @@ class ExecutionSteeringServiceTest {
     private final ExecutionSteeringService service = new ExecutionSteeringService(steeringMapper);
 
     @Test
-    void shouldAssignMonotonicSeqPerExecution() {
-        ExecutionSteering latest = new ExecutionSteering();
-        latest.setSeq(3);
-        when(steeringMapper.selectOne(any())).thenReturn(latest);
+    void shouldDelegateSeqGenerationToAtomicInsert() {
+        ExecutionSteering persisted = new ExecutionSteering();
+        persisted.setSeq(5);
+        when(steeringMapper.selectOne(any())).thenReturn(persisted);
 
         ExecutionSteering created = service.create("tenant-1", "exec-1", "补充一个约束");
 
-        ArgumentCaptor<ExecutionSteering> captor = ArgumentCaptor.forClass(ExecutionSteering.class);
-        verify(steeringMapper).insert(captor.capture());
-        ExecutionSteering inserted = captor.getValue();
-        assertThat(inserted.getSeq()).isEqualTo(4);
-        assertThat(inserted.getStatus()).isEqualTo(ExecutionSteeringService.STATUS_PENDING);
-        assertThat(inserted.getExecutionId()).isEqualTo("exec-1");
-        assertThat(inserted.getTenantId()).isEqualTo("tenant-1");
-        assertThat(created).isSameAs(inserted);
+        // seq 由 DB 原子生成（advisory lock + INSERT...SELECT MAX+1），服务端不再自算
+        verify(steeringMapper).insertWithAutoSeq(any(), eq("tenant-1"), eq("exec-1"), eq("补充一个约束"));
+        assertThat(created.getSeq()).isEqualTo(5);
+        assertThat(created.getStatus()).isEqualTo(ExecutionSteeringService.STATUS_PENDING);
+        assertThat(created.getExecutionId()).isEqualTo("exec-1");
+        assertThat(created.getTenantId()).isEqualTo("tenant-1");
     }
 
     @Test
-    void shouldStartSeqAtOneWhenNoPriorSteering() {
+    void shouldFallbackSeqToOneWhenReadbackEmpty() {
         when(steeringMapper.selectOne(any())).thenReturn(null);
 
-        service.create("tenant-1", "exec-1", "第一条引导");
+        ExecutionSteering created = service.create("tenant-1", "exec-1", "第一条引导");
 
-        ArgumentCaptor<ExecutionSteering> captor = ArgumentCaptor.forClass(ExecutionSteering.class);
-        verify(steeringMapper).insert(captor.capture());
-        assertThat(captor.getValue().getSeq()).isEqualTo(1);
+        assertThat(created.getSeq()).isEqualTo(1);
     }
 
     @Test

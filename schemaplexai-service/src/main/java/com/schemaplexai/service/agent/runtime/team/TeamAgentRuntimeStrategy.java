@@ -1030,6 +1030,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     .build();
         }
         if (AgentExecutionStatusEnum.COMPLETED.getCode().equals(finalStatus)) {
+            discardPendingSteeringOnTerminal(execution.getId());
             agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED.getCode(),
                     null, tokenUsage.inputTokens(), tokenUsage.outputTokens(), state.finalOutput());
             publishParentEvent(execution, AgentExecutionEventTypeEnum.COMPLETED,
@@ -1041,6 +1042,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     .build();
         }
         if (AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode().equals(finalStatus)) {
+            discardPendingSteeringOnTerminal(execution.getId());
             agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
                     null, tokenUsage.inputTokens(), tokenUsage.outputTokens(), state.finalOutput());
             publishFallbackUsedEvent(execution, "Team Agent 已启用规则化兜底交付",
@@ -1052,6 +1054,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     .build();
         }
         if (teamQualityDetector.isTransientModelChannelFailure(state.finalError())) {
+            discardPendingSteeringOnTerminal(execution.getId());
             String fallbackOutput = teamQualityDetector.buildExecutionLevelFallbackOutput(execution.getId(), execution.getAgentId(), state.finalError());
             agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
                     null, tokenUsage.inputTokens(), tokenUsage.outputTokens(), fallbackOutput);
@@ -1063,6 +1066,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     .conversationId(execution.getConversationId())
                     .build();
         }
+        discardPendingSteeringOnTerminal(execution.getId());
         agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.FAILED.getCode(),
                 state.finalError(), tokenUsage.inputTokens(), tokenUsage.outputTokens(), null);
         publishParentEvent(execution, AgentExecutionEventTypeEnum.FAILED,
@@ -1072,6 +1076,18 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .errorMessage(state.finalError())
                 .conversationId(execution.getConversationId())
                 .build();
+    }
+
+    /**
+     * 终态（非 PAUSED）清理 pending 引导：父执行已结束不再消费，
+     * 清理失败仅记录日志，不得阻断终态流程。
+     */
+    private void discardPendingSteeringOnTerminal(String executionId) {
+        try {
+            executionSteeringService.markDiscardedByExecution(executionId);
+        } catch (Exception e) {
+            log.warn("终态清理 pending 引导失败: executionId={}, error={}", executionId, e.getMessage());
+        }
     }
 
     private TokenUsageSummary summarizeTeamTokenUsage(String parentExecutionId) {
