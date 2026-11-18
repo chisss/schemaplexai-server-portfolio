@@ -1,6 +1,7 @@
 package com.schemaplexai.web.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.enums.PermissionCodeEnum;
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.entity.I18nLocale;
 import com.schemaplexai.model.entity.I18nMessage;
@@ -8,6 +9,7 @@ import com.schemaplexai.service.i18n.I18nAdminService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,18 +41,21 @@ public class I18nAdminController {
         return R.ok(i18nAdminService.listLocales());
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_I18N_MANAGE.getCode())")
     @PostMapping("/locales")
     @Operation(summary = "新增语言")
     public R<I18nLocale> createLocale(@RequestBody I18nLocale locale) {
         return R.ok(i18nAdminService.createLocale(locale));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_I18N_MANAGE.getCode())")
     @PutMapping("/locales/{id}")
     @Operation(summary = "更新语言")
     public R<I18nLocale> updateLocale(@PathVariable Long id, @RequestBody I18nLocale locale) {
         return R.ok(i18nAdminService.updateLocale(id, locale));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_I18N_MANAGE.getCode())")
     @DeleteMapping("/locales/{id}")
     @Operation(summary = "删除语言")
     public R<Void> deleteLocale(@PathVariable Long id) {
@@ -70,18 +75,21 @@ public class I18nAdminController {
         return R.ok(i18nAdminService.pageMessages(locale, msgKey, page, size));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_I18N_MANAGE.getCode())")
     @PostMapping("/messages")
     @Operation(summary = "新增文案")
     public R<I18nMessage> createMessage(@RequestBody I18nMessage msg) {
         return R.ok(i18nAdminService.createMessage(msg));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_I18N_MANAGE.getCode())")
     @PutMapping("/messages/{id}")
     @Operation(summary = "更新文案")
     public R<I18nMessage> updateMessage(@PathVariable Long id, @RequestBody I18nMessage msg) {
         return R.ok(i18nAdminService.updateMessage(id, msg));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_I18N_MANAGE.getCode())")
     @DeleteMapping("/messages/{id}")
     @Operation(summary = "删除文案")
     public R<Void> deleteMessage(@PathVariable Long id) {

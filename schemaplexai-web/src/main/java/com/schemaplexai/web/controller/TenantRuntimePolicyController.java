@@ -1,5 +1,6 @@
 package com.schemaplexai.web.controller;
 
+import com.schemaplexai.common.enums.PermissionCodeEnum;
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.dto.system.TenantRuntimePolicyUpdateRequest;
 import com.schemaplexai.model.vo.system.TenantRuntimePolicyVO;
@@ -8,6 +9,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -32,6 +34,7 @@ public class TenantRuntimePolicyController {
         return R.ok(tenantRuntimePolicyService.getByTenantId(tenantId));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_TENANT_MANAGE.getCode())")
     @PutMapping
     @Operation(summary = "更新租户运行时策略")
     public R<TenantRuntimePolicyVO> update(@PathVariable String tenantId,
