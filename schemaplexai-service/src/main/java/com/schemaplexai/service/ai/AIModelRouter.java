@@ -157,6 +157,53 @@ public class AIModelRouter {
     }
 
     /**
+     * 执行链路模型组解析（负载均衡选链首 + 组内降级链尾）。
+     *
+     * <p>链首由 hash 负载均衡选定（shardKey 通常为 tenantId:executionId，
+     * 同执行重试命中同模型，幂等友好）；其余成员按 sort_order 构成降级链尾，
+     * 链首失败时自动降级到下一个，兼容引擎 invokeChainWithRetry 语义。
+     */
+    public List<LangChain4jResolution> resolveGroupChainForExecution(String groupId, String shardKey,
+                                                                      String reasoningStrength) {
+        List<AiModelGroupItem> items = groupItemMapper.selectList(
+                new LambdaQueryWrapper<AiModelGroupItem>()
+                        .eq(AiModelGroupItem::getGroupId, groupId)
+                        .orderByAsc(AiModelGroupItem::getSortOrder));
+
+        if (CollectionUtils.isEmpty(items)) {
+            log.error("模型组内无成员: groupId={}", groupId);
+            throw new BusinessException(ResultCode.MODEL_GROUP_ALL_UNAVAILABLE);
+        }
+
+        List<String> modelIds = items.stream().map(AiModelGroupItem::getModelId).toList();
+        String primaryModelId = modelLoadBalancer.selectModelId(groupId, modelIds, shardKey);
+
+        // 链首=负载均衡命中模型，其余成员按 sort_order 作降级链尾
+        List<String> orderedIds = new ArrayList<>();
+        orderedIds.add(primaryModelId);
+        for (String modelId : modelIds) {
+            if (!primaryModelId.equals(modelId)) {
+                orderedIds.add(modelId);
+            }
+        }
+
+        List<LangChain4jResolution> chain = new ArrayList<>();
+        for (String modelId : orderedIds) {
+            try {
+                chain.add(buildResolution(requireActiveModelById(modelId), reasoningStrength));
+            } catch (Exception e) {
+                log.warn("模型组降级，跳过: groupId={}, modelId={}, error={}", groupId, modelId, e.getMessage());
+            }
+        }
+
+        if (CollectionUtils.isEmpty(chain)) {
+            log.error("模型组内所有模型均不可用: groupId={}", groupId);
+            throw new BusinessException(ResultCode.MODEL_GROUP_ALL_UNAVAILABLE);
+        }
+        return chain;
+    }
+
+    /**
      * 从模型组按负载均衡策略选择一个模型（非降级模式）
      * 适用场景：并发执行时，不同任务分配到不同模型实例
      *

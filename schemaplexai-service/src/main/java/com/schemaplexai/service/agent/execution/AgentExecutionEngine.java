@@ -1505,10 +1505,21 @@ public class AgentExecutionEngine {
         agentExecutionMapper.updateById(update);
     }
 
-    /** 解析模型降级链 */
+    /**
+     * 解析模型降级链。
+     *
+     * <p>绑定类型为 model_group 时接入模型组解析（负载均衡选链首 + 组内降级链尾，
+     * shardKey=tenantId:executionId 保证同执行重试幂等）；否则按单模型路由规则降级。
+     */
     private List<LangChain4jResolution> resolveModelChain(AgentExecutionContext ctx) {
         String reasoning = ctx.getReasoningStrength() != null ? ctx.getReasoningStrength() : "medium";
-        List<LangChain4jResolution> chain = aiModelRouter.resolveRouteChain(ctx.getModel(), reasoning);
+        List<LangChain4jResolution> chain;
+        if ("model_group".equals(ctx.getAgentModelType()) && StringUtils.hasText(ctx.getAgentModelGroupId())) {
+            String shardKey = (ctx.getTenantId() != null ? ctx.getTenantId() : "") + ":" + ctx.getExecutionId();
+            chain = aiModelRouter.resolveGroupChainForExecution(ctx.getAgentModelGroupId(), shardKey, reasoning);
+        } else {
+            chain = aiModelRouter.resolveRouteChain(ctx.getModel(), reasoning);
+        }
         if (chain == null || chain.isEmpty()) {
             throw new IllegalStateException("无法解析模型配置: model=" + ctx.getModel());
         }
