@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -35,6 +36,7 @@ public class AgentMemberToolController {
         return R.ok(agentMemberToolService.getMemberToolBindings(memberId));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MEMBER_MANAGE.getCode())")
     @PutMapping("/{memberId}/tools")
     @Operation(summary = "保存团队成员工具绑定（全量覆盖）")
     public R<List<AgentTeamMemberToolBindingVO>> saveMemberTools(
@@ -43,6 +45,7 @@ public class AgentMemberToolController {
         return R.ok(agentMemberToolService.saveMemberToolBindings(memberId, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MEMBER_MANAGE.getCode())")
     @DeleteMapping("/{memberId}/tools/{bindingId}")
     @Operation(summary = "删除团队成员工具绑定")
     public R<Void> deleteMemberTool(@PathVariable String memberId, @PathVariable String bindingId) {
