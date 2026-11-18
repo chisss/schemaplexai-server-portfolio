@@ -12,6 +12,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 /**
@@ -37,12 +38,14 @@ public class SpecTemplateController {
         return R.ok(specTemplateService.getTemplateById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_TEMPLATE_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建自定义模板")
     public R<SpecTemplateVO> create(@Valid @RequestBody SpecTemplateCreateRequest request) {
         return R.ok(specTemplateService.createTemplate(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_TEMPLATE_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除模板（内置模板不可删除）")
     public R<Void> delete(@PathVariable String id) {
@@ -50,6 +53,7 @@ public class SpecTemplateController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_TEMPLATE_MANAGE.getCode())")
     @PostMapping("/{id}/create-spec")
     @Operation(summary = "从模板创建Spec")
     public R<SpecVO> createSpecFromTemplate(@PathVariable String id,

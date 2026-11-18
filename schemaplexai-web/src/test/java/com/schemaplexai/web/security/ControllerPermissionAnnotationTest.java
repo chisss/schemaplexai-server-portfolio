@@ -57,7 +57,6 @@ class ControllerPermissionAnnotationTest {
     private static final Set<String> EXEMPT_CONTROLLERS = Set.of(
             "ApiGatewayController",   // 网关转发，鉴权在网关层
             "AuthController",         // 登录/注册公开端点
-            "CicdPipelineController",
             "ContextController",
             "ConversationController",
             "DatabaseSourceController",
@@ -75,8 +74,6 @@ class ControllerPermissionAnnotationTest {
             "QualityController",
             "ReviewController",
             "SkillController",
-            "SpecController",
-            "SpecTemplateController",
             "ToolApprovalAmendmentController",
             "UserMemoryController",
             "UserMemorySettingController",

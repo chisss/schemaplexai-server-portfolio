@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -33,6 +34,7 @@ public class CicdPipelineController {
 
     private final CicdPipelineService pipelineService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CICD_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建Pipeline配置")
     public R<CicdPipelineVO> create(@Valid @RequestBody CicdPipelineCreateRequest request) {
@@ -51,6 +53,7 @@ public class CicdPipelineController {
         return R.ok(pipelineService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CICD_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新Pipeline")
     public R<CicdPipelineVO> update(@PathVariable String id,
@@ -58,6 +61,7 @@ public class CicdPipelineController {
         return R.ok(pipelineService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CICD_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除Pipeline")
     public R<Void> delete(@PathVariable String id) {
@@ -65,6 +69,7 @@ public class CicdPipelineController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).CICD_MANAGE.getCode())")
     @PostMapping("/{id}/trigger")
     @Operation(summary = "触发构建")
     public R<Map<String, Object>> trigger(@PathVariable String id) {
