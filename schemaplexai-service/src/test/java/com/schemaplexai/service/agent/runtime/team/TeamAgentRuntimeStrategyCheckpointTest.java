@@ -215,7 +215,20 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         resumeInput.setMessage("人工已确认可以继续，请只输出审批后的安全方案。");
         resumeInput.setOptions(Map.of("approvalMode", "manual", "resumeStep", "security_review"));
 
-        AgentExecutionResult resumedResult = strategy.resume(agent, parentExecution, resumeInput).get();
+        // 恢复路径上下文由编排器构建（含 sandboxPolicy/executionMode），此处模拟编排器产物
+        AgentExecutionContext resumeContext = AgentExecutionContext.builder()
+                .executionId(parentExecution.getId())
+                .agentId(agent.getId())
+                .tenantId(parentExecution.getTenantId())
+                .userId(parentExecution.getCreatedBy())
+                .inputPrompt(parentExecution.getInputPrompt())
+                .model(parentExecution.getAiModel())
+                .conversationId(parentExecution.getConversationId())
+                .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
+                .executionMode("auto")
+                .build();
+
+        AgentExecutionResult resumedResult = strategy.resume(agent, parentExecution, resumeContext, resumeInput).get();
         assertThat(resumedResult.getStatus()).isEqualTo(AgentExecutionStatusEnum.COMPLETED.getCode());
         assertThat(resumedResult.getOutputResult()).contains("审批后的安全方案");
         assertThat(resumedPrompt.get())

@@ -7,10 +7,8 @@ import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
-import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -22,7 +20,6 @@ import java.util.concurrent.CompletableFuture;
 public class SoloAgentRuntimeStrategy implements AgentRuntimeStrategy {
 
     private final AgentExecutionEngine agentExecutionEngine;
-    private final SandboxPolicyResolver sandboxPolicyResolver;
 
     @Override
     public AgentTypeEnum supportType() {
@@ -35,25 +32,9 @@ public class SoloAgentRuntimeStrategy implements AgentRuntimeStrategy {
     }
 
     @Override
-    public CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution, AgentExecutionInputDTO input) {
-        AgentExecutionContext context = AgentExecutionContext.builder()
-                .executionId(execution.getId())
-                .agentId(execution.getAgentId())
-                .tenantId(execution.getTenantId())
-                .userId(execution.getCreatedBy())
-                .inputPrompt(execution.getInputPrompt())
-                .model(execution.getAiModel())
-                .agentModelType(agent.getAiModelType())
-                .agentModelGroupId(agent.getAiModelGroupId())
-                .inputContext(execution.getInputContext())
-                .conversationId(execution.getConversationId())
-                .runtimeEngine(execution.getRuntimeEngine())
-                .executionMode(StringUtils.hasText(execution.getExecutionMode()) ? execution.getExecutionMode() : "auto")
-                .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
-                .temporaryChat(Boolean.TRUE.equals(input.getTemporaryChat()))
-                .memoryWriteEnabled(input.getMemoryWriteEnabled())
-                .build();
-        context.setSandboxPolicy(sandboxPolicyResolver.resolve(agent, context));
+    public CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution,
+                                                          AgentExecutionContext context, AgentExecutionInputDTO input) {
+        // 直接使用编排器构建的上下文（含 sandboxPolicy/executionMode），恢复路径不回退默认策略
         return agentExecutionEngine.resume(context, input);
     }
 }

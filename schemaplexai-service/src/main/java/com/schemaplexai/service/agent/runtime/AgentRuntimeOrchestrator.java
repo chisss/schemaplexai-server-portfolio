@@ -83,13 +83,15 @@ public class AgentRuntimeOrchestrator {
                 .memoryWriteEnabled(input.getMemoryWriteEnabled())
                 .build();
         applyOutputFormatContext(agent.getId(), context);
+        // 恢复路径同样解析沙箱策略并注入上下文，策略实现不得重建上下文（审计 H2）
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
+        context.setSandboxPolicy(sandboxPolicy);
         AgentExecution update = new AgentExecution();
         update.setId(execution.getId());
         update.setRuntimeEngine(runtimeEngine.getCode());
         update.setSandboxPolicySnapshot(buildRuntimeSnapshot(context, sandboxPolicy));
         agentExecutionMapper.updateById(update);
-        return strategyFactory.getStrategy(agent.getAgentType()).resume(agent, execution, input);
+        return strategyFactory.getStrategy(agent.getAgentType()).resume(agent, execution, context, input);
     }
 
     private Map<String, Object> buildRuntimeSnapshot(AgentExecutionContext context, SandboxPolicy sandboxPolicy) {
