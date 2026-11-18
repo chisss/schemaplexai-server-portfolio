@@ -14,6 +14,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.util.StringUtils;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -31,6 +32,7 @@ public class KnowledgeDocumentController {
     private final KnowledgeDocumentService knowledgeDocumentService;
     private final IdempotencyKeyService idempotencyKeyService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).KNOWLEDGE_MANAGE.getCode())")
     @PostMapping("/upload")
     @Operation(summary = "上传文档并启动 RAG 摄入")
     public R<KnowledgeDocumentVO> upload(@RequestParam String contextId,

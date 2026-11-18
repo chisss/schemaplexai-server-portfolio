@@ -17,6 +17,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -41,6 +42,7 @@ public class IntegrationController {
 
     private final IntegrationService integrationService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).INTEGRATION_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建集成配置")
     public R<IntegrationVO> create(@Valid @RequestBody IntegrationCreateRequest request) {
@@ -59,6 +61,7 @@ public class IntegrationController {
         return R.ok(integrationService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).INTEGRATION_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新集成配置")
     public R<IntegrationVO> update(@PathVariable String id,
@@ -66,6 +69,7 @@ public class IntegrationController {
         return R.ok(integrationService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).INTEGRATION_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除集成配置")
     public R<Void> delete(@PathVariable String id) {
@@ -73,12 +77,14 @@ public class IntegrationController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).INTEGRATION_MANAGE.getCode())")
     @PostMapping("/{id}/test")
     @Operation(summary = "测试集成连接")
     public R<ConnectionTestVO> testConnection(@PathVariable String id) {
         return R.ok(integrationService.testConnection(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).INTEGRATION_MANAGE.getCode())")
     @PostMapping("/{id}/sync")
     @Operation(summary = "触发集成同步")
     public R<Map<String, Object>> sync(@PathVariable String id) {
@@ -93,6 +99,7 @@ public class IntegrationController {
         return R.ok(integrationService.listAvailableProjects(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).INTEGRATION_MANAGE.getCode())")
     @PostMapping("/{id}/projects/import")
     @Operation(summary = "从集成平台导入项目")
     public R<IntegrationProjectVO> importProject(@PathVariable String id,

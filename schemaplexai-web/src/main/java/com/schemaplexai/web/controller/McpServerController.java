@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,6 +32,7 @@ public class McpServerController {
 
     private final McpServerService mcpServerService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MCP_SERVER_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "注册MCP Server")
     public R<McpServerVO> create(@Valid @RequestBody McpServerCreateRequest request) {
@@ -49,6 +51,7 @@ public class McpServerController {
         return R.ok(mcpServerService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MCP_SERVER_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新MCP Server")
     public R<McpServerVO> update(@PathVariable String id,
@@ -56,6 +59,7 @@ public class McpServerController {
         return R.ok(mcpServerService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MCP_SERVER_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除MCP Server")
     public R<Void> delete(@PathVariable String id) {
@@ -63,12 +67,14 @@ public class McpServerController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MCP_SERVER_MANAGE.getCode())")
     @PostMapping("/{id}/health-check")
     @Operation(summary = "健康检查")
     public R<McpServerVO> healthCheck(@PathVariable String id) {
         return R.ok(mcpServerService.healthCheck(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MCP_SERVER_MANAGE.getCode())")
     @PostMapping("/{id}/discover-tools")
     @Operation(summary = "发现工具列表")
     public R<McpServerVO> discoverTools(@PathVariable String id) {

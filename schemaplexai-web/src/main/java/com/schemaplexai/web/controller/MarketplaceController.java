@@ -8,6 +8,7 @@ import com.schemaplexai.service.marketplace.MarketplaceService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -32,6 +33,7 @@ public class MarketplaceController {
         return R.ok(marketplaceService.listPlugins(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MARKETPLACE_MANAGE.getCode())")
     @PostMapping("/{id}/install")
     @Operation(summary = "安装插件")
     public R<Void> install(@PathVariable String id) {
@@ -39,6 +41,7 @@ public class MarketplaceController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).MARKETPLACE_MANAGE.getCode())")
     @DeleteMapping("/{id}/install")
     @Operation(summary = "卸载插件")
     public R<Void> uninstall(@PathVariable String id) {
