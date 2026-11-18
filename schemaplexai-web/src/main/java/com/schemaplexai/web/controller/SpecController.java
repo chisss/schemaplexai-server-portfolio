@@ -20,6 +20,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -53,18 +54,21 @@ public class SpecController {
         return R.ok(specService.getWorkbench(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建Spec")
     public R<SpecVO> create(@Valid @RequestBody SpecCreateRequest request) {
         return R.ok(specService.createSpec(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新Spec基本信息")
     public R<SpecVO> update(@PathVariable String id, @Valid @RequestBody SpecUpdateRequest request) {
         return R.ok(specService.updateSpec(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_EXECUTE.getCode())")
     @PostMapping("/{id}/workflow/start")
     @Operation(summary = "填写原始需求并启动 Spec 工作流")
     public R<SpecVO> startWorkflow(@PathVariable String id,
@@ -72,6 +76,7 @@ public class SpecController {
         return R.ok(specService.startWorkflow(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除Spec")
     public R<Void> delete(@PathVariable String id) {
@@ -79,6 +84,7 @@ public class SpecController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_REVIEW.getCode())")
     @PostMapping("/{id}/submit")
     @Operation(summary = "提交审批")
     public R<Void> submitForReview(@PathVariable String id, @RequestParam String docType) {
@@ -86,6 +92,7 @@ public class SpecController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_REVIEW.getCode())")
     @PostMapping("/{id}/approve")
     @Operation(summary = "审批通过")
     public R<Void> approve(@PathVariable String id) {
@@ -93,6 +100,7 @@ public class SpecController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_REVIEW.getCode())")
     @PostMapping("/{id}/reject")
     @Operation(summary = "审批驳回")
     public R<Void> reject(@PathVariable String id) {
@@ -106,6 +114,7 @@ public class SpecController {
         return R.ok(specService.getDocument(id, docType));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_MANAGE.getCode())")
     @PutMapping("/{id}/documents/{docType}")
     @Operation(summary = "保存/更新Spec文档")
     public R<SpecDocumentVO> saveDocument(@PathVariable String id, @PathVariable String docType,
@@ -113,6 +122,7 @@ public class SpecController {
         return R.ok(specService.saveDocument(id, docType, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_MANAGE.getCode())")
     @PutMapping("/{id}/workbench/nodes/{nodeId}/document")
     @Operation(summary = "保存工作台文档节点草稿")
     public R<SpecDocumentVO> saveWorkbenchDocument(@PathVariable String id,
@@ -121,6 +131,7 @@ public class SpecController {
         return R.ok(specService.saveWorkbenchDocument(id, nodeId, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_MANAGE.getCode())")
     @PostMapping("/{id}/workbench/nodes/{nodeId}/submit")
     @Operation(summary = "提交工作台文档节点")
     public R<SpecDocumentVO> submitWorkbenchDocument(@PathVariable String id,
@@ -143,6 +154,7 @@ public class SpecController {
         return R.ok(specService.getVersionById(id, versionId));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SPEC_MANAGE.getCode())")
     @PostMapping("/{id}/versions/diff")
     @Operation(summary = "版本Diff对比")
     public R<SpecDiffVO> diffVersions(@PathVariable String id,
