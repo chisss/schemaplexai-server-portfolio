@@ -5,6 +5,7 @@ import com.schemaplexai.dao.mapper.AiModelGroupItemMapper;
 import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.AiModelRouteMapper;
 import com.schemaplexai.model.entity.AiModel;
+import com.schemaplexai.model.entity.AiModelGroupItem;
 import com.schemaplexai.model.entity.AiModelRoute;
 import dev.langchain4j.model.chat.ChatModel;
 import org.junit.jupiter.api.Test;
@@ -128,6 +129,98 @@ class AIModelRouterTest {
         AiModelConfig config = router.resolvePrimaryModel("tenant-id");
 
         assertThat(config.getModelId()).isEqualTo("deepseek-v3.2");
+    }
+
+    @Test
+    void shouldResolveGroupChainWithLoadBalancedPrimaryAndFallbackTail() {
+        AiModelMapper aiModelMapper = mock(AiModelMapper.class);
+        AiModelGroupItemMapper groupItemMapper = mock(AiModelGroupItemMapper.class);
+        LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);
+        ModelLoadBalancer modelLoadBalancer = mock(ModelLoadBalancer.class);
+        when(modelFactory.getOrCreate(any())).thenReturn(mock(ChatModel.class));
+
+        AiModel m1 = buildModel("m1-id", "Claude A", "claude-a", "success", 100);
+        AiModel m2 = buildModel("m2-id", "Claude B", "claude-b", "success", 120);
+        AiModel m3 = buildModel("m3-id", "Claude C", "claude-c", "success", 90);
+
+        AiModelGroupItem item1 = new AiModelGroupItem();
+        item1.setGroupId("group-1");
+        item1.setModelId("m1-id");
+        item1.setSortOrder(1);
+        AiModelGroupItem item2 = new AiModelGroupItem();
+        item2.setGroupId("group-1");
+        item2.setModelId("m2-id");
+        item2.setSortOrder(2);
+        AiModelGroupItem item3 = new AiModelGroupItem();
+        item3.setGroupId("group-1");
+        item3.setModelId("m3-id");
+        item3.setSortOrder(3);
+
+        when(groupItemMapper.selectList(any())).thenReturn(List.of(item1, item2, item3));
+        // 负载均衡命中 m2 → 链首=m2，其余按 sort_order 作降级链尾
+        when(modelLoadBalancer.selectModelId("group-1", List.of("m1-id", "m2-id", "m3-id"), "tenant-1:exec-1"))
+                .thenReturn("m2-id");
+        // 按解析顺序返回：链首 m2 → 降级链尾 m1 → m3
+        when(aiModelMapper.selectOne(any())).thenReturn(m2, m1, m3);
+
+        AIModelRouter router = new AIModelRouter(
+                modelFactory,
+                aiModelMapper,
+                mock(AiModelRouteMapper.class),
+                groupItemMapper,
+                modelLoadBalancer,
+                mock(ModelMetricsTracker.class)
+        );
+
+        List<LangChain4jResolution> chain =
+                router.resolveGroupChainForExecution("group-1", "tenant-1:exec-1", "medium");
+
+        assertThat(chain)
+                .extracting(item -> item.config().getModelId())
+                .containsExactly("claude-b", "claude-a", "claude-c");
+    }
+
+    @Test
+    void shouldSkipUnavailableMemberAndKeepChain() {
+        AiModelMapper aiModelMapper = mock(AiModelMapper.class);
+        AiModelGroupItemMapper groupItemMapper = mock(AiModelGroupItemMapper.class);
+        LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);
+        ModelLoadBalancer modelLoadBalancer = mock(ModelLoadBalancer.class);
+        when(modelFactory.getOrCreate(any())).thenReturn(mock(ChatModel.class));
+
+        AiModel healthy = buildModel("m1-id", "Claude A", "claude-a", "success", 100);
+
+        AiModelGroupItem item1 = new AiModelGroupItem();
+        item1.setGroupId("group-1");
+        item1.setModelId("m1-id");
+        item1.setSortOrder(1);
+        AiModelGroupItem item2 = new AiModelGroupItem();
+        item2.setGroupId("group-1");
+        item2.setModelId("m2-id");
+        item2.setSortOrder(2);
+
+        when(groupItemMapper.selectList(any())).thenReturn(List.of(item1, item2));
+        when(modelLoadBalancer.selectModelId("group-1", List.of("m1-id", "m2-id"), "t:e"))
+                .thenReturn("m2-id");
+        // 首次解析命中成员 m2：查询返回 null（模拟不可用）→ 跳过；再解析 m1 → healthy
+        when(aiModelMapper.selectOne(any())).thenReturn(null, healthy);
+
+        AIModelRouter router = new AIModelRouter(
+                modelFactory,
+                aiModelMapper,
+                mock(AiModelRouteMapper.class),
+                groupItemMapper,
+                modelLoadBalancer,
+                mock(ModelMetricsTracker.class)
+        );
+
+        List<LangChain4jResolution> chain =
+                router.resolveGroupChainForExecution("group-1", "t:e", "medium");
+
+        // 命中成员不可用时跳过，健康成员成为可用链
+        assertThat(chain)
+                .extracting(item -> item.config().getModelId())
+                .containsExactly("claude-a");
     }
 
     private AiModel buildModel(String id, String name, String modelId, String lastTestStatus, Integer latency) {
