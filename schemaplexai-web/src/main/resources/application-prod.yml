@@ -63,7 +63,7 @@ clickhouse:
   enabled: true
   url: jdbc:clickhouse://${CLICKHOUSE_HOST:localhost}:${CLICKHOUSE_PORT:8123}/${CLICKHOUSE_DB:schemaplexai}
   username: ${CLICKHOUSE_USERNAME:default}
-  password: ${CLICKHOUSE_PASSWORD:clickhouse123}
+  password: ${CLICKHOUSE_PASSWORD}
   sync-batch-size: ${CLICKHOUSE_SYNC_BATCH_SIZE:5000}
   sync-lag-seconds: ${CLICKHOUSE_SYNC_LAG_SECONDS:10}
 
