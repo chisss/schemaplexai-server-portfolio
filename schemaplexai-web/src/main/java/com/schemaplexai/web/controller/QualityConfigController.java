@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -42,12 +43,14 @@ public class QualityConfigController {
         return R.ok(qualityProfileFacadeService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_CONFIG_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建质量配置组")
     public R<QualityProfileConfigVO> create(@Valid @RequestBody QualityProfileConfigRequest request) {
         return R.ok(qualityProfileFacadeService.create(request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_CONFIG_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新质量配置组")
     public R<QualityProfileConfigVO> update(@PathVariable String id,
@@ -55,6 +58,7 @@ public class QualityConfigController {
         return R.ok(qualityProfileFacadeService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_CONFIG_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除质量配置组")
     public R<Void> delete(@PathVariable String id) {
