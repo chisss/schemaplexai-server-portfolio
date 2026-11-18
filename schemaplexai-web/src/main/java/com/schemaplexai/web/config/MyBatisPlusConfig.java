@@ -53,8 +53,6 @@ public class MyBatisPlusConfig {
             "sf_spec_version",
             // 上下文子表
             "sf_context_item",
-            // 工作流子表
-            "sf_workflow_node_execution",
             // 评审子表
             "sf_review_comment",
             // 系统级字典表（全局共享，不做租户隔离）

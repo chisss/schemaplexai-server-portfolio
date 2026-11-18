@@ -58,3 +58,5 @@ docs/superpowers/
 .mvn/settings.xml
 BACKEND_CONFIG.md
 harness-progress.txt
+harness-tasks.json
+.harness-active
