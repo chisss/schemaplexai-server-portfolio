@@ -26,6 +26,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -54,6 +55,7 @@ public class QualityController {
 
     // ==================== 偏离检测 ====================
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PostMapping("/deviations/detect")
     @Operation(summary = "触发偏离检测")
     public R<DetectTaskVO> detect(@Valid @RequestBody DeviationDetectRequest request) {
@@ -81,6 +83,7 @@ public class QualityController {
         return R.ok(deviationService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PatchMapping("/deviations/{id}/status")
     @Operation(summary = "更新偏离状态")
     public R<Void> updateDeviationStatus(@PathVariable String id,
@@ -91,6 +94,7 @@ public class QualityController {
 
     // ==================== 意图缺陷 ====================
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PostMapping("/intent-defects/analyze")
     @Operation(summary = "触发意图缺陷分析")
     public R<AnalyzeTaskVO> analyze(@Valid @RequestBody IntentDefectAnalyzeRequest request) {
@@ -109,6 +113,7 @@ public class QualityController {
         return R.ok(intentDefectService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PatchMapping("/intent-defects/{id}/status")
     @Operation(summary = "更新意图缺陷状态")
     public R<Void> updateIntentDefectStatus(@PathVariable String id,
@@ -119,6 +124,7 @@ public class QualityController {
 
     // ==================== 交叉审查 ====================
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PostMapping("/cross-reviews")
     @Operation(summary = "创建交叉审查")
     public R<CrossReviewVO> createCrossReview(@Valid @RequestBody CrossReviewCreateRequest request) {
@@ -178,6 +184,7 @@ public class QualityController {
         return R.ok(qualityIssueFeedbackService.getIssueDetail(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PostMapping("/issues/{id}/acknowledge")
     @Operation(summary = "确认质量问题")
     public R<Void> acknowledgeIssue(@PathVariable String id,
@@ -186,6 +193,7 @@ public class QualityController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PostMapping("/issues/{id}/resolve")
     @Operation(summary = "解决质量问题")
     public R<Void> resolveIssue(@PathVariable String id,
@@ -194,6 +202,7 @@ public class QualityController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PostMapping("/issues/{id}/ignore")
     @Operation(summary = "忽略质量问题")
     public R<Void> ignoreIssue(@PathVariable String id,
@@ -202,6 +211,7 @@ public class QualityController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).QUALITY_MANAGE.getCode())")
     @PostMapping("/issues/{id}/resume-workflow")
     @Operation(summary = "恢复被质量问题阻断的工作流")
     public R<Void> resumeWorkflow(@PathVariable String id,

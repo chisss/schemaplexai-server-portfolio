@@ -10,6 +10,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,6 +40,7 @@ public class ToolApprovalAmendmentController {
         return R.ok(amendmentService.listAmendments(tenantId, agentId));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).APPROVAL_DECIDE.getCode())")
     @PostMapping
     @Operation(summary = "创建修正规则")
     public R<ToolApprovalAmendment> create(@Valid @RequestBody AmendmentCreateRequest request) {
@@ -52,6 +54,7 @@ public class ToolApprovalAmendmentController {
         return R.ok(amendment);
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).APPROVAL_DECIDE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除修正规则")
     public R<Void> delete(@PathVariable String id) {

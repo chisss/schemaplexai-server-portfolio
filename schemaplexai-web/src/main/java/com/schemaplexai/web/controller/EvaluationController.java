@@ -15,6 +15,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -37,6 +38,7 @@ public class EvaluationController {
     private final EvalDatasetService evalDatasetService;
     private final EvalTaskService evalTaskService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).EVALUATION_MANAGE.getCode())")
     @PostMapping("/datasets")
     @Operation(summary = "创建评估数据集")
     public R<EvalDatasetVO> createDataset(@Valid @RequestBody EvalDatasetCreateRequest request) {
@@ -57,6 +59,7 @@ public class EvaluationController {
         return R.ok(evalDatasetService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).EVALUATION_MANAGE.getCode())")
     @PutMapping("/datasets/{id}")
     @Operation(summary = "更新评估数据集")
     public R<EvalDatasetVO> updateDataset(@PathVariable String id,
@@ -64,6 +67,7 @@ public class EvaluationController {
         return R.ok(evalDatasetService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).EVALUATION_MANAGE.getCode())")
     @PutMapping("/datasets/{id}/items")
     @Operation(summary = "保存评估数据集条目")
     public R<EvalDatasetVO> saveDatasetItems(@PathVariable String id,
@@ -71,6 +75,7 @@ public class EvaluationController {
         return R.ok(evalDatasetService.saveItems(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).EVALUATION_MANAGE.getCode())")
     @DeleteMapping("/datasets/{id}")
     @Operation(summary = "删除评估数据集")
     public R<Void> deleteDataset(@PathVariable String id) {
@@ -78,6 +83,7 @@ public class EvaluationController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).EVALUATION_MANAGE.getCode())")
     @PostMapping("/tasks")
     @Operation(summary = "创建评估任务")
     public R<EvalTaskVO> createTask(@Valid @RequestBody EvalTaskCreateRequest request) {
@@ -96,6 +102,7 @@ public class EvaluationController {
         return R.ok(evalTaskService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).EVALUATION_MANAGE.getCode())")
     @PostMapping("/tasks/{id}/run")
     @Operation(summary = "重跑评估任务")
     public R<EvalTaskVO> runTask(@PathVariable String id) {

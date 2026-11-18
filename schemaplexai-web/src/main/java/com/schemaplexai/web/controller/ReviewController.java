@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -26,6 +27,7 @@ public class ReviewController {
 
     private final ReviewSessionService reviewSessionService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).REVIEW_MANAGE.getCode())")
     @PostMapping("/sessions")
     @Operation(summary = "创建评审会话")
     public R<ReviewSessionVO> createSession(@Valid @RequestBody ReviewSessionCreateRequest request) {
@@ -38,6 +40,7 @@ public class ReviewController {
         return R.ok(reviewSessionService.getWithSummary(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).REVIEW_MANAGE.getCode())")
     @PostMapping("/sessions/{id}/comments")
     @Operation(summary = "提交评审意见")
     public R<ReviewCommentVO> submitComment(@PathVariable String id,
@@ -51,6 +54,7 @@ public class ReviewController {
         return R.ok(reviewSessionService.getMyPending());
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).REVIEW_DECIDE.getCode())")
     @PostMapping("/sessions/{id}/approve")
     @Operation(summary = "审批通过评审任务")
     public R<ReviewSessionVO> approve(@PathVariable String id,
@@ -58,6 +62,7 @@ public class ReviewController {
         return R.ok(reviewSessionService.approve(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).REVIEW_DECIDE.getCode())")
     @PostMapping("/sessions/{id}/reject")
     @Operation(summary = "驳回评审任务")
     public R<ReviewSessionVO> reject(@PathVariable String id,
@@ -65,6 +70,7 @@ public class ReviewController {
         return R.ok(reviewSessionService.reject(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).REVIEW_DECIDE.getCode())")
     @PostMapping("/sessions/{id}/request-modify")
     @Operation(summary = "退回修改评审任务")
     public R<ReviewSessionVO> requestModify(@PathVariable String id,

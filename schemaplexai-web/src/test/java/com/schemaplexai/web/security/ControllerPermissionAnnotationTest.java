@@ -57,16 +57,11 @@ class ControllerPermissionAnnotationTest {
     private static final Set<String> EXEMPT_CONTROLLERS = Set.of(            "AuthController",         // 登录/注册公开端点
             "ConversationController",
             "DirectChatController",
-            "EvaluationController",
             "InAppMessageController",
             "MessageTemplateController",
             "MonitorController",
             "NotificationChannelController",
-            "QualityConfigController",
-            "QualityController",
-            "ReviewController",
             "SkillController",
-            "ToolApprovalAmendmentController",
             "UserMemoryController",
             "UserMemorySettingController"
     );
