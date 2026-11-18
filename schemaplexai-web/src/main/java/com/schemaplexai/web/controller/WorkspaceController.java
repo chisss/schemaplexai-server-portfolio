@@ -19,6 +19,7 @@ import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -44,6 +45,7 @@ public class WorkspaceController {
 
     private final WorkspaceService workspaceService;
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @PostMapping
     @Operation(summary = "创建工作空间")
     public R<WorkspaceVO> create(@Valid @RequestBody WorkspaceCreateRequest request) {
@@ -62,6 +64,7 @@ public class WorkspaceController {
         return R.ok(workspaceService.getById(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @PutMapping("/{id}")
     @Operation(summary = "更新工作空间")
     public R<WorkspaceVO> update(@PathVariable String id,
@@ -69,6 +72,7 @@ public class WorkspaceController {
         return R.ok(workspaceService.update(id, request));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @DeleteMapping("/{id}")
     @Operation(summary = "删除工作空间")
     public R<Void> delete(@PathVariable String id) {
@@ -76,6 +80,7 @@ public class WorkspaceController {
         return R.ok();
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @PostMapping("/{id}/sync")
     @Operation(summary = "同步工作空间")
     public R<WorkspaceVO> sync(@PathVariable String id) {
@@ -100,6 +105,7 @@ public class WorkspaceController {
         return R.ok(workspaceService.getCurrentBranch(id));
     }
 
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKSPACE_MANAGE.getCode())")
     @PostMapping("/{id}/branches")
     @Operation(summary = "创建分支")
     public R<GitOperationService.BranchInfo> createBranch(
