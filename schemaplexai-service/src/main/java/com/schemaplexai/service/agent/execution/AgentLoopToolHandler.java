@@ -312,7 +312,11 @@ public class AgentLoopToolHandler {
     }
 
     /**
-     * 并行执行工具调用（预分区：读工具一次性并行，写工具按原始顺序串行）
+     * 并行执行工具调用（按原序扫描分组：相邻连续 READ 段内并行，段间含 WRITE 保持原序）。
+     *
+     * <p>修复审计 M3：原实现把全部 READ 提前到 WRITE 之前并行，破坏同轮 write→read
+     * 验证类调用依赖（读会读到写之前的值）。新实现仅在相邻连续 READ 段内并行，
+     * 写工具与各段之间严格保持模型请求的原始顺序。
      *
      * @param ioTypeIndex 工具 IO 类型索引（来自 DB 配置）
      */
@@ -329,10 +333,9 @@ public class AgentLoopToolHandler {
             return List.of(executeOne(roundCtx, requests.get(0), compressionOpts));
         }
 
-        // 预分区：READ 工具并行，WRITE / READ_WRITE 工具串行
-        List<int[]> readGroup = new ArrayList<>();   // [originalIndex]
-        List<int[]> writeGroup = new ArrayList<>();
-        List<ToolExecutionRequest> readRequests = new ArrayList<>();
+        ToolExecutionOutcome[] results = new ToolExecutionOutcome[requests.size()];
+        List<ToolExecutionRequest> readSegment = new ArrayList<>();
+        List<Integer> readSegmentIndexes = new ArrayList<>();
 
         for (int i = 0; i < requests.size(); i++) {
             ToolExecutionRequest req = requests.get(i);
@@ -340,30 +343,40 @@ public class AgentLoopToolHandler {
                     ? ioTypeIndex.getOrDefault(req.name(), ToolIoTypeEnum.READ_WRITE)
                     : ToolIoTypeEnum.READ_WRITE;
             if (ioType == ToolIoTypeEnum.READ) {
-                readGroup.add(new int[]{i});
-                readRequests.add(req);
-            } else {
-                writeGroup.add(new int[]{i});
+                readSegment.add(req);
+                readSegmentIndexes.add(i);
+                continue;
             }
+            // 遇到写工具：先按原序完成前置连续 READ 段，再串行执行写工具
+            flushReadSegment(roundCtx, compressionOpts, parallelExecutor, maxParallelTools,
+                    readSegment, readSegmentIndexes, results);
+            results[i] = executeOne(roundCtx, req, compressionOpts);
         }
-
-        ToolExecutionOutcome[] results = new ToolExecutionOutcome[requests.size()];
-
-        // 1. 所有读工具一次性并行提交
-        if (!readRequests.isEmpty()) {
-            List<ToolExecutionOutcome> readResults = runParallel(
-                    roundCtx, readRequests, compressionOpts, parallelExecutor, maxParallelTools);
-            for (int j = 0; j < readGroup.size(); j++) {
-                results[readGroup.get(j)[0]] = readResults.get(j);
-            }
-        }
-
-        // 2. 写工具按原始顺序串行执行
-        for (int[] entry : writeGroup) {
-            results[entry[0]] = executeOne(roundCtx, requests.get(entry[0]), compressionOpts);
-        }
+        // 尾部连续 READ 段
+        flushReadSegment(roundCtx, compressionOpts, parallelExecutor, maxParallelTools,
+                readSegment, readSegmentIndexes, results);
 
         return List.of(results);
+    }
+
+    /** 执行一个连续 READ 段（段内并行），结果按原索引回填 */
+    private void flushReadSegment(AgentToolSessionFactory.RoundToolContext roundCtx,
+                                  ToolResultCompressionOptions compressionOpts,
+                                  Executor parallelExecutor,
+                                  int maxParallelTools,
+                                  List<ToolExecutionRequest> readSegment,
+                                  List<Integer> readSegmentIndexes,
+                                  ToolExecutionOutcome[] results) {
+        if (readSegment.isEmpty()) {
+            return;
+        }
+        List<ToolExecutionOutcome> segmentResults = runParallel(
+                roundCtx, readSegment, compressionOpts, parallelExecutor, maxParallelTools);
+        for (int j = 0; j < readSegmentIndexes.size(); j++) {
+            results[readSegmentIndexes.get(j)] = segmentResults.get(j);
+        }
+        readSegment.clear();
+        readSegmentIndexes.clear();
     }
 
     private List<ToolExecutionOutcome> runParallel(
