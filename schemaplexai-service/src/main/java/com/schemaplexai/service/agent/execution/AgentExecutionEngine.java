@@ -462,7 +462,7 @@ public class AgentExecutionEngine {
 
         // 循环结束后处理（正常完成 or 强制收敛）
         return finalizeLoop(ctx, modelChain, systemPrompt, chatMemory, state, params,
-                executionId, agentId, tenantId, startMs, conversationId);
+                executionId, agentId, tenantId, startMs, conversationId, deadlineMs, maxTokenBudget);
     }
 
     // =========================================================================
@@ -1060,14 +1060,41 @@ public class AgentExecutionEngine {
     }
 
     /**
-     * 循环结束后的收尾：正常完成直接构建结果；否则触发强制收敛
+     * 循环结束后的收尾：正常完成直接构建结果；否则触发强制收敛。
+     *
+     * <p>硬边界（审计 M1）：deadline 已过或累计 Token 已超硬预算时，
+     * 跳过强制收敛/质量修订的模型调用，直接基于已收集证据规则化降级收敛
+     * （无证据则失败），保证预算耗尽后零模型调用。
      */
     private AgentExecutionResult finalizeLoop(AgentExecutionContext ctx,
                                                List<LangChain4jResolution> modelChain,
                                                String systemPrompt, ChatMemory chatMemory,
                                                AgentLoopState state, AgentEngineParams params,
                                                String executionId, String agentId, String tenantId,
-                                               long startMs, String conversationId) {
+                                               long startMs, String conversationId,
+                                               long deadlineMs, long maxTokenBudget) {
+        boolean deadlineExceeded = System.currentTimeMillis() > deadlineMs;
+        long totalTokens = state.getTotalTokenInput() + state.getTotalTokenOutput();
+        boolean budgetExceeded = totalTokens > maxTokenBudget;
+        if (deadlineExceeded || budgetExceeded) {
+            String hardBoundaryReason = deadlineExceeded
+                    ? "执行截止时间已过（maxExecutionMinutes 超限）"
+                    : "累计 Token 超过硬预算: total=" + totalTokens + ", budget=" + maxTokenBudget;
+            agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                    AgentLoopLogTypeEnum.FORCE_COMPLETION.getCode(), state.getLastRound(), null,
+                    "硬边界触发，跳过强制收敛模型调用: " + hardBoundaryReason, null, elapsed(startMs));
+            // 有历史证据则规则化降级收敛（零模型调用，与既有降级路径同语义），否则直接失败
+            if (completionHandler.hasCompletionEvidence(chatMemory)) {
+                String degraded = completionHandler.buildDegraded(ctx, chatMemory, state.getLastRound(), null,
+                        new IllegalStateException(hardBoundaryReason), params);
+                chatMemory.add(UserMessage.from(AgentLoopPromptConstant.FORCE_COMPLETION));
+                chatMemory.add(AiMessage.from(degraded));
+                state.setLastContent(degraded);
+                return buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
+            }
+            return buildFailedResult(executionId, agentId, tenantId, state.getLastRound(), state, startMs,
+                    "硬边界触发且无可用证据: " + hardBoundaryReason);
+        }
         if (state.isLoopCompleted()) {
             if (params.isShadowQualityReviewEnabled()) {
                 CompletionRevisionResult revision = reviseWithPendingShadowReview(ctx, modelChain.getLast(), systemPrompt,
