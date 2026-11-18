@@ -1188,6 +1188,8 @@ public class AgentExecutionEngine {
             String message = StringUtils.hasText(securityDecision.getMessage())
                     ? securityDecision.getMessage() : "输出内容命中安全策略";
             if (SecurityComplianceConstant.DECISION_BLOCK.equals(decision)) {
+                // 终态清理：执行失败后残留的 pending 引导不再消费
+                discardPendingSteeringOnTerminal(executionId);
                 agentLogService.updateExecutionStatus(executionId, STATUS_FAILED, message,
                         state.getTotalTokenInput(), state.getTotalTokenOutput(), null);
                 agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
@@ -1232,6 +1234,8 @@ public class AgentExecutionEngine {
             }
         }
 
+        // 终态清理：执行完成后残留的 pending 引导不再消费
+        discardPendingSteeringOnTerminal(executionId);
         agentLogService.updateExecutionStatus(executionId, STATUS_COMPLETED, null,
                 state.getTotalTokenInput(), state.getTotalTokenOutput(), sanitized);
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
@@ -1279,6 +1283,8 @@ public class AgentExecutionEngine {
     /** 构建失败结果并更新执行状态 */
     private AgentExecutionResult buildFailedResult(String executionId, String agentId, String tenantId,
                                                     int round, AgentLoopState state, long startMs, String errorMessage) {
+        // 终态清理：执行失败后残留的 pending 引导不再消费
+        discardPendingSteeringOnTerminal(executionId);
         agentLogService.updateExecutionStatus(executionId, STATUS_FAILED, errorMessage,
                 state.getTotalTokenInput(), state.getTotalTokenOutput(), null);
         agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
@@ -1306,6 +1312,8 @@ public class AgentExecutionEngine {
     /** 构建用户停止结果并更新执行状态 */
     private AgentExecutionResult buildStoppedResult(String executionId, String agentId, String tenantId,
                                                      int round, long startMs) {
+        // 终态清理：执行停止后残留的 pending 引导不再消费
+        discardPendingSteeringOnTerminal(executionId);
         agentLogService.updateExecutionStatus(executionId, STATUS_STOPPED, "用户已停止执行", null, null, null);
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
                 AgentLoopLogTypeEnum.EXECUTION_STOPPED.getCode(), round, null, "用户已停止执行", null, elapsed(startMs));
@@ -1318,11 +1326,25 @@ public class AgentExecutionEngine {
     /** 处理顶层致命异常 */
     private AgentExecutionResult handleFatalError(AgentExecutionContext ctx, Exception e, long startMs) {
         String errMsg = resolveExMsg(e);
+        // 终态清理：致命异常后残留的 pending 引导不再消费
+        discardPendingSteeringOnTerminal(ctx.getExecutionId());
         agentLogService.updateExecutionStatus(ctx.getExecutionId(), STATUS_FAILED, errMsg, null, null, null);
         executionEventStreamService.publishSimple(ctx.getExecutionId(), AgentExecutionEventTypeEnum.FAILED.getCode(),
                 0, errMsg, startMs);
         recordAgentTrace(ctx.getExecutionId(), ctx.getTenantId(), ctx.getAgentId(), startMs, 0L, 0L, STATUS_FAILED);
         return AgentExecutionResult.builder().status(STATUS_FAILED).errorMessage(errMsg).build();
+    }
+
+    /**
+     * 终态（非 PAUSED）清理 pending 引导：执行已结束不再消费，
+     * 清理失败仅记录日志，不得阻断终态流程。
+     */
+    private void discardPendingSteeringOnTerminal(String executionId) {
+        try {
+            executionSteeringService.markDiscardedByExecution(executionId);
+        } catch (Exception e) {
+            log.warn("终态清理 pending 引导失败: executionId={}, error={}", executionId, e.getMessage());
+        }
     }
 
     private void recordAgentTrace(String traceId,
