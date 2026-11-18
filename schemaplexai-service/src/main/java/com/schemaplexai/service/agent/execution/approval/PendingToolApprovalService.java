@@ -65,15 +65,11 @@ public class PendingToolApprovalService {
     }
 
     /**
-     * 决策（不做归属校验；仅当调用方无四元组上下文时使用）
-     */
-    public PendingToolApproval decide(String approvalId, AgentExecutionInputDTO input, String decidedBy) {
-        return decide(approvalId, input, decidedBy, null, null, null, null);
-    }
-
-    /**
      * 归属校验 + PENDING 一次性状态迁移（原子 CAS，防重复决策导致重复执行写工具）。
      * expected* 为空时跳过对应校验；任一项不匹配即拒绝。
+     *
+     * <p>仅提供带四元组上下文的重载：所有调用方必须显式声明期望归属，
+     * 杜绝无归属校验的决策路径（审计 M5）。
      */
     public PendingToolApproval decide(String approvalId, AgentExecutionInputDTO input, String decidedBy,
                                       String expectedTenantId, String expectedAgentId,

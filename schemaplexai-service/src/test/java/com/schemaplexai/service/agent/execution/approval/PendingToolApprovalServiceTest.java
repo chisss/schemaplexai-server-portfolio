@@ -63,7 +63,7 @@ class PendingToolApprovalServiceTest {
         input.setApprovalDecision("approve");
         input.setDecisionReason("确认写入");
 
-        PendingToolApproval decided = service.decide("approval-1", input, "user-1");
+        PendingToolApproval decided = service.decide("approval-1", input, "user-1", null, null, null, null);
         ToolExecutionRequest rebuilt = service.rebuildToolRequest(decided);
 
         assertThat(decided.getDecisionStatus()).isEqualTo(PendingToolApprovalService.STATUS_APPROVED);
@@ -87,7 +87,7 @@ class PendingToolApprovalServiceTest {
         input.setApprovalDecision("deny");
         input.setDecisionReason("不允许修改");
 
-        PendingToolApproval decided = service.decide("approval-1", input, "user-1");
+        PendingToolApproval decided = service.decide("approval-1", input, "user-1", null, null, null, null);
 
         assertThat(decided.getDecisionStatus()).isEqualTo(PendingToolApprovalService.STATUS_DENIED);
         assertThat(decided.getDecision()).isEqualTo("deny");
@@ -119,10 +119,10 @@ class PendingToolApprovalServiceTest {
         AgentExecutionInputDTO input = new AgentExecutionInputDTO();
         input.setApprovalDecision("approve");
 
-        PendingToolApproval first = service.decide("approval-1", input, "user-1");
+        PendingToolApproval first = service.decide("approval-1", input, "user-1", null, null, null, null);
         assertThat(first.getDecisionStatus()).isEqualTo(PendingToolApprovalService.STATUS_APPROVED);
 
-        assertThatThrownBy(() -> service.decide("approval-1", input, "user-1"))
+        assertThatThrownBy(() -> service.decide("approval-1", input, "user-1", null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("已处理");
     }
