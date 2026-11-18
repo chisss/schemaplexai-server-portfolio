@@ -35,6 +35,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -332,6 +333,48 @@ class TeamAgentRuntimeStrategyTest {
 
         assertThat(childContext.getSandboxPolicy()).isSameAs(policy);
         assertThat(childContext.getExecutionMode()).isEqualTo("plan");
+    }
+
+    @Test
+    void shouldShortCircuitAggregateWhenParentExecutionStopped() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+
+        Map<String, Object> update = strategy.aggregate(
+                List.of(Map.of(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.STOPPED.getCode())), 0);
+
+        assertThat(update.get(TeamGraphConstants.STATE_FINAL_STATUS))
+                .isEqualTo(AgentExecutionStatusEnum.STOPPED.getCode());
+    }
+
+    @Test
+    void shouldKeepStoppedTerminalStateInFinalizeExecution() {
+        AgentExecutionMapper agentExecutionMapper = mock(AgentExecutionMapper.class);
+        AgentLogService agentLogService = mock(AgentLogService.class);
+        ExecutionEventStreamService eventStreamService = mock(ExecutionEventStreamService.class);
+        TeamAgentRuntimeStrategy strategy = createStrategy(agentExecutionMapper, agentLogService, eventStreamService);
+
+        AgentExecution execution = new AgentExecution();
+        execution.setId("parent-1");
+        execution.setAgentId("agent-1");
+        execution.setTenantId("tenant-1");
+        execution.setConversationId("conv-1");
+        // 父执行已 stopped（如工作流编排超时写入）
+        AgentExecution stoppedExecution = new AgentExecution();
+        stoppedExecution.setId("parent-1");
+        stoppedExecution.setStatus(AgentExecutionStatusEnum.STOPPED.getCode());
+        when(agentExecutionMapper.selectById("parent-1")).thenReturn(stoppedExecution);
+
+        TeamGraphState state = new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                TeamGraphConstants.STATE_FINAL_OUTPUT, "已完成的内容"));
+
+        AgentExecutionResult result = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                strategy, "finalizeExecution", execution, state);
+
+        assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.STOPPED.getCode());
+        // 终态不被 COMPLETED 覆盖
+        verify(agentLogService).updateExecutionStatus(eq("parent-1"),
+                eq(AgentExecutionStatusEnum.STOPPED.getCode()), eq("用户已停止执行"), isNull(), isNull(), isNull());
     }
 
     private TeamAgentRuntimeStrategy createStrategy() {

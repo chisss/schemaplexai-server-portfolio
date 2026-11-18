@@ -303,6 +303,11 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                                                      List<AgentTeamMember> members, int retryCount,
                                                      String userInput, Map<String, Object> userOptions,
                                                      String retryFeedback, List<Map<String, Object>> previousResults) {
+        // 父执行已停止（如工作流编排超时写入 stopped）：跳过本轮成员执行，防后续轮次继续产生模型/工具副作用
+        if (isParentExecutionStopped(execution.getId())) {
+            log.info("父执行已被停止，跳过本轮成员执行: executionId={}", execution.getId());
+            return List.of(Map.of(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.STOPPED.getCode()));
+        }
         // 成功成员复用（审计 P0-3）：恢复/质量重试时不重复执行已完成成员，防写工具重复副作用
         Set<String> completedMemberIds = resolveCompletedMemberIds(previousResults);
         List<Map<String, Object>> memberResults = new ArrayList<>();
@@ -687,6 +692,15 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
 
 
     Map<String, Object> aggregate(List<Map<String, Object>> memberResults, int retryCount) {
+        // 父执行已停止：短路聚合，终态保持 stopped
+        boolean stopped = memberResults.stream()
+                .anyMatch(result -> AgentExecutionStatusEnum.STOPPED.getCode()
+                        .equals(asText(result.get(TeamGraphConstants.RESULT_STATUS))));
+        if (stopped) {
+            Map<String, Object> stoppedUpdate = new LinkedHashMap<>();
+            stoppedUpdate.put(TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.STOPPED.getCode());
+            return stoppedUpdate;
+        }
         int pausedCount = 0;
         int successCount = 0;
         int contributorSuccessCount = 0;
@@ -1000,6 +1014,17 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     }
 
     private AgentExecutionResult finalizeExecution(AgentExecution execution, TeamGraphState state) {
+        // 父执行已被停止（如工作流编排超时写入 stopped）：保持 stopped 终态，不覆盖为 COMPLETED
+        if (isParentExecutionStopped(execution.getId())) {
+            agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.STOPPED.getCode(),
+                    "用户已停止执行", null, null, null);
+            publishParentEvent(execution, AgentExecutionEventTypeEnum.CANCELLED, "Team Agent 已停止", null);
+            return AgentExecutionResult.builder()
+                    .status(AgentExecutionStatusEnum.STOPPED.getCode())
+                    .errorMessage("用户已停止执行")
+                    .conversationId(execution.getConversationId())
+                    .build();
+        }
         String finalStatus = StringUtils.hasText(state.finalStatus())
                 ? state.finalStatus()
                 : AgentExecutionStatusEnum.FAILED.getCode();
@@ -1065,6 +1090,15 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .errorMessage(state.finalError())
                 .conversationId(execution.getConversationId())
                 .build();
+    }
+
+    /**
+     * 父执行是否已被停止（复用 Solo 引擎的 stopped 状态语义：
+     * 工作流编排超时/用户停止均写入 stopped 状态）。
+     */
+    private boolean isParentExecutionStopped(String parentExecutionId) {
+        AgentExecution execution = agentExecutionMapper.selectById(parentExecutionId);
+        return execution != null && AgentExecutionStatusEnum.STOPPED.getCode().equals(execution.getStatus());
     }
 
     /**
