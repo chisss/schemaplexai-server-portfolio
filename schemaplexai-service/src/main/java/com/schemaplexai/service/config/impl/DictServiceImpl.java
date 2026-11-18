@@ -131,6 +131,9 @@ public class DictServiceImpl implements DictService {
             validateStatus(item.getStatus());
         }
         entity.setStatus(StringUtils.hasText(item.getStatus()) ? item.getStatus() : DEFAULT_STATUS);
+        if (existsItemByValue(dict.getDictCode(), item.getItemValue(), null)) {
+            throw new BusinessException(ResultCode.FAIL, "字典项值已存在: " + item.getItemValue());
+        }
         sysDictItemMapper.insert(entity);
         log.info("创建字典项: itemId={}, dictCode={}", entity.getId(), code);
         return sysDictItemMapper.selectById(entity.getId());
@@ -149,6 +152,12 @@ public class DictServiceImpl implements DictService {
         if (item.getExtra() != null)                   patch.setExtra(item.getExtra());
         if (StringUtils.hasText(item.getStatus()))     patch.setStatus(item.getStatus());
         if (StringUtils.hasText(item.getStatus()))     validateStatus(item.getStatus());
+        if (StringUtils.hasText(item.getItemValue())) {
+            SysDictItem current = sysDictItemMapper.selectById(id);
+            if (current != null && existsItemByValue(current.getDictCode(), item.getItemValue(), id)) {
+                throw new BusinessException(ResultCode.FAIL, "字典项值已存在: " + item.getItemValue());
+            }
+        }
         sysDictItemMapper.updateById(patch);
         log.info("更新字典项: itemId={}", id);
         return sysDictItemMapper.selectById(id);
@@ -192,6 +201,16 @@ public class DictServiceImpl implements DictService {
             wrapper.ne(SysDict::getId, excludeId);
         }
         return sysDictMapper.selectCount(wrapper) > 0;
+    }
+
+    private boolean existsItemByValue(String dictCode, String itemValue, String excludeId) {
+        LambdaQueryWrapper<SysDictItem> wrapper = new LambdaQueryWrapper<SysDictItem>()
+                .eq(SysDictItem::getDictCode, dictCode)
+                .eq(SysDictItem::getItemValue, itemValue);
+        if (StringUtils.hasText(excludeId)) {
+            wrapper.ne(SysDictItem::getId, excludeId);
+        }
+        return sysDictItemMapper.selectCount(wrapper) > 0;
     }
 
     private void validateDictType(String dictType) {
