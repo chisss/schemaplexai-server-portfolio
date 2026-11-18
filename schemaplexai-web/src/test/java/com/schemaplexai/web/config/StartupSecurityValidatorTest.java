@@ -61,6 +61,30 @@ class StartupSecurityValidatorTest {
         assertThatCode(validator::validate).doesNotThrowAnyException();
     }
 
+    @Test
+    void shouldValidateWhenProfileNameIsNonExactProd() {
+        // fail-closed：profile 名为 production（非精确 prod）也必须执行生产强校验
+        when(environment.getActiveProfiles()).thenReturn(new String[]{"production"});
+        givenAllSecretsValid();
+        when(environment.getProperty("jwt.secret")).thenReturn("schemaplexai-default-jwt-secret-key-32chars");
+
+        assertThatThrownBy(validator::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("jwt.secret");
+    }
+
+    @Test
+    void shouldValidateWhenNoProfileDeclared() {
+        // fail-closed：未声明 profile 也按生产强校验（默认 dev 来自 application.yml，此处模拟无 profile）
+        when(environment.getActiveProfiles()).thenReturn(new String[]{});
+        givenAllSecretsValid();
+        when(environment.getProperty("jwt.secret")).thenReturn("schemaplexai-default-jwt-secret-key-32chars");
+
+        assertThatThrownBy(validator::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("jwt.secret");
+    }
+
     private void givenProd() {
         when(environment.getActiveProfiles()).thenReturn(new String[]{"prod"});
     }

@@ -43,7 +43,7 @@ public class StartupSecurityValidator implements ApplicationRunner {
     }
 
     public void validate() {
-        if (!isProdProfile()) {
+        if (isDevelopmentProfile()) {
             if (securityProperties.isAllowDefaultSecretsInDev()) {
                 log.info("开发环境允许默认密钥，已跳过生产安全强校验");
             }
@@ -66,8 +66,16 @@ public class StartupSecurityValidator implements ApplicationRunner {
         }
     }
 
-    private boolean isProdProfile() {
-        return Arrays.stream(environment.getActiveProfiles()).anyMatch("prod"::equalsIgnoreCase);
+    /**
+     * 开发环境判定（fail-closed 反向逻辑）：仅显式 dev/test/local 跳过强校验，
+     * 其余 profile（含 prod/production/prod-aws 等任何非开发名，或无 profile）
+     * 一律按生产环境执行安全强校验，避免 profile 名不精确时静默跳过校验。
+     */
+    private boolean isDevelopmentProfile() {
+        return Arrays.stream(environment.getActiveProfiles())
+                .anyMatch(profile -> "dev".equalsIgnoreCase(profile)
+                        || "test".equalsIgnoreCase(profile)
+                        || "local".equalsIgnoreCase(profile));
     }
 
     private void validateSecret(String propertyName, List<String> invalidKeys) {
