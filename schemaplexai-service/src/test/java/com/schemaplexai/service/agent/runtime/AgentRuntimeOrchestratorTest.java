@@ -11,6 +11,7 @@ import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
+import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
@@ -72,7 +73,8 @@ class AgentRuntimeOrchestratorTest {
         AgentConfigHandler agentConfigHandler = mock(AgentConfigHandler.class);
         AgentRuntimeStrategy strategy = mock(AgentRuntimeStrategy.class);
         AgentRuntimeOrchestrator orchestrator = new AgentRuntimeOrchestrator(
-                agentMapper, agentExecutionMapper, strategyFactory, sandboxPolicyResolver, agentConfigHandler);
+                agentMapper, agentExecutionMapper, strategyFactory, sandboxPolicyResolver, agentConfigHandler,
+                mock(AgentLogService.class));
 
         Agent agent = new Agent();
         agent.setId("agent-1");
@@ -281,7 +283,7 @@ class AgentRuntimeOrchestratorTest {
             when(configs.loadConfigs("agent")).thenReturn(Collections.emptyList());
             when(sandbox.resolve(eq(agent), any())).thenReturn(SandboxPolicy.builder().build());
             when(sandbox.toSnapshot(any())).thenReturn(Collections.emptyMap());
-            runtime = new AgentRuntimeOrchestrator(agents, executions, strategies, sandbox, configs);
+            runtime = new AgentRuntimeOrchestrator(agents, executions, strategies, sandbox, configs, mock(AgentLogService.class));
         }
 
         private AgentExecutionContext resume(AgentExecutionInputDTO input) {

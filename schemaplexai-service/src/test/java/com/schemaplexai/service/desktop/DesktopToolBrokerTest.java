@@ -12,6 +12,7 @@ import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.vo.desktop.DesktopToolCallVO;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentLogService;
+import com.schemaplexai.service.agent.execution.AgentTerminalEventOutbox;
 import com.schemaplexai.service.agent.execution.AgentLoopToolHandler;
 import com.schemaplexai.service.agent.execution.SandboxGuard;
 import com.schemaplexai.service.agent.tool.langchain4j.LangChain4jBindingToolExecutor;
@@ -102,7 +103,7 @@ class DesktopToolBrokerTest {
         });
         when(logMapper.selectList(any())).thenAnswer(invocation -> List.copyOf(recorded));
         AgentLogService logs = new AgentLogService(logMapper, mock(AgentExecutionMapper.class),
-                mock(ApplicationEventPublisher.class));
+                mock(ApplicationEventPublisher.class), mock(AgentTerminalEventOutbox.class));
         DesktopToolBroker broker = new DesktopToolBroker(mapper, logs);
         String device = broker.register("tenant", "user").deviceId();
         AgentExecutionContext child = context();

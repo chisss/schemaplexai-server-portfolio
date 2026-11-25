@@ -25,6 +25,7 @@ import org.mockito.MockitoAnnotations;
 
 import java.util.List;
 import java.util.concurrent.Executor;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -68,7 +69,8 @@ class EvalTaskServiceImplTest {
                 evalTaskMapper, evalDatasetMapper, evalDatasetItemMapper, evalResultMapper,
                 aiModelMapper, agentMapper, evaluationConverter, evalMetricCalculator,
                 aiModelRouter, evalAgentExecutionBridge, trajectoryCollector, trajectoryJudge,
-                modelBasedQualityEvaluator, directExecutor);
+                modelBasedQualityEvaluator, new EvalExecutionScheduler(directExecutor, directExecutor,
+                        mock(PlatformTransactionManager.class)));
     }
 
     @Test

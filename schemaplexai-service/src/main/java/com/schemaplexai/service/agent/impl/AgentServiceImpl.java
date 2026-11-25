@@ -66,6 +66,7 @@ import com.schemaplexai.model.dto.agent.AgentUpdateRequest;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentRunRecovery;
+import com.schemaplexai.service.agent.execution.AgentTerminalEventOutbox;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
@@ -192,6 +193,7 @@ public class AgentServiceImpl implements AgentService {
     private final ContextItemMapper contextItemMapper;
     private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
     private final AgentRunRecovery agentRunRecovery;
+    private final AgentTerminalEventOutbox terminalOutbox;
     private final AgentLogService agentLogService;
     private final ExecutionEventStreamService executionEventStreamService;
     private final ExecutionSteeringApplicationService executionSteeringApplicationService;
@@ -1344,7 +1346,7 @@ public class AgentServiceImpl implements AgentService {
         execution.setAgentId(agentId);
         if (acceptance != null) {
             execution.setAcceptanceStatus(AgentAcceptance.Status.UNVERIFIED.code());
-            execution.setSandboxPolicySnapshot(Map.of(AgentAcceptance.SNAPSHOT_KEY, acceptance.requiredJson()));
+            execution.setSandboxPolicySnapshot(acceptance.snapshot());
         }
         execution.setMemoryProjectId(memoryProjectId);
         execution.setInputPrompt(dto.getPrompt());
@@ -1360,16 +1362,14 @@ public class AgentServiceImpl implements AgentService {
             execution.setStatus(AgentExecutionStatusEnum.FAILED.getCode());
             execution.setErrorMessage(budgetAdmission.getMessage());
             execution.setCompletedAt(LocalDateTime.now());
-            agentExecutionMapper.insert(execution);
-            budgetAdmissionService.recordAdmissionAudit(budgetAdmission,
-                    SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION, execution.getId());
-            executionEventStreamService.publish(AgentExecutionEvent.builder()
+            agentLogService.insertTerminalExecution(execution, AgentExecutionEvent.builder()
                     .eventType(AgentExecutionEventTypeEnum.BLOCKED.getCode())
-                    .executionId(execution.getId())
                     .message(budgetAdmission.getMessage())
                     .payload(Map.of("budgetAdmission", budgetAdmission))
                     .timestamp(Instant.now())
                     .build());
+            budgetAdmissionService.recordAdmissionAudit(budgetAdmission,
+                    SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION, execution.getId());
             return AgentExecuteResultVO.builder()
                     .executionId(execution.getId())
                     .conversationId(execution.getConversationId())
@@ -1391,18 +1391,10 @@ public class AgentServiceImpl implements AgentService {
                 null
         );
         if (securityDecision != null && "block".equals(securityDecision.getDecision())) {
-            var update = new AgentExecution();
-            update.setId(execution.getId());
-            update.setStatus(AgentExecutionStatusEnum.FAILED.getCode());
-            update.setErrorMessage("执行已被安全策略阻断");
-            update.setCompletedAt(LocalDateTime.now());
-            agentExecutionMapper.updateById(update);
-            executionEventStreamService.publish(AgentExecutionEvent.builder()
-                    .eventType(AgentExecutionEventTypeEnum.BLOCKED.getCode())
-                    .executionId(execution.getId())
-                    .message("执行已被安全策略阻断")
-                    .timestamp(Instant.now())
-                    .build());
+            String message = "执行已被安全策略阻断";
+            agentLogService.tryTransitionWithEvent(execution.getId(), QUEUED, AgentExecutionStatusEnum.FAILED.getCode(),
+                    message, AgentExecutionEvent.builder().eventType(AgentExecutionEventTypeEnum.BLOCKED.getCode())
+                            .executionId(execution.getId()).message(message).timestamp(Instant.now()).build());
             return AgentExecuteResultVO.builder()
                     .executionId(execution.getId())
                     .conversationId(execution.getConversationId())
@@ -1505,12 +1497,6 @@ public class AgentServiceImpl implements AgentService {
                 AgentExecutionStatusEnum.FAILED.getCode(), message, null, null, null)) {
             return null;
         }
-        executionEventStreamService.publish(AgentExecutionEvent.builder()
-                .eventType(AgentExecutionEventTypeEnum.FAILED.getCode())
-                .executionId(execution.getId())
-                .message(message)
-                .timestamp(Instant.now())
-                .build());
         return message;
     }
 
@@ -1953,17 +1939,7 @@ public class AgentServiceImpl implements AgentService {
                 && AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode().equals(execution.getRuntimeEngine())) {
             stoppedExecutions.addAll(stopActiveTeamChildren(execution, update));
         }
-        Runnable publishCancellation = () -> stoppedExecutions.forEach(this::publishExecutionCancelled);
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    publishCancellation.run();
-                }
-            });
-        } else {
-            publishCancellation.run();
-        }
+        stoppedExecutions.forEach(this::recordExecutionCancelled);
         log.info("停止Agent执行: agentId={}, executionId={}, 停止成员数={}", agentId, executionId,
                 stoppedExecutions.size() - 1);
     }
@@ -1992,14 +1968,14 @@ public class AgentServiceImpl implements AgentService {
         return childIds;
     }
 
-    private void publishExecutionCancelled(String executionId) {
+    private void recordExecutionCancelled(String executionId) {
         AgentExecutionEvent cancelled = AgentExecutionEvent.builder()
                 .eventType(AgentExecutionEventTypeEnum.CANCELLED.getCode())
                 .executionId(executionId)
                 .message("执行已取消")
                 .timestamp(Instant.now())
                 .build();
-        executionEventStreamService.publish(cancelled);
+        terminalOutbox.enqueue(cancelled);
     }
 
     @Override
@@ -2072,6 +2048,11 @@ public class AgentServiceImpl implements AgentService {
         vo.setAgentId(execution.getAgentId());
         vo.setStatus(execution.getStatus());
         vo.setAcceptanceStatus(execution.getAcceptanceStatus());
+        if (StringUtils.hasText(execution.getOutputResult())
+                && (AgentAcceptance.Status.ACCEPTED.code().equals(execution.getAcceptanceStatus())
+                    || AgentAcceptance.Status.PARTIAL.code().equals(execution.getAcceptanceStatus()))) {
+            vo.setAcceptanceOutputSha256(AgentAcceptance.outputSha256(execution.getOutputResult()));
+        }
         vo.setInputPrompt(execution.getInputPrompt());
         vo.setModel(execution.getAiModel());
         vo.setConversationId(execution.getConversationId());

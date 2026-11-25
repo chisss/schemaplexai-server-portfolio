@@ -225,6 +225,11 @@ public class AgentExecutionEngine {
         return done(runClaimed(ctx, null, false));
     }
 
+    @Async("evalAgentExecutorPool")
+    public CompletableFuture<AgentExecutionResult> executeForEvaluation(AgentExecutionContext context) {
+        return execute(context);
+    }
+
     /** 异步恢复 Agent 执行，沿用人工审批契约。 */
     @Async("agentExecutorPool")
     public CompletableFuture<AgentExecutionResult> resume(AgentExecutionContext ctx, AgentExecutionInputDTO input) {
@@ -319,7 +324,7 @@ public class AgentExecutionEngine {
         }
         ctx.setExecutionDeadlineEpochMillis(deadline);
         state.setBudget(new AgentExecutionBudget(deadline, resolveMaxTokenBudget(ctx), usedMillis, startMs, state,
-                () -> isStopped(ctx.getExecutionId()), ctx.getTeamBudget()));
+                () -> isStopped(ctx.getExecutionId()), ctx.getTeamBudget(), ctx.getRecoveryLease(), ctx.isEvaluation()));
         return state;
     }
 
@@ -441,12 +446,13 @@ public class AgentExecutionEngine {
         String executionId = ctx.getExecutionId();
         String agentId     = ctx.getAgentId();
         String tenantId    = ctx.getTenantId();
-        int maxLoopRounds = params.getMaxRounds() + params.getMaxQualityReflections();
+        int maxLoopRounds = ctx.isAcceptanceRepairOnly() ? 1 : params.getMaxRounds() + params.getMaxQualityReflections();
         AgentExecutionBudget budget = state.getBudget();
         boolean verifiedDesktop = StringUtils.hasText(ctx.getDesktopVerificationCommand())
                 && DesktopExecutionTarget.from(ctx.getInputContext()) != null;
         boolean guideDesktopVerification = verifiedDesktop && shouldGuideDesktopVerification(ctx);
         boolean verificationCorrectionSent = false;
+        int acceptanceRepairRound = 0;
         boolean verificationBudgetReminderSent = false;
         boolean finalVerificationBudgetReminderSent = false;
         long lastModelTokens = 0;
@@ -493,7 +499,7 @@ public class AgentExecutionEngine {
 
                 // 准备本轮工具列表
                 AgentToolSessionFactory.RoundToolContext roundCtx = toolSession.buildRoundContext(chatMemory, round);
-                List<ToolSpecification> effectiveTools = state.isQualityReflectionPending()
+                List<ToolSpecification> effectiveTools = state.isQualityReflectionPending() || ctx.isAcceptanceRepairOnly()
                         ? List.of() : nullSafe(roundCtx.toolServiceContext().effectiveTools());
                 long remainingBeforeModel = budget.remainingTokens();
                 String verificationReminder = state.isQualityReflectionPending() ? null : state.getDesktopVerificationReminder();
@@ -583,6 +589,9 @@ public class AgentExecutionEngine {
                     if (isStopped(executionId)) {
                         return buildStoppedResult(executionId, agentId, tenantId, round, startMs);
                     }
+                    if (e instanceof AgentRunRecovery.LostOwnershipException ownership) {
+                        throw ownership;
+                    }
                     if (e instanceof AgentExecutionBudget.BudgetExceededException) {
                         return completeOnBudgetBoundary(ctx, chatMemory, state, params, startMs, conversationId,
                                 resolveExMsg(e));
@@ -625,6 +634,13 @@ public class AgentExecutionEngine {
                 List<ToolExecutionRequest> rejectedRequests   = allRequests.stream()
                         .filter(r -> !executableRequests.contains(r)).toList();
 
+                if (round == acceptanceRepairRound && !allRequests.isEmpty()) {
+                    state.setAcceptanceStatus(AgentAcceptance.Status.REJECTED);
+                    state.setEndReason(AgentLoopEndReason.ACCEPTANCE_REJECTED);
+                    return buildFailedResult(executionId, agentId, tenantId, round, state, startMs,
+                            "验收修订必须直接生成终稿");
+                }
+
                 // 循环检测（哈希 + 工具序列双层检测）
                 AgentLoopDetectionService.LoopDetectionResult loopResult =
                         loopDetectionService.check(state, lastContent, allRequests);
@@ -666,6 +682,20 @@ public class AgentExecutionEngine {
                         verificationCorrectionSent = true;
                         continue;
                     }
+                    if (ctx.getAcceptance() != null && ctx.getAcceptance().canRepairWithModel()
+                            && acceptanceRepairRound == 0 && round < lastAllowedRound && budget.canDispatch()
+                            && !isOutputTruncated(finishReason) && StringUtils.hasText(lastContent)) {
+                        AgentAcceptance.Verdict verdict = ctx.getAcceptance().evaluate(qualityChecker.sanitize(lastContent), false);
+                        if (!verdict.passed()) {
+                            AgentExecutionResult interrupt = validateCandidateOutput(ctx, state, startMs, conversationId);
+                            if (interrupt != null) return interrupt;
+                            chatMemory.add(aiMsg);
+                            chatMemory.add(UserMessage.from("只修复以下验收问题，保留其余内容。" + verdict.explanation()));
+                            state.setQualityReflectionPending(true);
+                            acceptanceRepairRound = round + 1;
+                            continue;
+                        }
+                    }
                     AgentExecutionResult r = handleNoToolCall(ctx, chatMemory, aiMsg, state, params,
                             executionId, agentId, tenantId, round, finishReason, startMs, conversationId);
                     if (r != null) return r;
@@ -691,6 +721,10 @@ public class AgentExecutionEngine {
             }
         }
 
+        if (ctx.isAcceptanceRepairOnly() && !state.isLoopCompleted()) {
+            return buildFailedResult(executionId, agentId, tenantId, state.getLastRound(), state, startMs,
+                    "定向验收修订未生成有效候选");
+        }
         // 循环结束后处理（正常完成 or 强制收敛）
         return finalizeLoop(ctx, modelChain, systemPrompt, chatMemory, state, params,
                 executionId, agentId, tenantId, startMs, conversationId);
@@ -744,6 +778,12 @@ public class AgentExecutionEngine {
             state.setEndReason(AgentLoopEndReason.EMPTY_RESPONSE);
             return buildFailedResult(executionId, agentId, tenantId, round, state, startMs,
                     AgentLoopPromptConstant.EMPTY_AI_RESPONSE_ERROR);
+        }
+
+        if (ctx.isAcceptanceRepairOnly()) {
+            chatMemory.add(aiMsg);
+            state.setLoopCompleted(true);
+            return null;
         }
 
         if (state.getLastContent().equals(state.getLastReflectedContent())) {
@@ -1663,14 +1703,13 @@ public class AgentExecutionEngine {
                     .tokenOutput(state.getTotalTokenOutput()).rounds(round).build();
         }
         if (SecurityComplianceConstant.DECISION_BLOCK.equals(interrupted.getControlAction())) {
-            if (!tryFinalize(executionId, STATUS_FAILED, message, null, state)) {
+            if (!tryFinalize(executionId, STATUS_FAILED, message, null, state,
+                    AgentExecutionEventTypeEnum.BLOCKED, message, startMs)) {
                 return currentExecutionResult(executionId, round);
             }
             discardPendingSteeringOnTerminal(executionId);
             agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
                     AgentLoopLogTypeEnum.SECURITY_BLOCKED.getCode(), round, null, message, null, elapsed(startMs));
-            executionEventStreamService.publishWithPayload(executionId,
-                    AgentExecutionEventTypeEnum.BLOCKED.getCode(), round, message, payload, startMs);
             recordAgentTrace(executionId, tenantId, agentId, startMs,
                     state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
             logLoopOutcome(executionId, STATUS_FAILED, AgentLoopEndReason.SECURITY_BLOCKED, false);
@@ -1756,12 +1795,16 @@ public class AgentExecutionEngine {
                             executionEventStreamService, budget);
                     state.setLastContent(revision.content());
                     state.setLastRound(Math.max(state.getLastRound(), revision.finalRound()));
+                } catch (AgentRunRecovery.LostOwnershipException e) {
+                    throw e;
                 } catch (Exception e) {
                     log.debug("保留强制收敛结果: executionId={}, reason={}", executionId, e.getMessage());
                 }
             }
 
             return buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
+        } catch (AgentRunRecovery.LostOwnershipException ownership) {
+            throw ownership;
         } catch (Exception forceEx) {
             if (forceEx instanceof AgentExecutionBudget.BudgetExceededException) {
                 return completeOnBudgetBoundary(ctx, chatMemory, state, params, startMs, conversationId,
@@ -1836,6 +1879,8 @@ public class AgentExecutionEngine {
             chatMemory.add(AiMessage.from(content));
             state.setLastContent(content);
             return buildCompletedResult(ctx, executionId, agentId, tenantId, state, startMs, conversationId);
+        } catch (AgentRunRecovery.LostOwnershipException ownership) {
+            throw ownership;
         } catch (Exception forceEx) {
             if (forceEx instanceof AgentExecutionBudget.BudgetExceededException) {
                 return completeOnBudgetBoundary(ctx, chatMemory, state, params, startMs, conversationId, resolveExMsg(forceEx));
@@ -1902,7 +1947,9 @@ public class AgentExecutionEngine {
         String completedStatus = partial || desktopFallback
                 ? AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode() : STATUS_COMPLETED;
 
-        if (!tryFinalize(executionId, completedStatus, null, sanitized, state)) {
+        if (!tryFinalize(executionId, completedStatus, null, sanitized, state,
+                partial || desktopFallback ? AgentExecutionEventTypeEnum.FALLBACK_USED : AgentExecutionEventTypeEnum.COMPLETED,
+                "Agent 执行完成", startMs)) {
             return currentExecutionResult(executionId, state.getLastRound());
         }
         // 终态清理：执行完成后残留的 pending 引导不再消费
@@ -1917,10 +1964,6 @@ public class AgentExecutionEngine {
                     () -> compositeChatMemoryStore.loadAuthoredExecutionInputs(conversationId, executionId));
         }
 
-        executionEventStreamService.publishWithPayload(executionId,
-                AgentExecutionEventTypeEnum.COMPLETED.getCode(),
-                state.getLastRound(), "Agent 执行完成",
-                completionPayload(state, sanitized), startMs);
         logLoopOutcome(executionId, completedStatus, state.getEndReason(), state.isDegraded());
 
         // Agent 经验提取可能调用模型，完成通知后异步执行。
@@ -1968,7 +2011,8 @@ public class AgentExecutionEngine {
                     ? securityDecision.getMessage() : "输出内容命中安全策略";
             if (SecurityComplianceConstant.DECISION_BLOCK.equals(decision)) {
                 state.setEndReason(AgentLoopEndReason.SECURITY_BLOCKED);
-                if (!tryFinalize(executionId, STATUS_FAILED, message, null, state)) {
+                if (!tryFinalize(executionId, STATUS_FAILED, message, null, state,
+                        AgentExecutionEventTypeEnum.FAILED, "输出安全检查阻断: " + message, startMs)) {
                     return currentExecutionResult(executionId, state.getLastRound());
                 }
                 // 终态清理：执行失败后残留的 pending 引导不再消费
@@ -1976,7 +2020,6 @@ public class AgentExecutionEngine {
                 agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
                         AgentLoopLogTypeEnum.SECURITY_BLOCKED.getCode(), state.getLastRound(), null,
                         "输出安全检查阻断: " + message, null, elapsed(startMs));
-                publishEndReason(executionId, AgentExecutionEventTypeEnum.FAILED, state, "输出安全检查阻断: " + message, startMs);
                 recordAgentTrace(executionId, tenantId, agentId, startMs,
                         state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
                 return AgentExecutionResult.builder()
@@ -2021,13 +2064,12 @@ public class AgentExecutionEngine {
     }
 
     private boolean tryFinalize(String executionId, String status, String error, String output,
-                                AgentLoopState state) {
-        if (state.getAcceptanceStatus() != null) {
-            return agentLogService.tryFinalizeAcceptance(executionId, status, error,
-                    state.getTotalTokenInput(), state.getTotalTokenOutput(), output, state.getAcceptanceStatus());
-        }
-        return agentLogService.tryTransitionExecutionStatus(executionId, STATUS_RUNNING, status,
-                error, state.getTotalTokenInput(), state.getTotalTokenOutput(), output);
+                                AgentLoopState state, AgentExecutionEventTypeEnum type, String message, long startMs) {
+        var event = AgentExecutionEvent.builder().executionId(executionId).eventType(type.getCode())
+                .roundNum(state.getLastRound()).message(message).payload(completionPayload(state, output))
+                .timestamp(Instant.now()).elapsedMs(elapsed(startMs)).build();
+        return agentLogService.tryFinalizeWithEvent(executionId, status, error, state.getTotalTokenInput(),
+                state.getTotalTokenOutput(), output, state.getAcceptanceStatus(), event);
     }
 
     /** 构建失败结果并更新执行状态 */
@@ -2036,14 +2078,14 @@ public class AgentExecutionEngine {
         if (state.getEndReason() == null) {
             state.setEndReason(AgentLoopEndReason.INTERNAL_ERROR);
         }
-        if (!tryFinalize(executionId, STATUS_FAILED, errorMessage, null, state)) {
+        if (!tryFinalize(executionId, STATUS_FAILED, errorMessage, null, state,
+                AgentExecutionEventTypeEnum.FAILED, errorMessage, startMs)) {
             return currentExecutionResult(executionId, round);
         }
         // 终态清理：执行失败后残留的 pending 引导不再消费
         discardPendingSteeringOnTerminal(executionId);
         agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
                 AgentLoopLogTypeEnum.EXECUTION_FAILED.getCode(), round, null, errorMessage, null, elapsed(startMs));
-        publishEndReason(executionId, AgentExecutionEventTypeEnum.FAILED, state, errorMessage, startMs);
         recordAgentTrace(executionId, tenantId, agentId, startMs,
                 state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
         return AgentExecutionResult.builder()
@@ -2131,6 +2173,11 @@ public class AgentExecutionEngine {
         payload.put("degraded", state.isDegraded());
         if (StringUtils.hasText(content)) {
             payload.put("content", content);
+            payload.put("finalOutput", content);
+            if (state.getAcceptanceStatus() == AgentAcceptance.Status.ACCEPTED
+                    || state.getAcceptanceStatus() == AgentAcceptance.Status.PARTIAL) {
+                payload.put("outputSha256", AgentAcceptance.outputSha256(content));
+            }
         }
         return payload;
     }

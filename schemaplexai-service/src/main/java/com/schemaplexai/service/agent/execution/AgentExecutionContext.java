@@ -121,6 +121,11 @@ public class AgentExecutionContext {
     @ToString.Exclude
     private AgentRunRecovery.Lease recoveryLease;
     private boolean recovering;
+    /** 由轨迹评估入口设置，隔离模型编排执行器。 */
+    private boolean evaluation;
+
+    /** Team 的定向 JSON 修订只生成新的终稿。 */
+    private boolean acceptanceRepairOnly;
 
     /** 执行前预算准入快照 */
     private BudgetAdmissionVO budgetAdmission;

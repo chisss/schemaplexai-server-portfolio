@@ -4,6 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 tests=(
+  AgentDesktopVisibilityTest
+  EvalExecutionIsolationTest
+  EvalTaskServiceImplTest
   AgentExecutionEngineTest
   AgentRuntimeOrchestratorTest
   AgentAcceptanceServiceTest
@@ -17,4 +20,4 @@ tests=(
   TrajectoryJudgeTest
 )
 selection=$(IFS=,; echo "${tests[*]}")
-mvn -B -pl schemaplexai-service -am -Dsurefire.failIfNoSpecifiedTests=false "-Dtest=$selection" "$@" test
+mvn -B -pl schemaplexai-web -am -Dsurefire.failIfNoSpecifiedTests=false "-Dtest=$selection" "$@" test

@@ -24,6 +24,8 @@ public class AgentExecutionVO {
     /** 任务验收状态，历史无验收要求的执行为空。 */
     private String acceptanceStatus;
 
+    private String acceptanceOutputSha256;
+
     /** 输入指令 */
     private String inputPrompt;
 

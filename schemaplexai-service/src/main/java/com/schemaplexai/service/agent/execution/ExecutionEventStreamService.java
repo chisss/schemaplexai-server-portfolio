@@ -1,6 +1,9 @@
 package com.schemaplexai.service.agent.execution;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.schemaplexai.common.util.SecurityUtil;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,12 +29,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class ExecutionEventStreamService {
 
     private static final long SSE_TIMEOUT_MS = 30L * 60L * 1000L;
+    private static final DefaultMessagePropertiesConverter MQ_PROPERTIES = new DefaultMessagePropertiesConverter();
     private static final String AGENT_EXEC_EVENT_EXCHANGE = "sf.agent.exec.event";
 
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<SseEmitter>> emitterMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SseEmitter, String> deliveredTerminalEvents = new ConcurrentHashMap<>();
     private final RabbitTemplate rabbitTemplate;
     private final AgentLogService agentLogService;
     private final ObjectMapper objectMapper;
+    private final AgentTerminalEventOutbox terminalOutbox;
 
     public void publishActivity(String executionId, String agentId, String tenantId, AgentExecutionActivity activity) {
         try {
@@ -69,7 +75,14 @@ public class ExecutionEventStreamService {
     }
 
     public SseEmitter subscribe(String executionId) {
+        return subscribe(executionId, null);
+    }
+
+    public SseEmitter subscribe(String executionId, String lastEventId) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
+        if ((executionId + ":terminal").equals(lastEventId)) {
+            deliveredTerminalEvents.put(emitter, lastEventId);
+        }
         emitterMap.compute(executionId, (id, current) -> {
             var emitters = current == null ? new CopyOnWriteArrayList<SseEmitter>() : current;
             emitters.add(emitter);
@@ -93,6 +106,15 @@ public class ExecutionEventStreamService {
             removeEmitter(executionId, emitter);
             log.warn("SSE 建连后首次发送失败: executionId={}", executionId, e);
         }
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (tenantId != null) {
+            try {
+                terminalOutbox.find(tenantId, executionId).ifPresent(event -> send(executionId, emitter, event));
+            } catch (RuntimeException e) {
+                removeEmitter(executionId, emitter);
+                throw e;
+            }
+        }
         return emitter;
     }
 
@@ -109,6 +131,19 @@ public class ExecutionEventStreamService {
         }
     }
 
+    /** 专用发布确认，失败交给 Outbox 重试。 */
+    void publishConfirmed(AgentExecutionEvent event) {
+        var properties = new MessageProperties();
+        properties.setMessageId(event.getEventId());
+        var message = rabbitTemplate.getMessageConverter().toMessage(event, properties);
+        rabbitTemplate.execute(channel -> {
+            channel.confirmSelect();
+            channel.basicPublish(AGENT_EXEC_EVENT_EXCHANGE, "", MQ_PROPERTIES.fromMessageProperties(message.getMessageProperties(), "UTF-8"), message.getBody());
+            channel.waitForConfirmsOrDie(3_000);
+            return null;
+        });
+    }
+
     /**
      * 将事件分发到本节点活跃 SSE 连接
      */
@@ -121,11 +156,7 @@ public class ExecutionEventStreamService {
             return;
         }
         for (SseEmitter emitter : emitters) {
-            try {
-                emitter.send(SseEmitter.event().name("message").data(event));
-            } catch (IOException | IllegalStateException e) {
-                removeEmitter(event.getExecutionId(), emitter);
-            }
+            send(event.getExecutionId(), emitter, event);
         }
     }
 
@@ -158,7 +189,29 @@ public class ExecutionEventStreamService {
                 .build());
     }
 
+    private void send(String executionId, SseEmitter emitter, AgentExecutionEvent event) {
+        synchronized (emitter) {
+            String eventId = event.getEventId();
+            if (eventId != null && eventId.equals(deliveredTerminalEvents.get(emitter))) {
+                return;
+            }
+            try {
+                var message = SseEmitter.event().name("message").data(event);
+                if (eventId != null) {
+                    message.id(eventId);
+                }
+                emitter.send(message);
+                if (eventId != null) {
+                    deliveredTerminalEvents.put(emitter, eventId);
+                }
+            } catch (IOException | IllegalStateException e) {
+                removeEmitter(executionId, emitter);
+            }
+        }
+    }
+
     private void removeEmitter(String executionId, SseEmitter emitter) {
+        deliveredTerminalEvents.remove(emitter);
         emitterMap.computeIfPresent(executionId, (id, emitters) -> {
             emitters.remove(emitter);
             return emitters.isEmpty() ? null : emitters;

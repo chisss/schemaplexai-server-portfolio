@@ -20,6 +20,7 @@ import com.schemaplexai.model.entity.ChatMessageEntity;
 import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.AgentLogService;
+import com.schemaplexai.service.agent.execution.AgentTerminalEventOutbox;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.common.EntityValidator;
@@ -40,7 +41,6 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
@@ -72,6 +72,7 @@ class AgentDesktopVisibilityTest {
     @Mock private AgentRuntimeOrchestrator orchestrator;
     @Mock private AgentLogService agentLogService;
     @Mock private ExecutionEventStreamService stream;
+    @Mock private AgentTerminalEventOutbox terminalOutbox;
     @InjectMocks private AgentServiceImpl service;
 
     @BeforeEach
@@ -178,8 +179,8 @@ class AgentDesktopVisibilityTest {
         assertThat(result.getStatus()).isEqualTo("failed");
         assertThat(result.getMessage()).isEqualTo(conflict.getMessage());
         var events = ArgumentCaptor.forClass(AgentExecutionEvent.class);
-        verify(stream, times(2)).publish(events.capture());
-        assertThat(events.getAllValues()).extracting(AgentExecutionEvent::getEventType).containsExactly("QUEUED", "FAILED");
+        verify(stream).publish(events.capture());
+        assertThat(events.getAllValues()).extracting(AgentExecutionEvent::getEventType).containsExactly("QUEUED");
     }
 
     @Test
@@ -236,7 +237,7 @@ class AgentDesktopVisibilityTest {
 
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
-    void shouldStopOnlyOwnedActiveTeamChildrenAndPublishAfterCommit() {
+    void shouldStopOnlyOwnedActiveTeamChildrenAndStoreCancellationInTransaction() {
         AgentExecution parent = ownedTeamExecution();
         AgentExecution stoppedChild = new AgentExecution();
         stoppedChild.setId("active-child");
@@ -264,9 +265,8 @@ class AgentDesktopVisibilityTest {
                 assertThat(execution.getCompletedAt()).isNotNull();
             });
             verifyNoInteractions(stream);
-            TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
             var events = ArgumentCaptor.forClass(AgentExecutionEvent.class);
-            verify(stream, times(2)).publish(events.capture());
+            verify(terminalOutbox, times(2)).enqueue(events.capture());
             assertThat(events.getAllValues()).extracting(AgentExecutionEvent::getExecutionId)
                     .containsExactly("team-execution", "active-child");
             assertThat(events.getAllValues()).extracting(AgentExecutionEvent::getEventType)
@@ -294,7 +294,7 @@ class AgentDesktopVisibilityTest {
     void shouldLockOnlyTheOwnedRunningTeamParentBeforeCreatingAMember() {
         AgentExecution child = ownedTeamExecution();
         child.setParentExecutionId("team-execution");
-        var logs = new AgentLogService(null, executionMapper, mock(ApplicationEventPublisher.class));
+        var logs = new AgentLogService(null, executionMapper, mock(ApplicationEventPublisher.class), mock(AgentTerminalEventOutbox.class));
         when(executionMapper.selectOne(any())).thenReturn(null, ownedTeamExecution());
         when(executionMapper.insert(any(AgentExecution.class))).thenReturn(1);
 

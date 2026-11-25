@@ -63,3 +63,10 @@ Schema 快照链路复用租户数据库 MCP 数据源：
 执行 API 支持通过 `requiredOutputJson` 声明交付断言，执行详情以 `acceptanceStatus` 记录结果。根 Solo 执行通过租约和已确认的工具回执恢复，Team 成员共享父执行预算。
 
 用 `bash scripts/agent-harness-gate.sh` 运行公开快照的固定轨迹和运行时测试。数据库迁移及跨进程故障注入使用完整交付环境的迁移资源。
+
+
+### 执行可靠性与定向验收
+
+轨迹评估和在线 Agent 分配到各自的有界执行池。Solo 将供应商调用预算和租约校验绑定到单次尝试。终态事件通过持久化 Outbox 重投，SSE 用稳定事件 ID 去重。
+
+任务支持 `requiredOutputValues` 等值断言及 `requiredOutputSha256` 终稿版本校验。符合条件时仅修订终稿，Team 可复用已有成员证据。完整数据库回归使用交付环境的迁移资源。

@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
@@ -937,15 +938,15 @@ class AgentExecutionEngineTest {
         ExecutionFixture fixture = executionFixture();
         when(fixture.model().chat(any(ChatRequest.class)))
                 .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("已完成")).build());
-        when(fixture.logs().tryTransitionExecutionStatus(eq("exec-1"), eq("running"), eq("completed"),
-                isNull(), anyLong(), anyLong(), eq("已完成"))).thenAnswer(invocation -> {
+        when(fixture.logs().tryFinalizeWithEvent(eq("exec-1"), eq("completed"),
+                isNull(), anyLong(), anyLong(), eq("已完成"), isNull(), any())).thenAnswer(invocation -> {
             assertThat(fixture.status().compareAndSet("running", "stopped")).isTrue();
             return false;
         });
 
         assertThat(fixture.engine().execute(fixture.context()).join().getStatus()).isEqualTo("stopped");
-        verify(fixture.logs()).tryTransitionExecutionStatus(eq("exec-1"), eq("running"), eq("completed"),
-                isNull(), longThat(count -> count > 0), longThat(count -> count > 0), eq("已完成"));
+        verify(fixture.logs()).tryFinalizeWithEvent(eq("exec-1"), eq("completed"),
+                isNull(), longThat(count -> count > 0), longThat(count -> count > 0), eq("已完成"), isNull(), any());
         verify(fixture.events(), never()).publishWithPayload(eq("exec-1"),
                 eq(AgentExecutionEventTypeEnum.COMPLETED.getCode()), anyInt(), anyString(), any(), anyLong());
     }
@@ -1611,8 +1612,9 @@ class AgentExecutionEngineTest {
         assertThat(result.getStatus()).isEqualTo("failed");
         assertThat(result.getEndReason()).isEqualTo(AgentLoopEndReason.EMPTY_RESPONSE);
         verify(fixture.model(), times(1)).chat(any(ChatRequest.class));
-        verify(fixture.events()).publishWithPayload(eq("exec-1"), eq("FAILED"), eq(1), anyString(),
-                eq(Map.of("endReason", "EMPTY_RESPONSE", "degraded", false)), anyLong());
+        verify(fixture.logs()).tryFinalizeWithEvent(eq("exec-1"), eq("failed"), anyString(),
+                anyLong(), anyLong(), isNull(), isNull(), argThat(event -> event.getRoundNum() == 1
+                        && event.getPayload().equals(Map.of("endReason", "EMPTY_RESPONSE", "degraded", false))));
     }
 
     @Test
@@ -2014,8 +2016,8 @@ class AgentExecutionEngineTest {
         assertThat(result.getStatus()).isEqualTo("completed_with_fallback");
         assertThat(result.getEndReason()).isEqualTo(AgentLoopEndReason.TOKEN_BUDGET);
         assertThat(result.isDegraded()).isTrue();
-        verify(fixture.logs()).tryTransitionExecutionStatus(eq("exec-1"), eq("running"),
-                eq("completed_with_fallback"), isNull(), anyLong(), anyLong(), anyString());
+        verify(fixture.logs()).tryFinalizeWithEvent(eq("exec-1"), eq("completed_with_fallback"),
+                isNull(), anyLong(), anyLong(), anyString(), isNull(), any());
         verify(fixture.model(), times(1)).chat(any(ChatRequest.class));
     }
 
@@ -2094,11 +2096,32 @@ class AgentExecutionEngineTest {
     }
 
     @Test
+    void shouldTryOneBudgetedAcceptanceRepairWithoutTools() {
+        ExecutionFixture fixture = executionFixture();
+        fixture.context().setAcceptance(new AgentAcceptance(Map.of("/ok", "boolean"),
+                Map.of("/ok", BooleanNode.TRUE), null));
+        when(fixture.params().load(any(), any())).thenReturn(AgentEngineParams.builder().maxRounds(3)
+                .maxMessages(12).maxToolCallsPerRound(3).modelCallTimeoutMillis(8_000L).build());
+        when(fixture.model().chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("{\"ok\":false}")).build())
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("{\"ok\":true}")).build());
+
+        var result = fixture.engine().execute(fixture.context()).join();
+
+        assertThat(result.getStatus()).isEqualTo("completed");
+        var requests = ArgumentCaptor.forClass(ChatRequest.class);
+        verify(fixture.model(), times(2)).chat(requests.capture());
+        assertThat(requests.getAllValues().getLast().toolSpecifications()).isEmpty();
+        assertThat(requests.getAllValues().getLast().messages().toString()).contains("/ok");
+        verifyNoInteractions(fixture.tool());
+    }
+
+    @Test
     void shouldRejectACompletedCandidateThatFailsTheExecutionContract() {
         ExecutionFixture fixture = executionFixture();
         fixture.context().setAcceptance(new AgentAcceptance(Map.of("/ok", "boolean")));
-        when(fixture.logs().tryFinalizeAcceptance(eq("exec-1"), eq("failed"), anyString(), anyLong(), anyLong(),
-                isNull(), eq(AgentAcceptance.Status.REJECTED))).thenReturn(true);
+        when(fixture.logs().tryFinalizeWithEvent(eq("exec-1"), eq("failed"), anyString(), anyLong(), anyLong(),
+                isNull(), eq(AgentAcceptance.Status.REJECTED), any())).thenReturn(true);
         when(fixture.model().chat(any(ChatRequest.class)))
                 .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("{\"ok\":\"yes\"}")).build());
 
@@ -2106,8 +2129,7 @@ class AgentExecutionEngineTest {
 
         assertThat(result.getStatus()).isEqualTo("failed");
         assertThat(result.getEndReason()).isEqualTo(AgentLoopEndReason.ACCEPTANCE_REJECTED);
-        verify(fixture.logs(), never()).tryTransitionExecutionStatus(eq("exec-1"), eq("running"),
-                eq("completed"), any(), any(), any(), any());
+        verify(fixture.logs(), never()).tryFinalizeWithEvent(eq("exec-1"), eq("completed"), any(), any(), any(), any(), any(), any());
     }
 
     private ExecutionFixture executionFixture(AgentLoopQualityChecker checker, int maxReflections) {
@@ -2136,6 +2158,8 @@ class AgentExecutionEngineTest {
         });
         when(logs.tryTransitionExecutionStatus(eq("exec-1"), anyString(), anyString(), any(), any(), any(), any()))
                 .thenAnswer(invocation -> status.compareAndSet(invocation.getArgument(1), invocation.getArgument(2)));
+        when(logs.tryFinalizeWithEvent(eq("exec-1"), anyString(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> status.compareAndSet("running", invocation.getArgument(1)));
         when(logs.tryPauseExecution(eq("exec-1"), any(), anyLong(), anyLong(), any(), anyLong()))
                 .thenAnswer(invocation -> status.compareAndSet("running", "paused"));
 

@@ -1,6 +1,7 @@
 package com.schemaplexai.service.evaluation.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
@@ -44,7 +45,6 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -65,7 +65,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 /**
@@ -142,8 +141,7 @@ public class EvalTaskServiceImpl implements EvalTaskService {
     private final TrajectoryJudge trajectoryJudge;
     private final ModelBasedQualityEvaluator modelBasedQualityEvaluator;
 
-    @Qualifier("agentExecutorPool")
-    private final Executor agentExecutorPool;
+    private final EvalExecutionScheduler scheduler;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -175,7 +173,7 @@ public class EvalTaskServiceImpl implements EvalTaskService {
         dataset.setLastUsedAt(LocalDateTime.now());
         evalDatasetMapper.updateById(dataset);
 
-        submitAfterCommit(() -> executeTask(task.getId()));
+        submitAfterCommit(task.getId());
         return getById(task.getId());
     }
 
@@ -268,20 +266,37 @@ public class EvalTaskServiceImpl implements EvalTaskService {
         task.setFinishedAt(null);
         evalTaskMapper.updateById(task);
         evalResultMapper.delete(new LambdaQueryWrapper<EvalResult>().eq(EvalResult::getTaskId, id));
-        submitAfterCommit(() -> executeTask(id));
+        submitAfterCommit(id);
         return getById(id);
     }
 
-    private void submitAfterCommit(Runnable task) {
+    private void submitAfterCommit(String taskId) {
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            agentExecutorPool.execute(task);
+            schedule(taskId, SecurityUtil.getCurrentTenantId(), () -> executeTask(taskId));
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                agentExecutorPool.execute(task);
+                schedule(taskId, SecurityUtil.getCurrentTenantId(), () -> executeTask(taskId));
             }
+        });
+    }
+
+    private void schedule(String taskId, String tenantId, Runnable task) {
+        scheduler.submit(task, () -> {
+            log.warn("评估队列已满: taskId={}", taskId);
+            // 启动恢复和提交后拒绝都使用创建时已验证的租户。
+            if (!StringUtils.hasText(tenantId)) {
+                return;
+            }
+            SystemTenantContext.callAsSystem(() -> evalTaskMapper.update(null, new LambdaUpdateWrapper<EvalTask>()
+                    .eq(EvalTask::getId, taskId)
+                    .eq(EvalTask::getTenantId, tenantId)
+                    .in(EvalTask::getStatus, List.of(STATUS_PENDING, STATUS_RUNNING))
+                    .set(EvalTask::getStatus, STATUS_FAILED)
+                    .set(EvalTask::getFinishedAt, LocalDateTime.now())
+                    .set(EvalTask::getErrorMessage, "评估队列繁忙，请稍后重试")));
         });
     }
 
@@ -306,7 +321,7 @@ public class EvalTaskServiceImpl implements EvalTaskService {
             for (EvalTask task : tasks) {
                 String tenantId = task.getTenantId();
                 log.info("恢复评估任务: taskId={}, tenantId={}", task.getId(), tenantId);
-                agentExecutorPool.execute(() -> {
+                schedule(task.getId(), tenantId, () -> {
                     String previousTenantId = SecurityUtil.getCurrentTenantId();
                     try {
                         if (StringUtils.hasText(tenantId)) {
@@ -380,11 +395,11 @@ public class EvalTaskServiceImpl implements EvalTaskService {
         for (int i = 0; i < workItems.size(); i += concurrency) {
             List<WorkItem> batch = workItems.subList(i, Math.min(i + concurrency, workItems.size()));
             List<CompletableFuture<Void>> futures = batch.stream()
-                    .map(work -> CompletableFuture.runAsync(() -> {
+                    .map(work -> scheduler.runItem(() -> {
                         EvalResult result = executeWorkItem(task, work);
                         evalResultMapper.insert(result);
                         evalTaskMapper.incrementCompletedItems(task.getId());
-                    }, agentExecutorPool))
+                    }))
                     .toList();
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         }

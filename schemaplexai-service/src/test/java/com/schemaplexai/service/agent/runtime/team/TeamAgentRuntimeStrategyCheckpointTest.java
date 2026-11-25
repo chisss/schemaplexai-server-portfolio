@@ -185,6 +185,8 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         AgentLogService agentLogService = mock(AgentLogService.class);
         when(agentLogService.tryTransitionExecutionStatus(any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(true);
+        when(agentLogService.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(true);
         AgentLoopQualityChecker qualityChecker = mock(AgentLoopQualityChecker.class);
         ExecutionEventStreamService executionEventStreamService = mock(ExecutionEventStreamService.class);
         AgentContextPublisher agentContextPublisher = mock(AgentContextPublisher.class);
@@ -390,13 +392,12 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         if ("missing_checkpoint".equals(scenario) || "attachment_revoked".equals(scenario)) {
             assertThat(executionRound.get()).isEqualTo(1);
             assertThat(resumedResult.getStatus()).isEqualTo(AgentExecutionStatusEnum.FAILED.getCode());
-            verify(agentLogService).tryTransitionExecutionStatus(eq(parentExecution.getId()),
-                    eq(AgentExecutionStatusEnum.RUNNING.getCode()), eq(AgentExecutionStatusEnum.FAILED.getCode()),
-                    any(), isNull(), isNull(), isNull());
+            verify(agentLogService).tryFinalizeWithEvent(eq(parentExecution.getId()),
+                    eq(AgentExecutionStatusEnum.FAILED.getCode()), any(), isNull(), isNull(), isNull(), isNull(), any());
             return;
         }
-        verify(agentLogService, never()).tryTransitionExecutionStatus(eq(parentExecution.getId()), any(),
-                eq(AgentExecutionStatusEnum.FAILED.getCode()), any(), any(), any(), any());
+        verify(agentLogService, never()).tryFinalizeWithEvent(eq(parentExecution.getId()),
+                eq(AgentExecutionStatusEnum.FAILED.getCode()), any(), any(), any(), any(), any(), any());
         assertThat(resumedResult.getStatus()).isEqualTo(AgentExecutionStatusEnum.COMPLETED.getCode());
         assertThat(resumedResult.getOutputResult()).contains("审批后的安全方案");
         assertThat(resumedPrompt.get())

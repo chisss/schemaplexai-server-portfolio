@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.runtime.team;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import com.schemaplexai.common.util.HashUtils;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.ChatMessage;
@@ -134,6 +135,7 @@ class TeamAgentRuntimeStrategyTest {
 
         when(members.selectList(any())).thenReturn(List.of(lead));
         when(logs.tryTransitionExecutionStatus(any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
+        when(logs.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
         if (previousTurns) {
             when(chatMemory.loadWindow("office-conversation", "office-run", 6)).thenReturn(
                     List.of(UserMessage.from("搬迁目的地是松柏园"), AiMessage.from("已记录：松柏园。")));
@@ -179,17 +181,17 @@ class TeamAgentRuntimeStrategyTest {
             assertThat(child.getValue().getMaxRounds()).isEqualTo(verifiedDesktop ? 12 : 4);
             if (verifiedDesktop) {
                 assertThat(child.getValue().getInputPrompt()).contains("你负责最终验收");
-                verify(logs).hasCurrentDesktopVerification(context);
+                verify(logs, times(2)).hasCurrentDesktopVerification(context);
             }
             verify(chatMemory).appendMessages("office-conversation", "office-run", List.of(
                     new ArchivedMessage(UserMessage.from(original), original),
                     new ArchivedMessage(AiMessage.from(result.getOutputResult()), null)));
-            var completedOrder = inOrder(chatMemory, userMemory, events);
+            var completedOrder = inOrder(logs, chatMemory, userMemory);
+            completedOrder.verify(logs).tryFinalizeWithEvent(eq("office-run"), eq("completed"), isNull(),
+                    any(), any(), any(), isNull(), argThat(event -> "COMPLETED".equals(event.getEventType())));
             completedOrder.verify(chatMemory).appendMessages(eq("office-conversation"), eq("office-run"), any());
             completedOrder.verify(userMemory).saveAfterCompletion(eq("office-tenant"), eq("employee-1"), eq("office-team"), isNull(),
                     eq("office-run"), eq("office-conversation"), eq(false), isNull(), any());
-            completedOrder.verify(events).publish(argThat(event ->
-                    AgentExecutionEventTypeEnum.COMPLETED.getCode().equals(event.getEventType())));
             assertThat(SecurityUtil.getCurrentTenantId()).isEqualTo("office-tenant");
         } finally {
             SecurityUtil.clear();
@@ -908,7 +910,7 @@ class TeamAgentRuntimeStrategyTest {
         AgentLogService agentLogService = mock(AgentLogService.class);
         ExecutionEventStreamService eventStreamService = mock(ExecutionEventStreamService.class);
         when(executionMapper.selectList(any())).thenReturn(List.of());
-        when(agentLogService.tryTransitionExecutionStatus(any(), any(), any(), any(), any(), any(), any()))
+        when(agentLogService.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(true);
         TeamAgentRuntimeStrategy strategy = createStrategy(executionMapper, agentLogService, eventStreamService);
         AgentExecution execution = new AgentExecution();
@@ -924,17 +926,10 @@ class TeamAgentRuntimeStrategyTest {
         AgentExecutionResult result = strategy.finalizeExecution(execution, AgentExecutionContext.builder().build(), state);
 
         assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode());
-        verify(agentLogService).tryTransitionExecutionStatus(
-                eq("execution-1"),
-                eq(AgentExecutionStatusEnum.RUNNING.getCode()),
-                eq(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode()),
-                eq(null),
-                eq(0L),
-                eq(0L),
-                any()
-        );
         ArgumentCaptor<AgentExecutionEvent> eventCaptor = ArgumentCaptor.forClass(AgentExecutionEvent.class);
-        verify(eventStreamService).publish(eventCaptor.capture());
+        verify(agentLogService).tryFinalizeWithEvent(eq("execution-1"),
+                eq(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode()),
+                isNull(), eq(0L), eq(0L), any(), isNull(), eventCaptor.capture());
         assertThat(eventCaptor.getValue().getEventType())
                 .isEqualTo(AgentExecutionEventTypeEnum.FALLBACK_USED.getCode());
     }
@@ -949,8 +944,8 @@ class TeamAgentRuntimeStrategyTest {
         execution.setId("parent");
         var contract = new AgentAcceptance(Map.of("/ok", "boolean"));
         var context = AgentExecutionContext.builder().executionId("parent").acceptance(contract).build();
-        when(logs.tryFinalizeAcceptance(eq("parent"), eq("failed"), any(), eq(0L), eq(0L),
-                isNull(), eq(AgentAcceptance.Status.REJECTED))).thenReturn(true);
+        when(logs.tryFinalizeWithEvent(eq("parent"), eq("failed"), any(), eq(0L), eq(0L),
+                isNull(), eq(AgentAcceptance.Status.REJECTED), any())).thenReturn(true);
         var state = new TeamGraphState(Map.of(
                 TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
                 TeamGraphConstants.STATE_FINAL_OUTPUT, "{\"ok\":\"yes\"}"));
@@ -971,8 +966,8 @@ class TeamAgentRuntimeStrategyTest {
         execution.setId("parent");
         AgentExecutionContext context = AgentExecutionContext.builder().executionId("parent")
                 .desktopVerificationCommand("mvn clean package").build();
-        when(logs.tryTransitionExecutionStatus(eq("parent"), eq("running"), eq("failed"),
-                eq(AgentLogService.DESKTOP_VERIFICATION_REQUIRED), eq(0L), eq(0L), isNull())).thenReturn(true);
+        when(logs.tryFinalizeWithEvent(eq("parent"), eq("failed"),
+                eq(AgentLogService.DESKTOP_VERIFICATION_REQUIRED), eq(0L), eq(0L), isNull(), isNull(), any())).thenReturn(true);
         TeamGraphState state = new TeamGraphState(Map.of(
                 TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
                 TeamGraphConstants.STATE_FINAL_OUTPUT, "所有测试已通过"));
@@ -1014,8 +1009,8 @@ class TeamAgentRuntimeStrategyTest {
         graphData.put(TeamGraphConstants.STATE_MEMBER_RESULTS, memberResults);
         String expectedError = contributorCompleted ? AgentLogService.DESKTOP_VERIFICATION_REQUIRED
                 : "Team 成员的模型通道均暂不可用，请稍后重试或联系管理员。";
-        when(logs.tryTransitionExecutionStatus(eq("parent"), eq("running"), eq("failed"), any(),
-                eq(0L), eq(0L), isNull())).thenReturn(true);
+        when(logs.tryFinalizeWithEvent(eq("parent"), eq("failed"), any(),
+                eq(0L), eq(0L), isNull(), isNull(), any())).thenReturn(true);
 
         var result = strategy.finalizeExecution(execution, context, new TeamGraphState(graphData));
 
@@ -1023,9 +1018,9 @@ class TeamAgentRuntimeStrategyTest {
         assertThat(result.getErrorMessage()).isEqualTo(expectedError);
         assertThat(result.getOutputResult()).isNull();
         verify(logs).hasCurrentDesktopVerification(context);
-        verify(logs).tryTransitionExecutionStatus("parent", "running", "failed", expectedError, 0L, 0L, null);
-        verify(events).publish(argThat(event -> AgentExecutionEventTypeEnum.FAILED.getCode().equals(event.getEventType())
-                && expectedError.equals(event.getMessage())));
+        verify(logs).tryFinalizeWithEvent(eq("parent"), eq("failed"), eq(expectedError), eq(0L), eq(0L),
+                isNull(), isNull(), argThat(event -> "FAILED".equals(event.getEventType())
+                        && expectedError.equals(event.getMessage())));
     }
 
     @Test
@@ -1164,6 +1159,13 @@ class TeamAgentRuntimeStrategyTest {
                     execution.setStatus(target);
                     return true;
                 });
+        when(agentLogService.tryFinalizeWithEvent(eq(execution.getId()), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    String target = invocation.getArgument(1);
+                    if (!state.compareAndSet("running", target)) return false;
+                    execution.setStatus(target);
+                    return true;
+                });
         ArrayDeque<Runnable> scheduled = new ArrayDeque<>();
         TeamAgentRuntimeStrategy strategy = createStrategy(executionMapper, agentLogService, eventStreamService, scheduled::add);
         Agent agent = new Agent();
@@ -1181,7 +1183,8 @@ class TeamAgentRuntimeStrategyTest {
         assertThat(firstResume.join().getStatus()).isEqualTo(AgentExecutionStatusEnum.FAILED.getCode());
         assertThat(state).hasValue(AgentExecutionStatusEnum.FAILED.getCode());
         ArgumentCaptor<AgentExecutionEvent> recorded = ArgumentCaptor.forClass(AgentExecutionEvent.class);
-        verify(eventStreamService).publish(recorded.capture());
+        verify(agentLogService).tryFinalizeWithEvent(eq(execution.getId()), eq("failed"), any(), any(), any(),
+                isNull(), isNull(), recorded.capture());
         assertThat(recorded.getValue().getEventType()).isEqualTo(AgentExecutionEventTypeEnum.FAILED.getCode());
         assertThat(strategy.resume(agent, execution, null, input).join().getStatus())
                 .isEqualTo(AgentExecutionStatusEnum.FAILED.getCode());
@@ -1207,6 +1210,7 @@ class TeamAgentRuntimeStrategyTest {
                     new DataIntegrityViolationException(internalDetail, new SQLException(internalDetail, "22001")));
         });
         when(logs.tryTransitionExecutionStatus(any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
+        when(logs.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
 
         AgentExecutionResult result = (resume
                 ? strategy.resume(agent, execution, context, new AgentExecutionInputDTO())
@@ -1216,10 +1220,9 @@ class TeamAgentRuntimeStrategyTest {
         assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.FAILED.getCode());
         assertThat(result.getErrorMessage()).isEqualTo(publicMessage);
         assertThat(result.getOutputResult()).isNull();
-        verify(logs).tryTransitionExecutionStatus(eq(execution.getId()), eq(AgentExecutionStatusEnum.RUNNING.getCode()),
-                eq(AgentExecutionStatusEnum.FAILED.getCode()), eq(publicMessage), isNull(), isNull(), isNull());
-        verify(events).publish(argThat(event -> AgentExecutionEventTypeEnum.FAILED.getCode().equals(event.getEventType())
-                && publicMessage.equals(event.getMessage())));
+        verify(logs).tryFinalizeWithEvent(eq(execution.getId()), eq("failed"), eq(publicMessage), isNull(),
+                isNull(), isNull(), isNull(), argThat(event -> "FAILED".equals(event.getEventType())
+                        && publicMessage.equals(event.getMessage())));
     }
 
     @Test
@@ -1233,6 +1236,7 @@ class TeamAgentRuntimeStrategyTest {
         var execution = new AgentExecution();
         execution.setId("parent-1");
         when(logs.tryTransitionExecutionStatus(any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
+        when(logs.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
 
         assertThat(strategy.execute(agent, execution, AgentExecutionContext.builder().build()).join().getErrorMessage())
                 .isEqualTo("Team Agent 未配置成员");
@@ -1253,6 +1257,7 @@ class TeamAgentRuntimeStrategyTest {
         String providerDetail = "provider fixture detail";
         when(members.selectList(any())).thenThrow(new IllegalStateException("too many requests: " + providerDetail));
         when(logs.tryTransitionExecutionStatus(any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
+        when(logs.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
 
         var result = strategy.execute(agent, execution, AgentExecutionContext.builder().build()).join();
 
@@ -1260,7 +1265,8 @@ class TeamAgentRuntimeStrategyTest {
         assertThat(result.getErrorMessage()).isNull();
         assertThat(result.getOutputResult()).contains("模型通道暂不可用").doesNotContain(providerDetail);
         var recorded = ArgumentCaptor.forClass(AgentExecutionEvent.class);
-        verify(events).publish(recorded.capture());
+        verify(logs).tryFinalizeWithEvent(eq(execution.getId()), eq("completed_with_fallback"), isNull(), any(), any(),
+                any(), isNull(), recorded.capture());
         assertThat(recorded.getValue().getEventType()).isEqualTo(AgentExecutionEventTypeEnum.FALLBACK_USED.getCode());
         assertThat(recorded.getValue().getPayload().toString()).doesNotContain(providerDetail);
     }
@@ -1283,6 +1289,92 @@ class TeamAgentRuntimeStrategyTest {
         verify(agentLogService).tryTransitionExecutionStatus(eq(execution.getId()), eq(AgentExecutionStatusEnum.RUNNING.getCode()),
                 eq(AgentExecutionStatusEnum.PAUSED.getCode()), eq(execution.getErrorMessage()), isNull(), isNull(), isNull());
         verifyNoInteractions(eventStreamService);
+    }
+
+    @Test
+    void shouldKeepCommittedChildFailureWhenUsingRuleBasedFallbackEvidence() {
+        var executions = mock(AgentExecutionMapper.class);
+        var logs = mock(AgentLogService.class);
+        var strategy = createStrategy(executions, logs, mock(ExecutionEventStreamService.class));
+        var agent = new Agent();
+        agent.setId("team");
+        var parent = new AgentExecution();
+        parent.setId("parent");
+        var child = new AgentExecution();
+        child.setId("child");
+        child.setStatus("failed");
+        var member = new AgentTeamMember();
+        member.setId("lead");
+        when(executions.selectById("child")).thenReturn(child);
+        var draft = new LinkedHashMap<String, Object>();
+
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(strategy, "buildTransientMemberFallbackPayload",
+                agent, parent, member, child, "模型", "连接中断", draft);
+
+        assertThat(child.getStatus()).isEqualTo("failed");
+        assertThat(draft).containsEntry(TeamGraphConstants.RESULT_STATUS, "completed_with_fallback");
+        assertThat(draft.get(TeamGraphConstants.RESULT_OUTPUT_RESULT).toString()).contains("可复核草案");
+    }
+
+    @Test
+    void shouldRepairOnlyTheLeadAndKeepSuccessfulUpstreamEvidence() {
+        var executions = mock(AgentExecutionMapper.class);
+        var engine = mock(AgentExecutionEngine.class);
+        var logs = mock(AgentLogService.class);
+        var strategy = new TeamAgentRuntimeStrategy(executions, mock(AgentTeamMemberMapper.class),
+                mock(AgentTeamMemberToolBindingMapper.class), mock(BuiltinToolMapper.class),
+                mock(AgentTeamMemberContextBindingMapper.class), mock(ContextItemMapper.class), engine,
+                logs, mock(AgentLoopQualityChecker.class), mock(ExecutionEventStreamService.class),
+                mock(AgentContextPublisher.class), mock(TeamCheckpointStore.class), mock(DesktopAttachmentService.class),
+                mock(SandboxPolicyResolver.class), mock(ExecutionSteeringService.class), new DefaultTeamQualityDetector(),
+                new TeamConversationArchive(mock(CompositeChatMemoryStore.class), mock(UserMemoryExtractionService.class), new ObjectMapper()),
+                mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class), Runnable::run);
+        var agent = new Agent();
+        agent.setId("team");
+        var parent = new AgentExecution();
+        parent.setId("parent");
+        parent.setTenantId("tenant");
+        parent.setAgentId(agent.getId());
+        var contributor = new AgentTeamMember();
+        contributor.setId("researcher");
+        contributor.setRoleName("研究员");
+        var lead = new AgentTeamMember();
+        lead.setId("lead");
+        lead.setRoleType("lead_agent");
+        lead.setRoleName("负责人");
+        var evidence = Map.<String, Object>of(TeamGraphConstants.RESULT_MEMBER_ID, contributor.getId(),
+                TeamGraphConstants.RESULT_STATUS, "completed", TeamGraphConstants.RESULT_OUTPUT_RESULT, "已确认材料");
+        var oldLead = Map.<String, Object>of(TeamGraphConstants.RESULT_MEMBER_ID, lead.getId(),
+                TeamGraphConstants.RESULT_STATUS, "completed", TeamGraphConstants.RESULT_OUTPUT_RESULT, "{\"ok\":false}");
+        var acceptance = new AgentAcceptance(Map.of("/ok", "boolean"),
+                Map.of("/ok", BooleanNode.TRUE), null);
+        var context = AgentExecutionContext.builder().tenantId("tenant").inputPrompt("汇总").acceptance(acceptance).build();
+        var graph = new LinkedHashMap<String, Object>();
+        graph.put(TeamGraphConstants.STATE_FINAL_STATUS, "completed");
+        graph.put(TeamGraphConstants.STATE_FINAL_OUTPUT, "{\"ok\":false}");
+        graph.put(TeamGraphConstants.STATE_MEMBER_RESULTS, List.of(evidence, oldLead));
+        graph.putAll(strategy.evaluateAggregateQuality(parent, context, new TeamGraphState(graph)));
+        graph.put(TeamGraphConstants.STATE_RETRY_COUNT, 1);
+        assertThat(graph).containsEntry(TeamAgentRuntimeStrategy.DELIVERY_REPAIR_TEXT_ONLY, true);
+        when(logs.createTeamChildWhileParentRunning(any())).thenAnswer(call -> {
+            call.<AgentExecution>getArgument(0).setId("repair-run");
+            return true;
+        });
+        when(engine.execute(any())).thenReturn(CompletableFuture.completedFuture(
+                AgentExecutionResult.builder().status("completed").outputResult("{\"ok\":true}").build()));
+
+        List<Map<String, Object>> repaired = org.springframework.test.util.ReflectionTestUtils.invokeMethod(strategy,
+                "executeMembers", agent, parent, context, List.of(contributor, lead), new TeamGraphState(graph), null, false);
+
+        var run = ArgumentCaptor.forClass(AgentExecutionContext.class);
+        verify(engine).execute(run.capture());
+        assertThat(run.getValue().getTeamMemberId()).isEqualTo("lead");
+        assertThat(run.getValue().isAcceptanceRepairOnly()).isTrue();
+        assertThat(run.getValue().getInputPrompt()).contains("/ok", "已确认材料");
+        assertThat(repaired).hasSize(2).contains(evidence).doesNotContain(oldLead);
+        verifyNoMoreInteractions(engine);
+        var repeated = strategy.evaluateAggregateQuality(parent, context, new TeamGraphState(graph));
+        assertThat(repeated).containsEntry(TeamGraphConstants.STATE_QUALITY_GATE_DECISION, TeamGraphConstants.QUALITY_GATE_FAIL);
     }
 
     @Test

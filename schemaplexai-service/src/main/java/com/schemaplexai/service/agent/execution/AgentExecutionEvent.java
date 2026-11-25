@@ -22,6 +22,9 @@ public class AgentExecutionEvent {
 
     private String executionId;
 
+    /** 终态事件的稳定投递 ID。 */
+    private String eventId;
+
     private Integer roundNum;
 
     /** 用户可读描述 */

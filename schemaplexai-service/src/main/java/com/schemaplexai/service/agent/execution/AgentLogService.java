@@ -3,6 +3,7 @@ package com.schemaplexai.service.agent.execution;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
+import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.dao.mapper.AgentExecutionLogMapper;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.model.entity.AgentExecution;
@@ -18,6 +19,8 @@ import org.springframework.util.StringUtils;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Objects;
 
 /**
  * Agent 执行日志服务
@@ -35,6 +38,9 @@ public class AgentLogService {
     private final AgentExecutionLogMapper agentExecutionLogMapper;
     private final AgentExecutionMapper agentExecutionMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
+    private final AgentTerminalEventOutbox terminalOutbox;
+    private static final List<String> TERMINAL_STATUSES = List.of("completed", "completed_with_fallback",
+            "failed", "stopped", "cancelled");
 
     /**
      * 追加一条执行日志
@@ -108,17 +114,19 @@ public class AgentLogService {
     }
 
     /**
-     * 更新执行状态，防止将已 stopped 的执行覆盖为其他终态
+     * 更新尚未进入终态的执行，并返回是否赢得状态更新
      *
      * @param outputResult 最终输出文本（仅 completed 时有值）
      */
-    public void updateExecutionStatus(String executionId, String status,
+    @Transactional(rollbackFor = Exception.class)
+    public boolean updateExecutionStatus(String executionId, String status,
                                       String errorMessage, Long tokenInput, Long tokenOutput,
                                       String outputResult) {
-        updateExecutionStatus(executionId, null, status, errorMessage, tokenInput, tokenOutput, outputResult, null);
+        return updateExecutionStatus(executionId, null, status, errorMessage, tokenInput, tokenOutput, outputResult, null);
     }
 
     /** 仅在当前状态符合预期时转换，调用方根据返回值决定是否发布通知。 */
+    @Transactional(rollbackFor = Exception.class)
     public boolean tryTransitionExecutionStatus(String executionId, String expectedStatus, String targetStatus,
                                                 String errorMessage, Long tokenInput, Long tokenOutput,
                                                 String outputResult) {
@@ -126,12 +134,27 @@ public class AgentLogService {
                 errorMessage, tokenInput, tokenOutput, outputResult, null);
     }
 
-    /** 验收判定和业务终态必须由同一次条件更新提交。 */
-    public boolean tryFinalizeAcceptance(String executionId, String targetStatus, String errorMessage,
-                                         Long tokenInput, Long tokenOutput, String outputResult,
-                                         AgentAcceptance.Status acceptanceStatus) {
-        return updateExecutionStatus(executionId, AgentExecutionStatusEnum.RUNNING.getCode(), targetStatus,
-                errorMessage, tokenInput, tokenOutput, outputResult, null, acceptanceStatus);
+    @Transactional(rollbackFor = Exception.class)
+    public void insertTerminalExecution(AgentExecution execution, AgentExecutionEvent event) {
+        if (!TERMINAL_STATUSES.contains(execution.getStatus()) || agentExecutionMapper.insert(execution) != 1) {
+            throw new IllegalStateException("无法创建终态执行");
+        }
+        event.setExecutionId(execution.getId());
+        terminalOutbox.enqueue(event);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public boolean tryTransitionWithEvent(String executionId, String expectedStatus, String status, String error,
+                                          AgentExecutionEvent event) {
+        return updateExecutionStatus(executionId, expectedStatus, status, error, null, null, null, null, null, event);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public boolean tryFinalizeWithEvent(String executionId, String status, String error, Long tokenInput,
+                                        Long tokenOutput, String output, AgentAcceptance.Status acceptanceStatus,
+                                        AgentExecutionEvent event) {
+        return updateExecutionStatus(executionId, AgentExecutionStatusEnum.RUNNING.getCode(), status,
+                error, tokenInput, tokenOutput, output, null, acceptanceStatus, event);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -156,6 +179,7 @@ public class AgentLogService {
     }
 
     /** 暂停状态、有效执行时间和累计 Token 一起提交，供下一次恢复读取。 */
+    @Transactional(rollbackFor = Exception.class)
     public boolean tryPauseExecution(String executionId, String errorMessage, long tokenInput, long tokenOutput,
                                      String outputResult, long runtimeElapsedMillis) {
         return updateExecutionStatus(executionId, AgentExecutionStatusEnum.RUNNING.getCode(),
@@ -174,6 +198,17 @@ public class AgentLogService {
                                           String errorMessage, Long tokenInput, Long tokenOutput,
                                           String outputResult, Long runtimeElapsedMillis,
                                           AgentAcceptance.Status acceptanceStatus) {
+        return updateExecutionStatus(executionId, expectedStatus, status, errorMessage, tokenInput, tokenOutput,
+                outputResult, runtimeElapsedMillis, acceptanceStatus, null);
+    }
+
+    private boolean updateExecutionStatus(String executionId, String expectedStatus, String status,
+                                          String errorMessage, Long tokenInput, Long tokenOutput,
+                                          String outputResult, Long runtimeElapsedMillis,
+                                          AgentAcceptance.Status acceptanceStatus, AgentExecutionEvent terminalEvent) {
+        if (terminalEvent != null && !Objects.equals(executionId, terminalEvent.getExecutionId())) {
+            throw new IllegalArgumentException("终态事件与执行 ID 不一致");
+        }
         AgentExecution update = new AgentExecution();
         if (acceptanceStatus != null) {
             update.setAcceptanceStatus(acceptanceStatus.code());
@@ -215,7 +250,7 @@ public class AgentLogService {
             }
         }
         if (expectedStatus == null) {
-            condition.ne(AgentExecution::getStatus, AgentExecutionStatusEnum.STOPPED.getCode());
+            condition.notIn(AgentExecution::getStatus, TERMINAL_STATUSES);
         } else {
             condition.eq(AgentExecution::getStatus, expectedStatus);
         }
@@ -224,6 +259,10 @@ public class AgentLogService {
             log.info("执行状态未更新: executionId={}, expectedStatus={}, targetStatus={}",
                     executionId, expectedStatus, status);
             return false;
+        }
+        if (TERMINAL_STATUSES.contains(status)) {
+            terminalOutbox.enqueue(terminalEvent == null ? defaultTerminalEvent(executionId, status, errorMessage, outputResult)
+                    : terminalEvent);
         }
         log.info("更新执行状态: executionId={}, status={}", executionId, status);
         if (AgentExecutionStatusEnum.COMPLETED.getCode().equals(status)) {
@@ -235,4 +274,21 @@ public class AgentLogService {
         }
         return true;
     }
+    private AgentExecutionEvent defaultTerminalEvent(String executionId, String status, String error, String output) {
+        var type = switch (status) {
+            case "completed" -> AgentExecutionEventTypeEnum.COMPLETED;
+            case "completed_with_fallback" -> AgentExecutionEventTypeEnum.FALLBACK_USED;
+            case "stopped", "cancelled" -> AgentExecutionEventTypeEnum.CANCELLED;
+            default -> AgentExecutionEventTypeEnum.FAILED;
+        };
+        var payload = new LinkedHashMap<String, Object>();
+        if (StringUtils.hasText(output)) {
+            payload.put("content", output);
+            payload.put("finalOutput", output);
+        }
+        return AgentExecutionEvent.builder().executionId(executionId).eventType(type.getCode())
+                .message(StringUtils.hasText(error) ? error : type.getCode()).timestamp(Instant.now())
+                .payload(payload).build();
+    }
+
 }

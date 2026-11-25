@@ -19,6 +19,7 @@ final class AgentHarnessPostgres implements AutoCloseable {
     private final JdbcTemplate admin;
     private final String schema = "agent_harness_" + UUID.randomUUID().toString().replace("-", "");
     final JdbcTemplate jdbc;
+    final SimpleDriverDataSource dataSource;
 
     AgentHarnessPostgres() {
         String url = System.getenv("AGENT_HARNESS_DB_URL");
@@ -27,7 +28,7 @@ final class AgentHarnessPostgres implements AutoCloseable {
         String password = System.getenv().getOrDefault("AGENT_HARNESS_DB_PASSWORD", "");
         admin = new JdbcTemplate(new SimpleDriverDataSource(new Driver(), url, user, password));
         admin.execute("CREATE SCHEMA " + schema);
-        var dataSource = new SimpleDriverDataSource(new Driver(), url, user, password);
+        dataSource = new SimpleDriverDataSource(new Driver(), url, user, password);
         var properties = new Properties();
         properties.setProperty("currentSchema", schema);
         dataSource.setConnectionProperties(properties);
@@ -41,7 +42,8 @@ final class AgentHarnessPostgres implements AutoCloseable {
                     )
                     """);
             var migration = new ResourceDatabasePopulator(
-                    new ClassPathResource("db/migration/agent-execution-harness.sql"));
+                    new ClassPathResource("db/migration/agent-execution-harness.sql"),
+                    new ClassPathResource("db/migration/agent-harness-reliability.sql"));
             migration.execute(dataSource);
             migration.execute(dataSource);
         } catch (RuntimeException e) {

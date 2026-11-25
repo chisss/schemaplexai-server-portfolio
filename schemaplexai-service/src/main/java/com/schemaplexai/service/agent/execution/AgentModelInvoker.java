@@ -64,6 +64,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -79,6 +80,7 @@ import java.util.function.Consumer;
 public class AgentModelInvoker {
 
     private static final int MAX_CONCURRENT_MODEL_CALLS = 50;
+    private static final Semaphore EVAL_MODEL_CALL_SEMAPHORE = new Semaphore(4, true);
     private static final ExecutorService MODEL_CALL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
     private static final Semaphore MODEL_CALL_SEMAPHORE = new Semaphore(MAX_CONCURRENT_MODEL_CALLS, true);
     private static final long TEMP_UNAVAILABLE_ON_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(2);
@@ -177,7 +179,7 @@ public class AgentModelInvoker {
 
             return result;
         } finally {
-            MODEL_CALL_SEMAPHORE.release();
+            modelSemaphore(budget).release();
         }
     }
 
@@ -247,7 +249,8 @@ public class AgentModelInvoker {
                 lastError = mismatch;
                 appendFallbackLog(executionId, agentId, tenantId, round, startMs, agentLogService,
                         "跳过不兼容的候选模型: " + modelIdOf(resolution) + ", reason=" + mismatch.getMessage());
-            } catch (AgentExecutionBudget.BudgetExceededException | CancellationException | InterruptedException e) {
+            } catch (AgentExecutionBudget.BudgetExceededException | AgentRunRecovery.LostOwnershipException
+                     | CancellationException | InterruptedException e) {
                 throw e;
             } catch (Exception e) {
                 lastError = e;
@@ -323,7 +326,7 @@ public class AgentModelInvoker {
                     agentLogService, resolveMaxRetries(resolution, params),
                     resolveTimeoutMillis(resolution, params.getModelCallTimeoutMillis()), budget, phase, null);
         } finally {
-            MODEL_CALL_SEMAPHORE.release();
+            modelSemaphore(budget).release();
         }
     }
 
@@ -362,7 +365,7 @@ public class AgentModelInvoker {
                 validateResponse(response);
                 return response;
             } catch (AgentModelRequestPlanner.IncompatibleCandidateException | AgentExecutionBudget.BudgetExceededException
-                     | CancellationException | InterruptedException e) {
+                     | AgentRunRecovery.LostOwnershipException | CancellationException | InterruptedException e) {
                 throw e;
             } catch (Exception e) {
                 lastError = e;
@@ -422,16 +425,21 @@ public class AgentModelInvoker {
         }
         ChatRequest projected = requestPlanner.fit(request, resolution.config(),
                 budget != null ? budget.remainingTokens() : Integer.MAX_VALUE);
-        var modelAttempt = budget == null ? null : budget.prepare(resolution.config(), projected, requestPlanner);
+        String attemptId = budget == null ? null : UUID.randomUUID().toString();
+        var modelAttempt = budget == null ? null : budget.prepare(resolution.config(), projected, requestPlanner,
+                attemptId, trace.round(), trace.phase());
         ChatRequest effectiveRequest = modelAttempt == null ? projected : modelAttempt.request();
-        String attemptId = trace == null ? null : UUID.randomUUID().toString();
         LocalDateTime dispatchedAt = LocalDateTime.now();
         long dispatchedNanos = System.nanoTime();
         ChatResponse response = null;
+        var dispatched = new AtomicBoolean();
         try {
             response = onProgress == null
-                    ? invokeSynchronous(resolution, effectiveRequest, timeoutMillis, budget)
-                    : invokeStreaming(resolution, effectiveRequest, timeoutMillis, budget, onProgress);
+                    ? invokeSynchronous(resolution, effectiveRequest, timeoutMillis, budget, dispatched)
+                    : invokeStreaming(resolution, effectiveRequest, timeoutMillis, budget, onProgress, dispatched);
+            if (budget != null) {
+                budget.checkModelOwnership();
+            }
             AiMessage message = response == null ? null : response.aiMessage();
             if (onProgress != null && AiModelConfig.PROTOCOL_OPENAI.equals(resolution.config().getProtocol())
                     && message != null && message.thinking() != null) {
@@ -451,7 +459,8 @@ public class AgentModelInvoker {
             throw new IllegalStateException(cause != null ? cause.getMessage() : "AI 调用失败", cause);
         } finally {
             if (budget != null) {
-                var usage = budget.recordAttempt(resolution.config(), modelAttempt, response, tokenEstimator);
+                var usage = budget.recordAttempt(resolution.config(), modelAttempt, response, tokenEstimator, attemptId,
+                        dispatched.get());
                 recordAttemptTrace(trace, attemptId, resolution, dispatchedAt,
                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - dispatchedNanos), response, usage);
                 if (logRequestComponents && log.isInfoEnabled()) {
@@ -461,9 +470,22 @@ public class AgentModelInvoker {
         }
     }
 
+    private void authorizeDispatch(AgentExecutionBudget budget, AtomicBoolean dispatched) {
+        if (budget != null) {
+            budget.checkModelOwnership();
+            if (budget.remainingMillis() == 0) {
+                throw new AgentExecutionBudget.BudgetExceededException("执行截止时间已过");
+            }
+        }
+        dispatched.set(true);
+    }
+
     private ChatResponse invokeSynchronous(LangChain4jResolution resolution, ChatRequest request, long timeoutMillis,
-                                           AgentExecutionBudget budget) throws Exception {
-        Future<ChatResponse> future = MODEL_CALL_EXECUTOR.submit(() -> resolution.model().chat(request));
+                                           AgentExecutionBudget budget, AtomicBoolean dispatched) throws Exception {
+        Future<ChatResponse> future = MODEL_CALL_EXECUTOR.submit(() -> {
+            authorizeDispatch(budget, dispatched);
+            return resolution.model().chat(request);
+        });
         try {
             return awaitResponse(future, timeoutMillis, budget);
         } finally {
@@ -472,13 +494,15 @@ public class AgentModelInvoker {
     }
 
     private ChatResponse invokeStreaming(LangChain4jResolution resolution, ChatRequest request, long timeoutMillis,
-                                         AgentExecutionBudget budget, Consumer<ModelProgress> onProgress) throws Exception {
+                                         AgentExecutionBudget budget, Consumer<ModelProgress> onProgress, AtomicBoolean dispatched) throws Exception {
         var completion = new CompletableFuture<ChatResponse>();
         var handle = new AtomicReference<StreamingHandle>();
         var reported = new AtomicInteger(-1);
         Future<?> dispatch = MODEL_CALL_EXECUTOR.submit(() -> {
             try {
-                modelFactory.getOrCreateStreaming(resolution.config()).chat(request, new StreamingChatResponseHandler() {
+                var model = modelFactory.getOrCreateStreaming(resolution.config());
+                authorizeDispatch(budget, dispatched);
+                model.chat(request, new StreamingChatResponseHandler() {
                     private void report(ModelProgress progress, StreamingHandle streamingHandle) {
                         handle.compareAndSet(null, streamingHandle);
                         if (completion.isCancelled() && streamingHandle != null) {
@@ -623,14 +647,18 @@ public class AgentModelInvoker {
 
     private record AttemptTrace(String executionId, String agentId, String tenantId, int round, String phase, int attempt) {}
 
+    private Semaphore modelSemaphore(AgentExecutionBudget budget) {
+        return budget != null && budget.evaluation() ? EVAL_MODEL_CALL_SEMAPHORE : MODEL_CALL_SEMAPHORE;
+    }
+
     private boolean acquirePermit(AgentExecutionBudget budget) throws InterruptedException {
         if (budget == null) {
-            return MODEL_CALL_SEMAPHORE.tryAcquire(30, TimeUnit.SECONDS);
+            return modelSemaphore(budget).tryAcquire(30, TimeUnit.SECONDS);
         }
         long waitUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         long waitMillis;
         while ((waitMillis = waitSliceMillis(waitUntil, budget)) > 0) {
-            if (MODEL_CALL_SEMAPHORE.tryAcquire(waitMillis, TimeUnit.MILLISECONDS)) {
+            if (modelSemaphore(budget).tryAcquire(waitMillis, TimeUnit.MILLISECONDS)) {
                 return true;
             }
         }

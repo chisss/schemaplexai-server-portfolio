@@ -128,6 +128,68 @@ public class AgentRunRecovery {
             }
         }
 
+        void reserveModel(String attemptId, int round, String phase, long input, long output, long maxTokens,
+                          long elapsedMillis) {
+            int inserted = jdbc.update("""
+                    WITH account AS (
+                        UPDATE sf_agent_execution
+                           SET token_input = COALESCE(token_input, 0) + ?,
+                               token_output = COALESCE(token_output, 0) + ?,
+                               runtime_elapsed_millis = GREATEST(COALESCE(runtime_elapsed_millis, 0), ?)
+                         WHERE tenant_id = ?::uuid AND id = ?::uuid AND harness_owner = ?::uuid
+                           AND harness_lease_until > clock_timestamp() AND status = 'running' AND deleted = 0
+                           AND COALESCE(token_input, 0) + COALESCE(token_output, 0) <= ?
+                        RETURNING tenant_id, id, harness_owner
+                    )
+                    INSERT INTO sf_agent_model_attempt (attempt_id, tenant_id, execution_id, owner_id,
+                                                        round_number, phase, reserved_input, reserved_output)
+                    SELECT ?::uuid, tenant_id, id, harness_owner, ?, ?, ?, ? FROM account
+                    """, input, output, elapsedMillis, tenantId, executionId, owner, maxTokens - input - output,
+                    attemptId, round, phase, input, output);
+            if (inserted != 1) {
+                checkOwnership();
+                throw new AgentExecutionBudget.BudgetExceededException("已持久化的 Token 余额不足");
+            }
+        }
+
+        void checkOwnership() {
+            boolean owned = Boolean.TRUE.equals(jdbc.queryForObject("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM sf_agent_execution
+                         WHERE tenant_id = ?::uuid AND id = ?::uuid AND harness_owner = ?::uuid
+                           AND harness_lease_until > clock_timestamp() AND status = 'running' AND deleted = 0
+                    )
+                    """, Boolean.class, tenantId, executionId, owner));
+            if (!owned) {
+                throw new LostOwnershipException();
+            }
+        }
+
+        void settleModel(String attemptId, long input, long output, long elapsedMillis) {
+            // 先锁执行行，确保所有权变化和回执结算有确定顺序。
+            jdbc.update("""
+                    WITH owned AS MATERIALIZED (
+                        SELECT id FROM sf_agent_execution
+                         WHERE tenant_id = ?::uuid AND id = ?::uuid AND harness_owner = ?::uuid
+                           AND harness_lease_until > clock_timestamp() AND status = 'running' AND deleted = 0
+                         FOR UPDATE
+                    ), receipt AS (
+                        UPDATE sf_agent_model_attempt
+                           SET charged_input = ?, charged_output = ?, settled_at = clock_timestamp()
+                         WHERE tenant_id = ?::uuid AND execution_id IN (SELECT id FROM owned)
+                           AND attempt_id = ?::uuid AND owner_id = ?::uuid AND settled_at IS NULL
+                        RETURNING reserved_input, reserved_output
+                    )
+                    UPDATE sf_agent_execution
+                       SET token_input = token_input + ? - receipt.reserved_input,
+                           token_output = token_output + ? - receipt.reserved_output,
+                           runtime_elapsed_millis = GREATEST(COALESCE(runtime_elapsed_millis, 0), ?)
+                      FROM receipt
+                     WHERE tenant_id = ?::uuid AND id IN (SELECT id FROM owned)
+                    """, tenantId, executionId, owner, input, output, tenantId, attemptId, owner,
+                    input, output, elapsedMillis, tenantId);
+        }
+
         void claimTool(int round, ToolExecutionRequest request) {
             int inserted = jdbc.update("""
                     INSERT INTO sf_agent_tool_dispatch (tenant_id, execution_id, round_number, call_id, tool_code)
@@ -192,6 +254,10 @@ public class AgentRunRecovery {
     static final class LostOwnershipException extends IllegalStateException {
         LostOwnershipException() {
             super("执行租约已失效或工具调用已被领取");
+        }
+
+        LostOwnershipException(Throwable cause) {
+            super("模型记账暂不可用，需重新领取执行", cause);
         }
     }
 }

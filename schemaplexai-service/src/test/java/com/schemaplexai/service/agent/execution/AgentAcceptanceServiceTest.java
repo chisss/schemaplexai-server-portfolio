@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
 import org.junit.jupiter.api.Test;
+import com.fasterxml.jackson.databind.node.BooleanNode;
 
 import java.util.Map;
 
@@ -12,6 +13,18 @@ class AgentAcceptanceServiceTest {
 
     private final AgentAcceptance contract = new AgentAcceptance(Map.of(
             "/result/count", "integer", "/result/ok", "boolean", "/a~1b", "null"));
+
+    @Test
+    void bindsExpectedValuesAndTheExactDeliveredVersion() {
+        var expected = BooleanNode.TRUE;
+        var json = "{\"ok\":true}";
+        var version = AgentAcceptance.outputSha256(json);
+        var contract = new AgentAcceptance(Map.of("/ok", "boolean"), Map.of("/ok", expected), version);
+        assertEquals(AgentAcceptance.Status.ACCEPTED, contract.evaluate(json, false).status());
+        assertEquals(AgentAcceptance.Status.REJECTED, contract.evaluate("{\"ok\":false}", false).status());
+        assertEquals(AgentAcceptance.Status.REJECTED, contract.evaluate(json + " ", false).status());
+        assertEquals(contract, AgentAcceptance.fromSnapshot(contract.snapshot()));
+    }
 
     @Test
     void acceptsExactlyOneTypedJsonValue() {

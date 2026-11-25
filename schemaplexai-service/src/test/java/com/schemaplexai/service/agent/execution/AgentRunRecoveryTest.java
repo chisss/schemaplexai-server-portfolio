@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
 import com.schemaplexai.common.model.ToolResult;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import org.junit.jupiter.api.Test;
@@ -10,6 +11,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.postgresql.Driver;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -108,6 +111,11 @@ class AgentRunRecoveryTest {
                     if (boundary.equals("after-completion")) {
                         assertNull(recovered);
                         assertEquals(1, effects);
+                        var restarted = new AgentTerminalEventOutbox(db.jdbc, new ObjectMapper().findAndRegisterModules());
+                        var delivery = restarted.claim(1).getFirst();
+                        assertEquals(EXECUTION + ":terminal", restarted.decode(delivery.payload()).getEventId());
+                        restarted.confirm(delivery);
+                        assertTrue(restarted.claim(1).isEmpty());
                         return;
                     }
                     assertNotNull(recovered);
@@ -154,7 +162,13 @@ class AgentRunRecoveryTest {
                                 LocalDateTime.now(), 1));
                     }
                     if (args[1].equals("after-completion")) {
-                        jdbc.update("UPDATE sf_agent_execution SET status = 'completed'");
+                        var tx = new TransactionTemplate(new DataSourceTransactionManager(source));
+                        var outbox = new AgentTerminalEventOutbox(jdbc, new ObjectMapper().findAndRegisterModules());
+                        tx.executeWithoutResult(status -> {
+                            jdbc.update("UPDATE sf_agent_execution SET status = 'completed'");
+                            outbox.enqueue(AgentExecutionEvent.builder().executionId(EXECUTION)
+                                    .eventType("COMPLETED").build());
+                        });
                     }
                 }
                 Files.writeString(Path.of(args[2]), "ready");

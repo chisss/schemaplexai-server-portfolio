@@ -32,6 +32,12 @@ public class SoloAgentRuntimeStrategy implements AgentRuntimeStrategy {
     }
 
     @Override
+    public CompletableFuture<AgentExecutionResult> executeForEvaluation(Agent agent, AgentExecution execution,
+                                                                         AgentExecutionContext context) {
+        return agentExecutionEngine.executeForEvaluation(context);
+    }
+
+    @Override
     public CompletableFuture<AgentExecutionResult> recover(AgentExecutionContext context) {
         return agentExecutionEngine.recover(context);
     }

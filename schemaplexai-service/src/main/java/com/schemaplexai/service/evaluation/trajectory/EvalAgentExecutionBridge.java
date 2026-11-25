@@ -1,6 +1,7 @@
 package com.schemaplexai.service.evaluation.trajectory;
 
 import com.schemaplexai.common.enums.AgentStatusEnum;
+import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
@@ -10,6 +11,7 @@ import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
+import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import lombok.Builder;
 import lombok.Data;
@@ -49,6 +51,7 @@ public class EvalAgentExecutionBridge {
 
     private final AgentMapper agentMapper;
     private final AgentExecutionMapper agentExecutionMapper;
+    private final AgentLogService agentLogService;
     private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
 
     /**
@@ -82,6 +85,7 @@ public class EvalAgentExecutionBridge {
                         .outputFormat(dto.getOutputFormat())
                         .additionalSystemContexts(additionalSystemContexts)
                         .stream(false)
+                        .evaluation(true)
                         .temporaryChat(true)
                         .memoryWriteEnabled(false)
                         .build());
@@ -157,12 +161,8 @@ public class EvalAgentExecutionBridge {
     }
 
     private void markStopped(String executionId, String message) {
-        AgentExecution update = new AgentExecution();
-        update.setId(executionId);
-        update.setStatus("stopped");
-        update.setErrorMessage(message);
-        update.setCompletedAt(java.time.LocalDateTime.now());
-        agentExecutionMapper.updateById(update);
+        agentLogService.updateExecutionStatus(executionId, AgentExecutionStatusEnum.STOPPED.getCode(),
+                message, null, null, null);
     }
 
     /**

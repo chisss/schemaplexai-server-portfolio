@@ -17,6 +17,7 @@ import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
+import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
@@ -52,6 +53,7 @@ public class AgentRuntimeOrchestrator {
     private final AgentRuntimeStrategyFactory strategyFactory;
     private final SandboxPolicyResolver sandboxPolicyResolver;
     private final AgentConfigHandler agentConfigHandler;
+    private final AgentLogService agentLogService;
 
     public CompletableFuture<AgentExecutionResult> execute(AgentExecutionContext context) {
         AgentExecution execution = requireExecution(context.getExecutionId());
@@ -82,7 +84,9 @@ public class AgentRuntimeOrchestrator {
         update.setSandboxPolicySnapshot(buildRuntimeSnapshot(context, sandboxPolicy));
         agentExecutionMapper.updateById(update);
 
-        return strategyFactory.getStrategy(agent.getAgentType()).execute(agent, execution, context);
+        var strategy = strategyFactory.getStrategy(agent.getAgentType());
+        return context.isEvaluation() ? strategy.executeForEvaluation(agent, execution, context)
+                : strategy.execute(agent, execution, context);
     }
 
     public CompletableFuture<AgentExecutionResult> recover(String executionId) {
@@ -221,7 +225,7 @@ public class AgentRuntimeOrchestrator {
         snapshot.put("skillCode", context.getSkillCode());
         snapshot.put("outputFormat", context.getOutputFormat());
         if (context.getAcceptance() != null) {
-            snapshot.put(AgentAcceptance.SNAPSHOT_KEY, context.getAcceptance().requiredJson());
+            snapshot.putAll(context.getAcceptance().snapshot());
         }
         return snapshot;
     }
@@ -278,11 +282,8 @@ public class AgentRuntimeOrchestrator {
             // isStopped 检查处自动退出（buildStoppedResult），不再继续产生副作用，
             // 也避免后台完成后用 COMPLETED 覆盖超时状态。
             future.cancel(true);
-            AgentExecution update = new AgentExecution();
-            update.setId(execution.getId());
-            update.setStatus("stopped");
-            update.setErrorMessage("工作流编排 Agent 执行超时");
-            agentExecutionMapper.updateById(update);
+            agentLogService.updateExecutionStatus(execution.getId(), AgentExecutionStatusEnum.STOPPED.getCode(),
+                    "工作流编排 Agent 执行超时", null, null, null);
             throw new BusinessException(ResultCode.AI_MODEL_TIMEOUT, "工作流编排 Agent 执行超时");
         } catch (Exception exception) {
             throw new BusinessException(ResultCode.FAIL, "工作流编排 Agent 执行失败: " + exception.getMessage());
@@ -290,11 +291,13 @@ public class AgentRuntimeOrchestrator {
     }
 
     public static AgentAcceptance validateAcceptance(AgentExecuteDTO dto) {
-        if (dto.getRequiredOutputJson() == null) {
+        if (dto.getRequiredOutputJson() == null && dto.getRequiredOutputValues() == null
+                && dto.getRequiredOutputSha256() == null) {
             return null;
         }
         try {
-            return new AgentAcceptance(dto.getRequiredOutputJson());
+            return new AgentAcceptance(dto.getRequiredOutputJson(), dto.getRequiredOutputValues(),
+                    dto.getRequiredOutputSha256());
         } catch (IllegalArgumentException exception) {
             throw new BusinessException(ResultCode.FAIL, exception.getMessage());
         }

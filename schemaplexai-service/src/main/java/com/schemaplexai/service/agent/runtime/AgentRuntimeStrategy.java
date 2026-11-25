@@ -18,6 +18,11 @@ public interface AgentRuntimeStrategy {
 
     CompletableFuture<AgentExecutionResult> execute(Agent agent, AgentExecution execution, AgentExecutionContext context);
 
+    default CompletableFuture<AgentExecutionResult> executeForEvaluation(Agent agent, AgentExecution execution,
+                                                                          AgentExecutionContext context) {
+        return execute(agent, execution, context);
+    }
+
     default CompletableFuture<AgentExecutionResult> recover(AgentExecutionContext context) {
         throw new UnsupportedOperationException("当前执行策略不支持崩溃续跑");
     }

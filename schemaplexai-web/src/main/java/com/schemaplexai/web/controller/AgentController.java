@@ -46,6 +46,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
@@ -292,10 +293,11 @@ public class AgentController {
 
     @GetMapping(value = "/{id}/executions/{execId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     @Operation(summary = "订阅执行事件流（SSE）")
-    public SseEmitter streamExecutionEvents(@PathVariable String id, @PathVariable String execId) {
+    public SseEmitter streamExecutionEvents(@PathVariable String id, @PathVariable String execId,
+                                         @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId) {
         // 复用读取权限校验：不存在或不归属会抛业务异常
         agentService.getExecution(id, execId);
-        return executionEventStreamService.subscribe(execId);
+        return executionEventStreamService.subscribe(execId, lastEventId);
     }
 
     @GetMapping("/{id}/executions/{execId}/activity")

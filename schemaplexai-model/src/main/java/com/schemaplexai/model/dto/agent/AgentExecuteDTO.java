@@ -1,6 +1,7 @@
 package com.schemaplexai.model.dto.agent;
 
 import jakarta.validation.constraints.NotBlank;
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Data;
 
 import java.util.List;
@@ -42,6 +43,12 @@ public class AgentExecuteDTO {
 
     /** 可选验收断言，键为 JSON Pointer，值为要求的 JSON 类型。 */
     private Map<String, String> requiredOutputJson;
+
+    /** 可选 JSON Pointer 等值断言。 */
+    private Map<String, JsonNode> requiredOutputValues;
+
+    /** 可选交付版本，按服务端实际终稿的 UTF-8 字节验算。 */
+    private String requiredOutputSha256;
 
     /** 执行模式: auto / plan / suggest（默认 auto） */
     private String executionMode;

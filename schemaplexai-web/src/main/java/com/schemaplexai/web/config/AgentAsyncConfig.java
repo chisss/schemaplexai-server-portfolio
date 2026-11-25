@@ -80,6 +80,37 @@ public class AgentAsyncConfig {
         return executor;
     }
 
+    @Bean("evalCoordinatorPool")
+    public Executor evalCoordinatorPool(TaskDecorator decorator) {
+        return evalPool(decorator, "eval-coordinator-", 2, 64);
+    }
+
+    @Bean("evalItemPool")
+    public Executor evalItemPool(TaskDecorator decorator) {
+        return evalPool(decorator, "eval-item-", 8, 16);
+    }
+
+    @Bean("evalAgentExecutorPool")
+    public Executor evalAgentExecutorPool(TaskDecorator decorator) {
+        return evalPool(decorator, "eval-agent-", 4, 8);
+    }
+
+    @Bean("evalTeamOrchestrationPool")
+    public Executor evalTeamOrchestrationPool(TaskDecorator decorator) {
+        return evalPool(decorator, "eval-team-", 2, 4);
+    }
+
+    private Executor evalPool(TaskDecorator decorator, String prefix, int capacity, int queueSize) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(capacity);
+        executor.setMaxPoolSize(capacity);
+        executor.setQueueCapacity(queueSize);
+        executor.setThreadNamePrefix(prefix);
+        executor.setTaskDecorator(decorator);
+        executor.initialize();
+        return executor;
+    }
+
     @Bean("toolParallelPool")
     public Executor toolParallelPool(TaskDecorator securityContextTaskDecorator) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();

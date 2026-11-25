@@ -23,7 +23,8 @@ jobs:
         run: |
           {
             echo "Build $(git rev-parse HEAD)"
-            echo "Fixtures $(git rev-parse HEAD:schemaplexai-service/src/test)"
+            echo "Service fixtures $(git rev-parse HEAD:schemaplexai-service/src/test)"
+            echo "Web fixtures $(git rev-parse HEAD:schemaplexai-web/src/test)"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Run fixed trajectory and runtime tests
         run: bash scripts/agent-harness-gate.sh
@@ -31,5 +32,7 @@ jobs:
         if: always()
         with:
           name: agent-harness-${{ github.sha }}
-          path: schemaplexai-service/target/surefire-reports/TEST-*.xml
+          path: |
+            schemaplexai-service/target/surefire-reports/TEST-*.xml
+            schemaplexai-web/target/surefire-reports/TEST-*.xml
           if-no-files-found: error

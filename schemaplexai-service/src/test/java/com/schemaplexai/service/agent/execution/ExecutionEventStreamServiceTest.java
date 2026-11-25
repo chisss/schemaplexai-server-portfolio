@@ -1,11 +1,14 @@
 package com.schemaplexai.service.agent.execution;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.AMQP.BasicProperties;
 import com.schemaplexai.model.entity.AgentExecutionLog;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.core.ChannelCallback;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 
 import java.util.List;
@@ -13,6 +16,8 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -21,7 +26,7 @@ class ExecutionEventStreamServiceTest {
     private final ObjectMapper json = new ObjectMapper().findAndRegisterModules();
     private final AgentLogService logs = mock(AgentLogService.class);
     private final RabbitTemplate rabbit = mock(RabbitTemplate.class);
-    private final ExecutionEventStreamService service = new ExecutionEventStreamService(rabbit, logs, json);
+    private final ExecutionEventStreamService service = new ExecutionEventStreamService(rabbit, logs, json, mock(AgentTerminalEventOutbox.class));
 
     @Test
     void shouldPersistCompletedStepAndKeepIsoDatesAcrossMq() throws Exception {
@@ -54,6 +59,26 @@ class ExecutionEventStreamServiceTest {
         when(logs.recentActivity("root")).thenReturn(List.of(row(tool), row(analysis), row(finished)));
 
         assertThat(service.recentActivity("root")).containsExactly(finished, tool);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void confirmsBrokerDeliveryUsingTheStableEventId() throws Exception {
+        var channel = mock(Channel.class);
+        when(rabbit.getMessageConverter()).thenReturn(new Jackson2JsonMessageConverter());
+        when(rabbit.execute(any(ChannelCallback.class))).thenAnswer(call ->
+                call.<ChannelCallback<Object>>getArgument(0).doInRabbit(channel));
+        var event = AgentExecutionEvent.builder().executionId("root").eventId("root:terminal")
+                .eventType("COMPLETED").build();
+
+        service.publishConfirmed(event);
+
+        var sequence = inOrder(channel);
+        sequence.verify(channel).confirmSelect();
+        var properties = ArgumentCaptor.forClass(BasicProperties.class);
+        sequence.verify(channel).basicPublish(eq("sf.agent.exec.event"), eq(""), properties.capture(), any(byte[].class));
+        assertThat(properties.getValue().getMessageId()).isEqualTo("root:terminal");
+        sequence.verify(channel).waitForConfirmsOrDie(3_000);
     }
 
     private AgentExecutionLog row(AgentExecutionActivity step) throws Exception {

@@ -61,6 +61,10 @@ public class TeamExecutionBudget {
             return new Account(tenantId, rootId, deadlineMs, true);
         }
 
+        public boolean canStartFinalization() {
+            return System.currentTimeMillis() < deadlineMs && forFinalization().remaining() > 0;
+        }
+
         long deadlineMs() {
             return deadlineMs;
         }
