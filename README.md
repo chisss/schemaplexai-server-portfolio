@@ -315,6 +315,9 @@ flowchart LR
 
 ## Harness 思想：让 Agent 像工程系统一样可测试
 
+执行运行时支持 Solo 检查点与工具回执恢复、Solo 和 Team 的任务验收、Team 共享预算，以及固定轨迹 PR 回归。参阅 [运行时 Harness](schemaplexai-service/README.md#agent-执行-harness)。
+
+
 本项目将 Harness 理解为围绕 Agent 的“可控试验场”：模型可以变化，但输入、工具、状态、评测和安全边界必须可记录、可重放、可比较。
 
 - **可回放**：每次执行关联 `executionId`、父子执行、模型轨迹、工具调用、Token 与耗时，便于复现异常路径。

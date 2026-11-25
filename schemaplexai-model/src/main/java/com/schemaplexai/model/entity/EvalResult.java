@@ -1,17 +1,20 @@
 package com.schemaplexai.model.entity;
 
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
+import java.util.Map;
 
 /**
  * 模型评估结果
  */
 @Data
 @EqualsAndHashCode(callSuper = true)
-@TableName("sf_eval_result")
+@TableName(value = "sf_eval_result", autoResultMap = true)
 public class EvalResult extends BaseEntity {
 
     /**
@@ -63,4 +66,30 @@ public class EvalResult extends BaseEntity {
      * 输出长度
      */
     private Integer outputLength;
+
+    /**
+     * TRAJECTORY 模式关联的 Agent 执行 ID（sf_agent_execution.id），轨迹可回放
+     */
+    private String executionId;
+
+    /**
+     * LLM-as-Judge 共识分（0-100，null = 未启用 Judge）
+     */
+    private Integer judgeScore;
+
+    /**
+     * Judge findings 明细（JSONB：维度分/共识/独立问题列表）
+     */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> judgeDetail;
+
+    /**
+     * 执行时快照的数据集输入（历史结果自洽，不随数据集修改漂移）
+     */
+    private String inputSnapshot;
+
+    /**
+     * 执行时快照的期望输出
+     */
+    private String expectedSnapshot;
 }

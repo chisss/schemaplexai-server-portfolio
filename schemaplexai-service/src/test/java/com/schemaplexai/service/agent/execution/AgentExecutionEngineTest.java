@@ -1485,7 +1485,7 @@ class AgentExecutionEngineTest {
                 mock(ObjectProvider.class), new ToolExecutionGate(mock(ToolApprovalAmendmentService.class)),
                 new ExecutionModePolicyResolver(), new ExecutionModePromptContributor(), pendingToolApprovalService,
                 mock(ToolApprovalBatchService.class),
-                executionSteeringService);
+                executionSteeringService, testRecovery().service());
     }
 
     @Test
@@ -2051,6 +2051,65 @@ class AgentExecutionEngineTest {
         return executionFixture(new AgentLoopQualityChecker(null), 0, null, approvals, approvalBatches);
     }
 
+    @Test
+    void shouldResumeModelWithPersistedToolReceiptWithoutRedispatch() {
+        ExecutionFixture fixture = executionFixture();
+        fixture.status().set("running");
+        var request = ToolExecutionRequest.builder().id("previous-write").name("fixture_write").arguments("{}").build();
+        var receipt = ToolExecutionResultMessage.from(request, "已确认结果");
+        when(fixture.recoveryLease().checkpoint()).thenReturn(new AgentRunRecovery.Checkpoint(1, true));
+        when(fixture.recoveryLease().dispatches()).thenReturn(List.of(
+                new AgentRunRecovery.Dispatch(request.id(), request.name(), receipt, false)));
+        when(fixture.memory().loadWindow(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of(UserMessage.from("继续原任务"), AiMessage.from(List.of(request))));
+        when(fixture.params().load(any(), any())).thenReturn(AgentEngineParams.builder().maxRounds(3)
+                .maxMessages(8).maxToolCallsPerRound(3).modelCallTimeoutMillis(8_000L).build());
+        when(fixture.model().chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("任务已完成")).build());
+
+        AgentExecutionResult result = fixture.engine().recover(fixture.context()).join();
+
+        assertThat(result.getStatus()).isEqualTo("completed");
+        var sent = ArgumentCaptor.forClass(ChatRequest.class);
+        verify(fixture.model()).chat(sent.capture());
+        assertThat(sent.getValue().messages()).contains(receipt);
+        verifyNoInteractions(fixture.tool());
+        verify(fixture.memory()).appendMissingToolResults(anyString(), anyString(), eq(List.of(receipt)));
+    }
+
+    @Test
+    void shouldStopRecoveryForUncertainToolResultBeforeCallingTheModel() {
+        ExecutionFixture fixture = executionFixture();
+        fixture.status().set("running");
+        when(fixture.recoveryLease().checkpoint()).thenReturn(new AgentRunRecovery.Checkpoint(1, true));
+        when(fixture.recoveryLease().dispatches()).thenReturn(List.of(
+                new AgentRunRecovery.Dispatch("previous-write", "fixture_write", null, false)));
+
+        AgentExecutionResult result = fixture.engine().recover(fixture.context()).join();
+
+        assertThat(result.getStatus()).isEqualTo("failed");
+        assertThat(result.getEndReason()).isEqualTo(AgentLoopEndReason.RECOVERY_REVIEW_REQUIRED);
+        assertThat(result.getErrorMessage()).contains("previous-write");
+        verifyNoInteractions(fixture.model(), fixture.tool());
+    }
+
+    @Test
+    void shouldRejectACompletedCandidateThatFailsTheExecutionContract() {
+        ExecutionFixture fixture = executionFixture();
+        fixture.context().setAcceptance(new AgentAcceptance(Map.of("/ok", "boolean")));
+        when(fixture.logs().tryFinalizeAcceptance(eq("exec-1"), eq("failed"), anyString(), anyLong(), anyLong(),
+                isNull(), eq(AgentAcceptance.Status.REJECTED))).thenReturn(true);
+        when(fixture.model().chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("{\"ok\":\"yes\"}")).build());
+
+        AgentExecutionResult result = fixture.engine().execute(fixture.context()).join();
+
+        assertThat(result.getStatus()).isEqualTo("failed");
+        assertThat(result.getEndReason()).isEqualTo(AgentLoopEndReason.ACCEPTANCE_REJECTED);
+        verify(fixture.logs(), never()).tryTransitionExecutionStatus(eq("exec-1"), eq("running"),
+                eq("completed"), any(), any(), any(), any());
+    }
+
     private ExecutionFixture executionFixture(AgentLoopQualityChecker checker, int maxReflections) {
         return executionFixture(checker, maxReflections, null);
     }
@@ -2130,6 +2189,7 @@ class AgentExecutionEngineTest {
             });
             return null;
         }).when(store).appendMissingToolResults(anyString(), anyString(), anyList());
+        var recovery = testRecovery();
         AgentExecutionEngine engine = new AgentExecutionEngine(
                 logs, injector, router, executions, new ObjectMapper(),
                 events, sessions, store, params,
@@ -2140,10 +2200,20 @@ class AgentExecutionEngineTest {
                 mock(ToolOutputMaskingService.class), mock(AgentTraceService.class), hooks,
                 mock(AgentContextBudgetService.class), userMessages, guardProvider,
                 new ToolExecutionGate(mock(ToolApprovalAmendmentService.class)), new ExecutionModePolicyResolver(),
-                new ExecutionModePromptContributor(), approvals, approvalBatches, mock(ExecutionSteeringService.class));
+                new ExecutionModePromptContributor(), approvals, approvalBatches, mock(ExecutionSteeringService.class), recovery.service());
         return new ExecutionFixture(engine, approvalRunContext(), status, model, tool, logs, events, executions,
-                guardProvider, store, injector, session, params);
+                guardProvider, store, injector, session, params, recovery.lease());
     }
+
+    private RecoveryFixture testRecovery() {
+        AgentRunRecovery recovery = mock(AgentRunRecovery.class);
+        AgentRunRecovery.Lease lease = mock(AgentRunRecovery.Lease.class);
+        when(lease.checkpoint()).thenReturn(new AgentRunRecovery.Checkpoint(0, true));
+        when(recovery.claim(any(), anyString(), anyBoolean())).thenReturn(lease);
+        return new RecoveryFixture(recovery, lease);
+    }
+
+    private record RecoveryFixture(AgentRunRecovery service, AgentRunRecovery.Lease lease) {}
 
     private AgentExecutionContext approvalRunContext() {
         return AgentExecutionContext.builder().executionId("exec-1")
@@ -2158,7 +2228,8 @@ class AgentExecutionEngineTest {
                                     AgentExecutionMapper executions,
                                     ObjectProvider<SecurityRuntimeGuardService> guardProvider,
                                     CompositeChatMemoryStore memory, ContextInjector injector,
-                                    AgentToolSessionFactory.AgentToolSession session, AgentEngineConfigLoader params) {
+                                    AgentToolSessionFactory.AgentToolSession session, AgentEngineConfigLoader params,
+                                    AgentRunRecovery.Lease recoveryLease) {
     }
 
     private AgentToolSessionFactory.RoundToolContext roundToolContext(

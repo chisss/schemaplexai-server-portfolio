@@ -1,6 +1,8 @@
 package com.schemaplexai.service.agent.runtime;
 
+import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
+import com.schemaplexai.common.enums.AgentStatusEnum;
 import com.schemaplexai.common.enums.AgentTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
@@ -12,6 +14,7 @@ import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentConfig;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
@@ -23,9 +26,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -79,6 +85,55 @@ public class AgentRuntimeOrchestrator {
         return strategyFactory.getStrategy(agent.getAgentType()).execute(agent, execution, context);
     }
 
+    public CompletableFuture<AgentExecutionResult> recover(String executionId) {
+        AgentExecution execution = requireExecution(executionId);
+        Agent agent = requireAgent(execution.getAgentId());
+        if (!AgentExecutionStatusEnum.RUNNING.getCode().equals(execution.getStatus())
+                || StringUtils.hasText(execution.getParentExecutionId())
+                || resolveRuntimeEngine(agent) != AgentRuntimeEngineEnum.SOLO_LANGCHAIN4J) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "只有运行中断的根 Solo 执行支持崩溃续跑");
+        }
+        if (!AgentStatusEnum.ACTIVE.getCode().equals(agent.getStatus())) {
+            throw new BusinessException(ResultCode.AGENT_INACTIVE);
+        }
+        Map<String, Object> snapshot = execution.getSandboxPolicySnapshot();
+        if (snapshot == null || execution.getTemporaryChat() == null) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "执行缺少可恢复的策略快照");
+        }
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .executionId(execution.getId())
+                .agentId(execution.getAgentId())
+                .tenantId(execution.getTenantId())
+                .userId(execution.getCreatedBy())
+                .projectId(execution.getMemoryProjectId())
+                .inputPrompt(execution.getInputPrompt())
+                .model(execution.getAiModel())
+                .agentModelType(agent.getAiModelType())
+                .agentModelGroupId(agent.getAiModelGroupId())
+                .inputContext(execution.getInputContext())
+                .conversationId(execution.getConversationId())
+                .runtimeEngine(AgentRuntimeEngineEnum.SOLO_LANGCHAIN4J.getCode())
+                .executionMode(execution.getExecutionMode())
+                .desktopVerificationCommand(snapshotText(snapshot, DESKTOP_VERIFICATION_SNAPSHOT))
+                .reasoningStrength(snapshotText(snapshot, "reasoningStrength"))
+                .skillCode(snapshotText(snapshot, "skillCode"))
+                .outputFormat(snapshotText(snapshot, "outputFormat"))
+                .stream(Boolean.TRUE.equals(snapshot.get("stream")))
+                .temporaryChat(Boolean.TRUE.equals(execution.getTemporaryChat()))
+                .memoryWriteEnabled(execution.getMemoryWriteEnabled())
+                .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
+                .acceptance(AgentAcceptance.fromSnapshot(snapshot))
+                .build();
+        SandboxPolicy policy = sandboxPolicyResolver.resolve(agent, context);
+        Map<String, Object> currentPolicy = sandboxPolicyResolver.toSnapshot(policy);
+        if (currentPolicy.isEmpty() || currentPolicy.entrySet().stream().anyMatch(
+                entry -> !samePolicyValue(entry.getValue(), snapshot.get(entry.getKey())))) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "执行沙箱策略已变更，需先核对中断任务");
+        }
+        context.setSandboxPolicy(policy);
+        return strategyFactory.getStrategy(agent.getAgentType()).recover(context);
+    }
+
     public CompletableFuture<AgentExecutionResult> resume(String executionId, AgentExecutionInputDTO input) {
         AgentExecution execution = requireExecution(executionId);
         Agent agent = requireAgent(execution.getAgentId());
@@ -105,6 +160,7 @@ public class AgentRuntimeOrchestrator {
                 .inputContext(execution.getInputContext())
                 .conversationId(execution.getConversationId())
                 .runtimeEngine(runtimeEngine.getCode())
+                .acceptance(AgentAcceptance.fromSnapshot(execution.getSandboxPolicySnapshot()))
                 .stream(execution.getSandboxPolicySnapshot() != null
                         && Boolean.TRUE.equals(execution.getSandboxPolicySnapshot().get("stream")))
                 .executionMode(execution.getExecutionMode() != null ? execution.getExecutionMode() : "auto")
@@ -136,6 +192,20 @@ public class AgentRuntimeOrchestrator {
         return strategyFactory.getStrategy(agent.getAgentType()).resume(agent, execution, context, input);
     }
 
+    private boolean samePolicyValue(Object current, Object previous) {
+        if (current instanceof Collection<?> left && previous instanceof Collection<?> right) {
+            return new HashSet<>(left).equals(new HashSet<>(right));
+        }
+        if (current instanceof Number left && previous instanceof Number right) {
+            return left.longValue() == right.longValue();
+        }
+        return Objects.equals(current, previous);
+    }
+
+    private String snapshotText(Map<String, Object> snapshot, String key) {
+        return snapshot.get(key) instanceof String value ? value : null;
+    }
+
     private Map<String, Object> buildRuntimeSnapshot(AgentExecutionContext context, SandboxPolicy sandboxPolicy) {
         Map<String, Object> snapshot = new LinkedHashMap<>(sandboxPolicyResolver.toSnapshot(sandboxPolicy));
         if (context.isStream()) {
@@ -147,6 +217,12 @@ public class AgentRuntimeOrchestrator {
         if (context.getDesktopVerificationCommand() != null) {
             snapshot.put(DESKTOP_VERIFICATION_SNAPSHOT, context.getDesktopVerificationCommand());
         }
+        snapshot.put("reasoningStrength", context.getReasoningStrength());
+        snapshot.put("skillCode", context.getSkillCode());
+        snapshot.put("outputFormat", context.getOutputFormat());
+        if (context.getAcceptance() != null) {
+            snapshot.put(AgentAcceptance.SNAPSHOT_KEY, context.getAcceptance().requiredJson());
+        }
         return snapshot;
     }
 
@@ -157,6 +233,7 @@ public class AgentRuntimeOrchestrator {
         if (agent == null || !StringUtils.hasText(agent.getId())) {
             throw new BusinessException(ResultCode.AGENT_NOT_FOUND);
         }
+        AgentAcceptance acceptance = validateAcceptance(dto);
         AgentExecution execution = new AgentExecution();
         execution.setTenantId(StringUtils.hasText(agent.getTenantId()) ? agent.getTenantId() : SecurityUtil.getCurrentTenantId());
         execution.setAgentId(agent.getId());
@@ -169,6 +246,9 @@ public class AgentRuntimeOrchestrator {
                 ? dto.getConversationId()
                 : UUID.randomUUID().toString().replace("-", ""));
         execution.setStatus("queued");
+        if (acceptance != null) {
+            execution.setAcceptanceStatus(AgentAcceptance.Status.UNVERIFIED.code());
+        }
         agentExecutionMapper.insert(execution);
 
         CompletableFuture<AgentExecutionResult> future = execute(AgentExecutionContext.builder()
@@ -182,6 +262,7 @@ public class AgentRuntimeOrchestrator {
                 .agentModelGroupId(agent.getAiModelGroupId())
                 .inputContext(dto.getContext())
                 .conversationId(execution.getConversationId())
+                .acceptance(acceptance)
                 .attachmentIds(dto.getAttachmentIds())
                 .reasoningStrength(dto.getReasoningStrength())
                 .skillCode(dto.getSkillCode())
@@ -205,6 +286,17 @@ public class AgentRuntimeOrchestrator {
             throw new BusinessException(ResultCode.AI_MODEL_TIMEOUT, "工作流编排 Agent 执行超时");
         } catch (Exception exception) {
             throw new BusinessException(ResultCode.FAIL, "工作流编排 Agent 执行失败: " + exception.getMessage());
+        }
+    }
+
+    public static AgentAcceptance validateAcceptance(AgentExecuteDTO dto) {
+        if (dto.getRequiredOutputJson() == null) {
+            return null;
+        }
+        try {
+            return new AgentAcceptance(dto.getRequiredOutputJson());
+        } catch (IllegalArgumentException exception) {
+            throw new BusinessException(ResultCode.FAIL, exception.getMessage());
         }
     }
 

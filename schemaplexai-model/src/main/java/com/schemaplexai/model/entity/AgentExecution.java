@@ -94,6 +94,9 @@ public class AgentExecution implements Serializable {
     /** 错误信息 */
     private String errorMessage;
 
+    /** 本次任务验收的独立判定。 */
+    private String acceptanceStatus;
+
     /** 执行模式: auto/plan/suggest */
     private String executionMode;
 

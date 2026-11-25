@@ -11,4 +11,7 @@ public class EvalDatasetUpdateRequest {
     private String name;
 
     private String description;
+
+    /** 通过分数线（0-100，可选；null=清除阈值） */
+    private Integer passScoreThreshold;
 }

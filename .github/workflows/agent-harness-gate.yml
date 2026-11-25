@@ -1,0 +1,35 @@
+name: Agent Harness regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  agent-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: '21'
+          cache: maven
+      - name: Record tested build and corpus
+        run: |
+          {
+            echo "Build $(git rev-parse HEAD)"
+            echo "Fixtures $(git rev-parse HEAD:schemaplexai-service/src/test)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run fixed trajectory and runtime tests
+        run: bash scripts/agent-harness-gate.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-harness-${{ github.sha }}
+          path: schemaplexai-service/target/surefire-reports/TEST-*.xml
+          if-no-files-found: error

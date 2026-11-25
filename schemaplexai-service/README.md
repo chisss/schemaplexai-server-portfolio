@@ -56,3 +56,10 @@ Schema 快照链路复用租户数据库 MCP 数据源：
 对外提供 `/semantic/query/interpret`、`/plan`、`/explain`、`/execute` 四阶段 REST 契约。客户端不能提交 graph IRI、原始 SPARQL、SQL、Mongo pipeline 或物理字段映射。
 
 语义层的完整查询流程见[项目说明](../README.md#本体驱动的企业数据查询)。
+
+
+## Agent 执行 Harness
+
+执行 API 支持通过 `requiredOutputJson` 声明交付断言，执行详情以 `acceptanceStatus` 记录结果。根 Solo 执行通过租约和已确认的工具回执恢复，Team 成员共享父执行预算。
+
+用 `bash scripts/agent-harness-gate.sh` 运行公开快照的固定轨迹和运行时测试。数据库迁移及跨进程故障注入使用完整交付环境的迁移资源。

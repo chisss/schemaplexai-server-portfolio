@@ -42,6 +42,7 @@ public class AgentLoopState {
     /** 循环退出原因与基于已收集证据的降级标记 */
     private AgentLoopEndReason endReason;
     private boolean degraded;
+    private AgentAcceptance.Status acceptanceStatus;
 
     /** 质量反思针对的上一版正文，用于抑制同文重试。 */
     private String lastReflectedContent;

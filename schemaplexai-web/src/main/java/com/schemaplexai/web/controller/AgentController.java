@@ -305,6 +305,14 @@ public class AgentController {
         return R.ok(executionEventStreamService.recentActivity(execId));
     }
 
+    @PostMapping("/{id}/executions/{execId}/recover")
+    @Operation(summary = "尝试续跑租约已过期的 Solo 执行")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
+    public R<Void> recoverExecution(@PathVariable String id, @PathVariable String execId) {
+        agentService.recoverExecution(id, execId);
+        return R.ok();
+    }
+
     @PostMapping("/{id}/executions/{execId}/input")
     @Operation(summary = "提交 Human-in-Loop 输入")
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")

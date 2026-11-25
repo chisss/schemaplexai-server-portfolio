@@ -18,6 +18,10 @@ public interface AgentRuntimeStrategy {
 
     CompletableFuture<AgentExecutionResult> execute(Agent agent, AgentExecution execution, AgentExecutionContext context);
 
+    default CompletableFuture<AgentExecutionResult> recover(AgentExecutionContext context) {
+        throw new UnsupportedOperationException("当前执行策略不支持崩溃续跑");
+    }
+
     /**
      * 恢复执行：context 由编排器统一构建（含 sandboxPolicy/executionMode 恢复），
      * 策略实现不得重建上下文，避免恢复路径丢失执行策略。

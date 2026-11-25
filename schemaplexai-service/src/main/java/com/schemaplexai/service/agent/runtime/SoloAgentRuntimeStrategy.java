@@ -32,6 +32,11 @@ public class SoloAgentRuntimeStrategy implements AgentRuntimeStrategy {
     }
 
     @Override
+    public CompletableFuture<AgentExecutionResult> recover(AgentExecutionContext context) {
+        return agentExecutionEngine.recover(context);
+    }
+
+    @Override
     public CompletableFuture<AgentExecutionResult> resume(Agent agent, AgentExecution execution,
                                                           AgentExecutionContext context, AgentExecutionInputDTO input) {
         // 直接使用编排器构建的上下文（含 sandboxPolicy/executionMode），恢复路径不回退默认策略

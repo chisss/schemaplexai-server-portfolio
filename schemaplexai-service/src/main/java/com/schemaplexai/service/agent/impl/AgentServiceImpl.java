@@ -64,6 +64,8 @@ import com.schemaplexai.model.dto.agent.AgentTeamMemberBatchRequest;
 import com.schemaplexai.model.dto.agent.AgentToolBindingBatchRequest;
 import com.schemaplexai.model.dto.agent.AgentUpdateRequest;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
+import com.schemaplexai.service.agent.execution.AgentAcceptance;
+import com.schemaplexai.service.agent.execution.AgentRunRecovery;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
@@ -189,6 +191,7 @@ public class AgentServiceImpl implements AgentService {
     private final ContextEntityMapper contextEntityMapper;
     private final ContextItemMapper contextItemMapper;
     private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
+    private final AgentRunRecovery agentRunRecovery;
     private final AgentLogService agentLogService;
     private final ExecutionEventStreamService executionEventStreamService;
     private final ExecutionSteeringApplicationService executionSteeringApplicationService;
@@ -1318,6 +1321,7 @@ public class AgentServiceImpl implements AgentService {
     public AgentExecuteResultVO execute(String agentId, AgentExecuteDTO dto) {
         requireDesktopConversationOwner(dto.getConversationId());
         boolean workspace = DesktopExecutionTarget.workspaceConversation(dto.getConversationId());
+        var acceptance = AgentRuntimeOrchestrator.validateAcceptance(dto);
         desktopAttachments.validateObjectKeys(dto.getAttachmentIds(), workspace);
         String memoryProjectId = null;
         if (workspace) {
@@ -1338,6 +1342,10 @@ public class AgentServiceImpl implements AgentService {
 
         var execution = new AgentExecution();
         execution.setAgentId(agentId);
+        if (acceptance != null) {
+            execution.setAcceptanceStatus(AgentAcceptance.Status.UNVERIFIED.code());
+            execution.setSandboxPolicySnapshot(Map.of(AgentAcceptance.SNAPSHOT_KEY, acceptance.requiredJson()));
+        }
         execution.setMemoryProjectId(memoryProjectId);
         execution.setInputPrompt(dto.getPrompt());
         execution.setInputContext(dto.getContext());
@@ -1457,6 +1465,7 @@ public class AgentServiceImpl implements AgentService {
                 .temporaryChat(Boolean.TRUE.equals(execution.getTemporaryChat()))
                 .memoryWriteEnabled(execution.getMemoryWriteEnabled())
                 .budgetAdmission(budgetAdmission)
+                .acceptance(acceptance)
                 .build();
         try {
             agentRuntimeOrchestrator.execute(context);
@@ -1648,6 +1657,18 @@ public class AgentServiceImpl implements AgentService {
         }
         DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
         return execution;
+    }
+
+    @Override
+    public void recoverExecution(String agentId, String executionId) {
+        AgentExecution execution = requireExecution(agentId, executionId);
+        if (!isExecutionOwner(execution)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "仅执行创建者可恢复任务");
+        }
+        if (!agentRunRecovery.canRecover(SecurityUtil.getCurrentTenantId(), executionId)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "执行尚未达到可续跑状态");
+        }
+        agentRuntimeOrchestrator.recover(executionId);
     }
 
     @Override
@@ -2050,6 +2071,7 @@ public class AgentServiceImpl implements AgentService {
         vo.setExecutionId(execution.getId());
         vo.setAgentId(execution.getAgentId());
         vo.setStatus(execution.getStatus());
+        vo.setAcceptanceStatus(execution.getAcceptanceStatus());
         vo.setInputPrompt(execution.getInputPrompt());
         vo.setModel(execution.getAiModel());
         vo.setConversationId(execution.getConversationId());

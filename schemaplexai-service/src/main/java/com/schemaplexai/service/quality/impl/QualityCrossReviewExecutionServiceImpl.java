@@ -338,10 +338,13 @@ public class QualityCrossReviewExecutionServiceImpl implements QualityCrossRevie
             }
         }
         List<Map<String, Object>> mergedFindings = aggregated.values().stream()
+                // 链式 reversed() 会反转整个复合比较器：必须放链尾整体取反一次，
+                // 否则第二段起又被反转回升序（共识问题会排到列表最后）
                 .sorted(Comparator
-                        .comparingInt(AggregatedFinding::consensusCount).reversed()
-                        .thenComparingInt(AggregatedFinding::severityRank).reversed()
-                        .thenComparingInt(AggregatedFinding::averageConfidence).reversed())
+                        .comparingInt(AggregatedFinding::consensusCount)
+                        .thenComparingInt(AggregatedFinding::severityRank)
+                        .thenComparingInt(AggregatedFinding::averageConfidence)
+                        .reversed())
                 .map(this::toMergedFindingMap)
                 .toList();
         int averageScore = (int) Math.round(reviews.stream()

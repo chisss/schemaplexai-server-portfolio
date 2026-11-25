@@ -667,7 +667,8 @@ public class AgentModelInvoker {
     }
 
     private long waitSliceMillis(long waitUntil, AgentExecutionBudget budget) {
-        budget.checkActive();
+        // 已发出的模型请求已预占额度，等待时只检查取消与截止时间。
+        budget.checkTimeAndCancellation();
         long remaining = waitUntil - System.nanoTime();
         if (remaining <= 0) {
             return 0;

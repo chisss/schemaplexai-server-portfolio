@@ -20,12 +20,14 @@ import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.model.entity.AgentTeamMemberToolBinding;
+import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
+import com.schemaplexai.service.agent.execution.TeamExecutionBudget;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
@@ -99,7 +101,7 @@ class TeamAgentRuntimeStrategyTest {
                 mock(AgentContextPublisher.class), mock(TeamCheckpointStore.class), mock(DesktopAttachmentService.class),
                 mock(SandboxPolicyResolver.class), mock(ExecutionSteeringService.class),
                 new DefaultTeamQualityDetector(), new TeamConversationArchive(chatMemory, userMemory, new ObjectMapper()),
-                mock(TeamChildApprovalService.class), Runnable::run);
+                mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class), Runnable::run);
 
         var agent = new Agent();
         agent.setId("office-team");
@@ -938,6 +940,29 @@ class TeamAgentRuntimeStrategyTest {
     }
 
     @Test
+    void shouldFailTeamDeliveryWhenLeaderOutputViolatesTheRootAcceptanceContract() {
+        var executions = mock(AgentExecutionMapper.class);
+        var logs = mock(AgentLogService.class);
+        var events = mock(ExecutionEventStreamService.class);
+        var strategy = createStrategy(executions, logs, events);
+        var execution = new AgentExecution();
+        execution.setId("parent");
+        var contract = new AgentAcceptance(Map.of("/ok", "boolean"));
+        var context = AgentExecutionContext.builder().executionId("parent").acceptance(contract).build();
+        when(logs.tryFinalizeAcceptance(eq("parent"), eq("failed"), any(), eq(0L), eq(0L),
+                isNull(), eq(AgentAcceptance.Status.REJECTED))).thenReturn(true);
+        var state = new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                TeamGraphConstants.STATE_FINAL_OUTPUT, "{\"ok\":\"yes\"}"));
+
+        var result = strategy.finalizeExecution(execution, context, state);
+
+        assertThat(result.getStatus()).isEqualTo("failed");
+        assertThat(result.getErrorMessage()).contains("/ok");
+        assertThat(result.getOutputResult()).isNull();
+    }
+
+    @Test
     void shouldFailTeamDeliveryWithoutCurrentDesktopVerificationReceipt() {
         AgentExecutionMapper executions = mock(AgentExecutionMapper.class);
         AgentLogService logs = mock(AgentLogService.class);
@@ -1272,7 +1297,7 @@ class TeamAgentRuntimeStrategyTest {
                 mock(AgentContextPublisher.class), mock(TeamCheckpointStore.class), mock(DesktopAttachmentService.class),
                 mock(SandboxPolicyResolver.class), mock(ExecutionSteeringService.class), new DefaultTeamQualityDetector(),
                 new TeamConversationArchive(mock(CompositeChatMemoryStore.class), mock(UserMemoryExtractionService.class), new ObjectMapper()),
-                mock(TeamChildApprovalService.class),
+                mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class),
                 Runnable::run);
         var agent = new Agent();
         agent.setId("team");
@@ -1445,7 +1470,7 @@ class TeamAgentRuntimeStrategyTest {
                 mock(ExecutionSteeringService.class),
                 new DefaultTeamQualityDetector(),
                 conversationArchive,
-                mock(TeamChildApprovalService.class),
+                mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class),
                 executor
         );
     }

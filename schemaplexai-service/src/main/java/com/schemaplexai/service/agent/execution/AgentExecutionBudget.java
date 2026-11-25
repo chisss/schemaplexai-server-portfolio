@@ -10,7 +10,12 @@ import java.util.function.BooleanSupplier;
 
 /** 单次逻辑执行的时间、用量与取消边界。用量由编排线程累加。 */
 record AgentExecutionBudget(long deadlineMs, long maxTokens, long previousElapsedMillis, long segmentStartedAt,
-                            AgentLoopState state, BooleanSupplier stopped) {
+                            AgentLoopState state, BooleanSupplier stopped, TeamExecutionBudget.Account teamBudget) {
+
+    AgentExecutionBudget(long deadlineMs, long maxTokens, long previousElapsedMillis, long segmentStartedAt,
+                         AgentLoopState state, BooleanSupplier stopped) {
+        this(deadlineMs, maxTokens, previousElapsedMillis, segmentStartedAt, state, stopped, null);
+    }
 
     long elapsedMillis() {
         return previousElapsedMillis + Math.max(0L, System.currentTimeMillis() - segmentStartedAt);
@@ -21,6 +26,11 @@ record AgentExecutionBudget(long deadlineMs, long maxTokens, long previousElapse
     }
 
     long remainingTokens() {
+        long local = localRemainingTokens();
+        return teamBudget == null ? local : Math.min(local, teamBudget.remaining());
+    }
+
+    long localRemainingTokens() {
         return maxTokens - state.getTotalTokenInput() - state.getTotalTokenOutput();
     }
 
@@ -29,14 +39,18 @@ record AgentExecutionBudget(long deadlineMs, long maxTokens, long previousElapse
     }
 
     void checkActive() {
+        checkTimeAndCancellation();
+        if (remainingTokens() <= 0) {
+            throw new BudgetExceededException("累计 Token 预算已用尽");
+        }
+    }
+
+    void checkTimeAndCancellation() {
         if (stopped.getAsBoolean()) {
             throw new CancellationException("用户已停止执行");
         }
         if (remainingMillis() == 0) {
             throw new BudgetExceededException("执行截止时间已过");
-        }
-        if (remainingTokens() <= 0) {
-            throw new BudgetExceededException("累计 Token 预算已用尽");
         }
     }
 
@@ -54,7 +68,15 @@ record AgentExecutionBudget(long deadlineMs, long maxTokens, long previousElapse
         if (request.maxOutputTokens() != null && request.maxOutputTokens() > 0) {
             outputCap = Math.min(outputCap, request.maxOutputTokens());
         }
-        return new ModelAttempt(request.toBuilder().maxOutputTokens(outputCap).build(), inputTokens);
+        long reserved = 0;
+        if (teamBudget != null) {
+            reserved = teamBudget.reserve(inputTokens, inputTokens + outputCap);
+            if (reserved <= inputTokens) {
+                throw new BudgetExceededException("Team 共享 Token 预算不足以发送模型请求");
+            }
+            outputCap = (int) (reserved - inputTokens);
+        }
+        return new ModelAttempt(request.toBuilder().maxOutputTokens(outputCap).build(), inputTokens, reserved);
     }
 
     AttemptUsage recordAttempt(AiModelConfig config, ModelAttempt attempt, ChatResponse response,
@@ -67,10 +89,15 @@ record AgentExecutionBudget(long deadlineMs, long maxTokens, long previousElapse
                 : usage.outputTokenCount();
         var result = new AttemptUsage(Math.max(0L, input), Math.max(0L, output), inputEstimated, outputEstimated);
         state.addTokenUsage(result.input(), result.output());
+        if (teamBudget != null) {
+            // 对于没有完整回执的请求保留全部预占，防止供应商仍在执行时重复分配。
+            long charged = response == null ? attempt.reservedTokens() : result.input() + result.output();
+            teamBudget.settle(attempt.reservedTokens(), charged);
+        }
         return result;
     }
 
-    record ModelAttempt(ChatRequest request, long estimatedInputTokens) {
+    record ModelAttempt(ChatRequest request, long estimatedInputTokens, long reservedTokens) {
     }
 
     record AttemptUsage(long input, long output, boolean inputEstimated, boolean outputEstimated) {

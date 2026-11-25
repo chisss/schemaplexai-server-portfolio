@@ -23,4 +23,9 @@ public class EvalTaskModelSummaryVO {
     private Double successRate;
 
     private Double avgOutputLength;
+
+    /**
+     * 调用失败条数（FAILED 行数，区分"答错了"与"调用挂了"）
+     */
+    private Integer invokeFailCount;
 }

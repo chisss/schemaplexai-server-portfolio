@@ -9,6 +9,7 @@ import com.schemaplexai.service.ai.LangChain4jModelFactory;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import org.junit.jupiter.api.Test;
@@ -22,11 +23,15 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ModelBasedQualityEvaluatorTest {
+
+    // 说明：langchain4j 1.24 的 chat(ChatMessage...) 是默认方法，Mockito mock 上默认方法不执行（返回 null）；
+    // 必须显式 stub 变参方法本身（any(ChatMessage[].class)），stub chat(List) 无效——默认方法不会被转发（2026-11-20 修复）
 
     private final AiModelMapper aiModelMapper = mock(AiModelMapper.class);
     private final LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);

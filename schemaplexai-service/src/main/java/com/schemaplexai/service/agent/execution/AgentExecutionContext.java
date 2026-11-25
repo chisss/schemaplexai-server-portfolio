@@ -6,6 +6,7 @@ import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
 import lombok.Builder;
 import lombok.Data;
+import lombok.ToString;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
@@ -109,6 +110,17 @@ public class AgentExecutionContext {
     private boolean desktopVerificationDelegated;
     /** 编排器选定由此成员完成 Team 最终桌面验收。 */
     private boolean teamDesktopVerificationOwner;
+
+    /** 首次执行固定的任务验收断言。 */
+    private AgentAcceptance acceptance;
+
+    /** Team 根执行持有的共享模型额度，只由运行时绑定。 */
+    private TeamExecutionBudget.Account teamBudget;
+
+    /** 当前执行拥有的普通工具派发账本。 */
+    @ToString.Exclude
+    private AgentRunRecovery.Lease recoveryLease;
+    private boolean recovering;
 
     /** 执行前预算准入快照 */
     private BudgetAdmissionVO budgetAdmission;

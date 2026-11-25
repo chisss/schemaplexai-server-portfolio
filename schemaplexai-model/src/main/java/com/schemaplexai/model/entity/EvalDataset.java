@@ -28,4 +28,9 @@ public class EvalDataset extends BaseEntity {
      * 最近使用时间
      */
     private LocalDateTime lastUsedAt;
+
+    /**
+     * 通过分数线（0-100），null=不启用 PASS/FAIL 判定
+     */
+    private Integer passScoreThreshold;
 }

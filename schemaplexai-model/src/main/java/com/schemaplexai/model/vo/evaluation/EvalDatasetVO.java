@@ -17,6 +17,9 @@ public class EvalDatasetVO {
 
     private String description;
 
+    /** 通过分数线（0-100），null=不启用 PASS/FAIL 判定 */
+    private Integer passScoreThreshold;
+
     private Integer itemCount;
 
     private LocalDateTime lastUsedAt;

@@ -29,6 +29,7 @@ import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.model.entity.ContextItem;
 import com.schemaplexai.service.agent.execution.AgentEngineParams;
+import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext.TeamTaskContextProjection;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
@@ -37,6 +38,7 @@ import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopCompletionHandler.QualityReflectionFeedback;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
+import com.schemaplexai.service.agent.execution.TeamExecutionBudget;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringService;
@@ -147,6 +149,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     private final TeamQualityDetector teamQualityDetector;
     private final TeamConversationArchive conversationArchive;
     private final TeamChildApprovalService teamChildApprovalService;
+    private final TeamExecutionBudget teamExecutionBudget;
     private final Executor teamOrchestrationPool;
     private final LangGraphTeamRuntimeAdapter langGraphRuntimeAdapter = new LangGraphTeamRuntimeAdapter();
 
@@ -164,8 +167,9 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         try {
             return CompletableFuture.completedFuture(run(agent, execution, context, null, true));
         } catch (Exception exception) {
-            boolean allowFallback = context == null || !StringUtils.hasText(context.getDesktopVerificationCommand());
-            return CompletableFuture.completedFuture(finishUnexpectedFailure(execution, exception, "execute", allowFallback));
+            boolean allowFallback = context == null || (context.getAcceptance() == null
+                    && !StringUtils.hasText(context.getDesktopVerificationCommand()));
+            return CompletableFuture.completedFuture(finishUnexpectedFailure(execution, exception, "execute", allowFallback, context));
         }
     }
 
@@ -182,7 +186,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                     boolean beforeFirstRound = input != null && input.isResumeBeforeFirstRound();
                     return run(agent, execution, context, beforeFirstRound ? null : input, false);
                 } catch (Exception exception) {
-                    return finishUnexpectedFailure(execution, exception, "resume", false);
+                    return finishUnexpectedFailure(execution, exception, "resume", false, context);
                 }
             }, teamOrchestrationPool);
         } catch (RejectedExecutionException exception) {
@@ -205,6 +209,8 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
         if (Boolean.FALSE.equals(context.getMemoryWriteEnabled())) {
             execution.setMemoryWriteEnabled(false);
         }
+        context.setTeamBudget(teamExecutionBudget.open(execution.getTenantId(), execution.getId(),
+                context.getSandboxPolicy()));
         List<AgentTeamMember> members = loadMembers(agent.getId());
         if (members.isEmpty()) {
             throw new TeamInputException("Team Agent 未配置成员");
@@ -530,6 +536,8 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .userId(parentContext.getUserId())
                 .projectId(parentContext.getProjectId())
                 .parentExecutionId(parentExecution.getId())
+                .teamBudget(parentContext.getTeamBudget() != null && (ownsVerification || isLeadRole(member.getRoleType()))
+                        ? parentContext.getTeamBudget().forFinalization() : parentContext.getTeamBudget())
                 .teamAgentId(agent.getId())
                 .teamMemberId(member.getId())
                 .teamMemberRoleName(member.getRoleName())
@@ -543,7 +551,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
                 .maxToolCallsPerRound(maxToolCalls)
                 .maxMessages(resolveChildMaxMessages(parentContext, maxRounds, maxToolCalls))
                 .overrideToolBindings(toolBindings)
-                .additionalSystemContexts(loadMemberSystemContexts(member))
+                .additionalSystemContexts(memberSystemContexts(parentContext, member))
                 .runtimeEngine(AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode())
                 .sandboxPolicy(resolveChildSandboxPolicy(agent, parentContext, member))
                 .desktopVerificationCommand(parentContext.getDesktopVerificationCommand())
@@ -1186,7 +1194,22 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             String error = status == AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK
                     && allMembersHadModelChannelFailure(state.memberResults())
                     ? TEAM_MODEL_CHANNEL_UNAVAILABLE : AgentLogService.DESKTOP_VERIFICATION_REQUIRED;
-            return finishFailure(execution, error, false, tokenUsage);
+            return finishExecution(execution, AgentExecutionStatusEnum.FAILED, error, null, tokenUsage,
+                    context.getAcceptance() == null ? null : AgentAcceptance.Status.UNVERIFIED);
+        }
+        if (context.getAcceptance() != null) {
+            if (status == AgentExecutionStatusEnum.COMPLETED || status == AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK) {
+                AgentAcceptance.Verdict verdict = context.getAcceptance().evaluate(state.finalOutput(),
+                        status == AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK);
+                return verdict.passed()
+                        ? finishExecution(execution, status, state.finalError(), state.finalOutput(), tokenUsage, verdict.status())
+                        : finishExecution(execution, AgentExecutionStatusEnum.FAILED, verdict.explanation(), null,
+                                tokenUsage, verdict.status());
+            }
+            if (status == AgentExecutionStatusEnum.FAILED) {
+                return finishExecution(execution, status, state.finalError(), null,
+                        tokenUsage, AgentAcceptance.Status.UNVERIFIED);
+            }
         }
         return switch (status) {
             case PAUSED -> finishExecution(execution, AgentExecutionStatusEnum.PAUSED,
@@ -1212,7 +1235,7 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
     }
 
     private AgentExecutionResult finishUnexpectedFailure(AgentExecution execution, Exception exception,
-                                                         String phase, boolean allowFallback) {
+                                                         String phase, boolean allowFallback, AgentExecutionContext context) {
         Throwable cause = NestedExceptionUtils.getMostSpecificCause(exception);
         log.error("Team Agent 执行失败: executionId={}, phase={}, exceptionType={}, causeType={}",
                 execution.getId(), phase, exception.getClass().getSimpleName(), cause.getClass().getSimpleName());
@@ -1222,7 +1245,8 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             return finishFallback(execution, "模型通道暂不可用", tokenUsage);
         }
         String error = exception instanceof TeamInputException inputError ? inputError.getMessage() : TEAM_EXECUTION_FAILED;
-        return finishExecution(execution, AgentExecutionStatusEnum.FAILED, error, null, tokenUsage);
+        return finishExecution(execution, AgentExecutionStatusEnum.FAILED, error, null, tokenUsage,
+                context != null && context.getAcceptance() != null ? AgentAcceptance.Status.UNVERIFIED : null);
     }
 
     private AgentExecutionResult finishFailure(AgentExecution execution, String error, boolean allowFallback,
@@ -1240,10 +1264,19 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
 
     private AgentExecutionResult finishExecution(AgentExecution execution, AgentExecutionStatusEnum status,
                                                  String error, String output, TokenUsageSummary tokenUsage) {
+        return finishExecution(execution, status, error, output, tokenUsage, null);
+    }
+
+    private AgentExecutionResult finishExecution(AgentExecution execution, AgentExecutionStatusEnum status,
+                                                 String error, String output, TokenUsageSummary tokenUsage,
+                                                 AgentAcceptance.Status acceptanceStatus) {
         String persistedError = status == AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK ? null : error;
-        BooleanSupplier transition = () -> agentLogService.tryTransitionExecutionStatus(
-                execution.getId(), AgentExecutionStatusEnum.RUNNING.getCode(), status.getCode(), persistedError,
-                tokenUsage.inputTokens(), tokenUsage.outputTokens(), output);
+        BooleanSupplier transition = acceptanceStatus == null
+                ? () -> agentLogService.tryTransitionExecutionStatus(execution.getId(),
+                        AgentExecutionStatusEnum.RUNNING.getCode(), status.getCode(), persistedError,
+                        tokenUsage.inputTokens(), tokenUsage.outputTokens(), output)
+                : () -> agentLogService.tryFinalizeAcceptance(execution.getId(), status.getCode(), persistedError,
+                        tokenUsage.inputTokens(), tokenUsage.outputTokens(), output, acceptanceStatus);
         boolean updated = status == AgentExecutionStatusEnum.COMPLETED || status == AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK
                 ? conversationArchive.appendOnTransition(execution, output, transition)
                 : transition.getAsBoolean();
@@ -1965,6 +1998,16 @@ public class TeamAgentRuntimeStrategy implements AgentRuntimeStrategy {
             agentToolBinding.setConfigOverride(binding.getConfigOverride());
             return agentToolBinding;
         }).toList();
+    }
+
+    private List<String> memberSystemContexts(AgentExecutionContext parentContext, AgentTeamMember member) {
+        List<String> contexts = loadMemberSystemContexts(member);
+        if (parentContext.getAcceptance() == null || !isLeadRole(member.getRoleType())) {
+            return contexts;
+        }
+        List<String> withAcceptance = new ArrayList<>(contexts);
+        withAcceptance.add(parentContext.getAcceptance().prompt());
+        return withAcceptance;
     }
 
     private List<String> loadMemberSystemContexts(AgentTeamMember member) {

@@ -153,9 +153,10 @@ public interface AgentService {
      */
     AgentExecutionLogVO getExecutionLog(String agentId, String executionId, String logId);
 
-    /**
-     * 提交执行输入 / 恢复执行
-     */
+    /** 重新领取租约过期的根 Solo 执行。 */
+    void recoverExecution(String agentId, String executionId);
+
+    /** 提交执行输入或恢复已暂停的执行。 */
     void submitExecutionInput(String agentId, String executionId, AgentExecutionInputDTO dto);
 
     /**

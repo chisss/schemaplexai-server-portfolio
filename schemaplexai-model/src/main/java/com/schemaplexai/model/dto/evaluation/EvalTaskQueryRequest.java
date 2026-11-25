@@ -13,4 +13,7 @@ public class EvalTaskQueryRequest {
     private Integer size = 20;
 
     private String status;
+
+    /** 数据集 ID 过滤（任务间纵向对比数据入口） */
+    private String datasetId;
 }

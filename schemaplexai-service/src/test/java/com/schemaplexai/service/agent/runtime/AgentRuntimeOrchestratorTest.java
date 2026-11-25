@@ -1,5 +1,6 @@
 package com.schemaplexai.service.agent.runtime;
 
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.model.dto.agent.AgentExecuteDTO;
@@ -7,6 +8,7 @@ import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentConfig;
 import com.schemaplexai.model.entity.AgentExecution;
+import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
@@ -23,6 +25,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -229,8 +232,33 @@ class AgentRuntimeOrchestratorTest {
         assertThat(inserted.getValue().getMemoryWriteEnabled()).isFalse();
     }
 
+    @Test
+    void shouldRestoreTheFrozenContractAndRejectAChangedSandboxPolicy() {
+        Fixture fixture = new Fixture("solo");
+        fixture.agent.setStatus("active");
+        fixture.execution.setStatus("running");
+        fixture.execution.setTemporaryChat(true);
+        fixture.execution.setMemoryWriteEnabled(false);
+        fixture.execution.setSandboxPolicySnapshot(Map.of(
+                "allowedToolCodes", List.of("read"), AgentAcceptance.SNAPSHOT_KEY, Map.of("/ok", "boolean")));
+        when(fixture.sandbox.toSnapshot(any())).thenReturn(Map.of("allowedToolCodes", List.of("read")));
+
+        fixture.runtime.recover("exec");
+
+        var recovered = ArgumentCaptor.forClass(AgentExecutionContext.class);
+        verify(fixture.strategy).recover(recovered.capture());
+        assertThat(recovered.getValue().getAcceptance()).isEqualTo(new AgentAcceptance(Map.of("/ok", "boolean")));
+        assertThat(recovered.getValue().isTemporaryChat()).isTrue();
+        assertThat(recovered.getValue().getMemoryWriteEnabled()).isFalse();
+
+        when(fixture.sandbox.toSnapshot(any())).thenReturn(Map.of("allowedToolCodes", List.of("read", "write")));
+        assertThatThrownBy(() -> fixture.runtime.recover("exec"))
+                .isInstanceOf(BusinessException.class).hasMessageContaining("沙箱策略已变更");
+    }
+
     private static final class Fixture {
         private final AgentExecutionMapper executions = mock(AgentExecutionMapper.class);
+        private final SandboxPolicyResolver sandbox = mock(SandboxPolicyResolver.class);
         private final AgentConfigHandler configs = mock(AgentConfigHandler.class);
         private final AgentRuntimeStrategy strategy = mock(AgentRuntimeStrategy.class);
         private final Agent agent = new Agent();
@@ -240,7 +268,6 @@ class AgentRuntimeOrchestratorTest {
         private Fixture(String agentType) {
             AgentMapper agents = mock(AgentMapper.class);
             AgentRuntimeStrategyFactory strategies = mock(AgentRuntimeStrategyFactory.class);
-            SandboxPolicyResolver sandbox = mock(SandboxPolicyResolver.class);
             agent.setId("agent");
             agent.setTenantId("tenant");
             agent.setAgentType(agentType);

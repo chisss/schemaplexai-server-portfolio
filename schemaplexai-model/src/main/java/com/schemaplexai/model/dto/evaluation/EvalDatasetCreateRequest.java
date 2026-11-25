@@ -17,6 +17,9 @@ public class EvalDatasetCreateRequest {
 
     private String description;
 
+    /** 通过分数线（0-100，可选；null=不启用 PASS/FAIL 判定） */
+    private Integer passScoreThreshold;
+
     @Valid
     private List<EvalDatasetItemRequest> items;
 }

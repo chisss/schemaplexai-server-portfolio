@@ -40,6 +40,9 @@ public class AgentExecuteDTO {
     /** 期望输出格式：markdown / plain_text / structured_json */
     private String outputFormat;
 
+    /** 可选验收断言，键为 JSON Pointer，值为要求的 JSON 类型。 */
+    private Map<String, String> requiredOutputJson;
+
     /** 执行模式: auto / plan / suggest（默认 auto） */
     private String executionMode;
 

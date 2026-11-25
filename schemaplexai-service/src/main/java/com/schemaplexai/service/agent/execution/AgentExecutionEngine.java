@@ -184,6 +184,7 @@ public class AgentExecutionEngine {
     private final PendingToolApprovalService   pendingToolApprovalService;
     private final ToolApprovalBatchService     toolApprovalBatchService;
     private final ExecutionSteeringService     executionSteeringService;
+    private final AgentRunRecovery              runRecovery;
     private final TokenEstimatorSupport        tokenEstimatorSupport = new TokenEstimatorSupport();
 
     @Qualifier("agentExecutorPool")
@@ -221,52 +222,70 @@ public class AgentExecutionEngine {
             log.error("Agent 执行上下文非法: {}", ctx);
             return done(AgentExecutionResult.builder().status(STATUS_FAILED).endReason(AgentLoopEndReason.INVALID_INPUT).errorMessage("执行上下文缺失").build());
         }
-        long startMs = System.currentTimeMillis();
-        if (!agentLogService.tryTransitionExecutionStatus(ctx.getExecutionId(), STATUS_QUEUED, STATUS_RUNNING,
-                null, null, null, null)) {
-            return done(currentExecutionResult(ctx.getExecutionId(), 0));
-        }
-        AgentLoopState state = newLoopState(ctx, startMs, null);
-        log.info("Agent 执行开始: executionId={}, agentId={}, model={}", ctx.getExecutionId(), ctx.getAgentId(), ctx.getModel());
-        try {
-            return done(doExecute(ctx, null, startMs, state));
-        } catch (Exception e) {
-            log.error("Agent 执行异常: executionId={}", ctx.getExecutionId(), e);
-            recordBudgetFailureReason(state, e);
-            return done(buildFailedResult(ctx.getExecutionId(), ctx.getAgentId(), ctx.getTenantId(),
-                    state.getLastRound(), state, startMs, resolveExMsg(e)));
-        }
+        return done(runClaimed(ctx, null, false));
     }
 
-    /**
-     * 异步恢复 Agent 执行（人工输入后继续）
-     */
+    /** 异步恢复 Agent 执行，沿用人工审批契约。 */
     @Async("agentExecutorPool")
     public CompletableFuture<AgentExecutionResult> resume(AgentExecutionContext ctx, AgentExecutionInputDTO input) {
         if (!isValidContext(ctx) || input == null) {
-            log.error("Agent 恢复上下文非法: ctx={}, input={}", ctx, input);
-            return done(AgentExecutionResult.builder().status(STATUS_FAILED).endReason(AgentLoopEndReason.INVALID_INPUT).errorMessage("恢复执行上下文缺失").build());
+            return done(AgentExecutionResult.builder().status(STATUS_FAILED).endReason(AgentLoopEndReason.INVALID_INPUT)
+                    .errorMessage("恢复执行上下文缺失").build());
         }
-        long startMs = System.currentTimeMillis();
-        AgentExecution paused = agentExecutionMapper.selectById(ctx.getExecutionId());
         if (pendingToolApprovalService.findActivePending(ctx.getExecutionId())
                 .filter(pending -> !pending.getId().equals(input.getApprovalId())).isPresent()) {
             return done(currentExecutionResult(ctx.getExecutionId(), 0));
         }
-        if (!agentLogService.tryTransitionExecutionStatus(ctx.getExecutionId(), STATUS_PAUSED, STATUS_RUNNING,
-                null, null, null, null)) {
-            return done(currentExecutionResult(ctx.getExecutionId(), 0));
+        return done(runClaimed(ctx, input, false));
+    }
+
+    /** 在租约已失效时领取并恢复同一执行。 */
+    @Async("agentExecutorPool")
+    public CompletableFuture<AgentExecutionResult> recover(AgentExecutionContext ctx) {
+        return done(runClaimed(ctx, null, true));
+    }
+
+    private AgentExecutionResult runClaimed(AgentExecutionContext ctx, AgentExecutionInputDTO input, boolean recovering) {
+        String executionId = ctx.getExecutionId();
+        String expected = recovering ? STATUS_RUNNING : input == null ? STATUS_QUEUED : STATUS_PAUSED;
+        boolean root = !StringUtils.hasText(ctx.getParentExecutionId());
+        AgentRunRecovery.Lease lease = root ? runRecovery.claim(ctx, expected, recovering) : null;
+        if ((root || recovering) && lease == null) {
+            return currentExecutionResult(executionId, 0);
         }
-        AgentLoopState state = newLoopState(ctx, startMs, paused);
-        log.info("Agent 恢复执行: executionId={}, agentId={}", ctx.getExecutionId(), ctx.getAgentId());
-        try {
-            // 准入风控暂停先于首次模型调用，还没有可追加恢复消息的历史。
-            return done(doExecute(ctx, input.isResumeBeforeFirstRound() ? null : input, startMs, state));
-        } catch (Exception e) {
-            log.error("Agent 恢复执行异常: executionId={}", ctx.getExecutionId(), e);
-            recordBudgetFailureReason(state, e);
-            return done(buildFailedResult(ctx.getExecutionId(), ctx.getAgentId(), ctx.getTenantId(),
-                    state.getLastRound(), state, startMs, resolveExMsg(e)));
+        try (lease) {
+            if (lease != null) {
+                lease.bind();
+            }
+            ctx.setRecoveryLease(lease);
+            ctx.setRecovering(recovering);
+            long startMs = System.currentTimeMillis();
+            AgentExecution previous = input != null || recovering ? agentExecutionMapper.selectById(executionId) : null;
+            if (!recovering && !agentLogService.tryTransitionExecutionStatus(executionId, expected, STATUS_RUNNING,
+                    null, null, null, null)) {
+                return currentExecutionResult(executionId, 0);
+            }
+            AgentLoopState state = newLoopState(ctx, startMs, previous);
+            try {
+                if (recovering && !lease.checkpoint().recoverable()) {
+                    state.setEndReason(AgentLoopEndReason.RECOVERY_REVIEW_REQUIRED);
+                    return buildFailedResult(executionId, ctx.getAgentId(), ctx.getTenantId(), 0, state, startMs,
+                            "执行在审批或初始化边界中断，需核对执行状态后重新发起任务");
+                }
+                if (recovering) {
+                    state.setLastRound(lease.checkpoint().round());
+                }
+                return doExecute(ctx, input != null && input.isResumeBeforeFirstRound() ? null : input, startMs, state);
+            } catch (AgentRunRecovery.LostOwnershipException e) {
+                return currentExecutionResult(executionId, state.getLastRound());
+            } catch (Exception e) {
+                log.error("Agent 执行异常: executionId={}", executionId, e);
+                recordBudgetFailureReason(state, e);
+                return buildFailedResult(executionId, ctx.getAgentId(), ctx.getTenantId(),
+                        state.getLastRound(), state, startMs, resolveExMsg(e));
+            } finally {
+                ctx.setRecoveryLease(null);
+            }
         }
     }
 
@@ -279,6 +298,9 @@ public class AgentExecutionEngine {
 
     private AgentLoopState newLoopState(AgentExecutionContext ctx, long startMs, AgentExecution paused) {
         AgentLoopState state = new AgentLoopState();
+        if (ctx.getAcceptance() != null) {
+            state.setAcceptanceStatus(AgentAcceptance.Status.UNVERIFIED);
+        }
         long usedMillis = 0L;
         if (paused != null) {
             state.addTokenUsage(tokenCount(paused.getTokenInput()), tokenCount(paused.getTokenOutput()));
@@ -292,9 +314,12 @@ public class AgentExecutionEngine {
         if (ctx.getExecutionDeadlineEpochMillis() != null) {
             deadline = Math.min(deadline, ctx.getExecutionDeadlineEpochMillis());
         }
+        if (ctx.getTeamBudget() != null) {
+            deadline = Math.min(deadline, ctx.getTeamBudget().deadlineMs());
+        }
         ctx.setExecutionDeadlineEpochMillis(deadline);
         state.setBudget(new AgentExecutionBudget(deadline, resolveMaxTokenBudget(ctx), usedMillis, startMs, state,
-                () -> isStopped(ctx.getExecutionId())));
+                () -> isStopped(ctx.getExecutionId()), ctx.getTeamBudget()));
         return state;
     }
 
@@ -357,7 +382,12 @@ public class AgentExecutionEngine {
         // 添加用户消息（首次执行或恢复执行）
         TaskContextInput projectableInput = null;
         UserMessage initialUserMessage = null;
-        if (resumeInput == null) {
+        if (ctx.isRecovering()) {
+            AgentExecutionResult recoveryFailure = restoreToolRound(ctx, chatMemory, state, startMs);
+            if (recoveryFailure != null) {
+                return recoveryFailure;
+            }
+        } else if (resumeInput == null) {
             String authoredPrompt = StringUtils.hasText(ctx.getParentExecutionId())
                     ? null : ctx.getInputPrompt();
             UserMessage message = buildUserMessage(ctx);
@@ -438,7 +468,11 @@ public class AgentExecutionEngine {
                 return approvalResumeResult;
             }
 
-            for (int round = 1; round <= maxLoopRounds; round++) {
+            int firstRound = ctx.getRecoveryLease() == null ? 1 : Math.max(state.getLastRound(),
+                    ctx.getRecoveryLease().checkpoint().round()) + 1;
+            checkpoint(ctx, state, firstRound - 1);
+            int lastAllowedRound = resumeInput != null ? firstRound + maxLoopRounds - 1 : maxLoopRounds;
+            for (int round = firstRound; round <= lastAllowedRound; round++) {
                 state.setLastRound(round);
 
                 // 检查是否被用户停止
@@ -465,7 +499,7 @@ public class AgentExecutionEngine {
                 String verificationReminder = state.isQualityReflectionPending() ? null : state.getDesktopVerificationReminder();
                 if (verificationReminder != null) state.setDesktopVerificationReminder(null);
                 boolean teamVerificationDeadline = ctx.isTeamDesktopVerificationOwner()
-                        && round > 1 && maxLoopRounds - round + 1 <= DESKTOP_FINAL_VERIFICATION_ROUNDS;
+                        && round > firstRound && lastAllowedRound - round + 1 <= DESKTOP_FINAL_VERIFICATION_ROUNDS;
                 boolean verificationUrgent = teamVerificationDeadline
                         || lastModelTokens > remainingBeforeModel / DESKTOP_FINAL_VERIFICATION_ROUNDS;
                 if ((!verificationBudgetReminderSent || verificationUrgent && !finalVerificationBudgetReminderSent)
@@ -574,7 +608,7 @@ public class AgentExecutionEngine {
                 // 处理 AI 响应
                 ChatResponse response = callResult.response();
                 publishActivity(ctx, finishAnalysis(analysis, response.aiMessage()));
-                if (budget.remainingMillis() == 0 || budget.remainingTokens() < 0) {
+                if (budget.remainingMillis() == 0 || budget.localRemainingTokens() < 0) {
                     break;
                 }
                 AiMessage aiMsg = response.aiMessage();
@@ -619,7 +653,7 @@ public class AgentExecutionEngine {
 
                 // 无工具调用分支
                 if (allRequests.isEmpty()) {
-                    if (!verificationCorrectionSent && guideDesktopVerification && round < maxLoopRounds
+                    if (!verificationCorrectionSent && guideDesktopVerification && round < lastAllowedRound
                             && !isOutputTruncated(finishReason) && StringUtils.hasText(lastContent)
                             && roundCtx.isDesktopTool("sys_bash") && budget.canDispatch()
                             && !agentLogService.hasCurrentDesktopVerification(ctx)) {
@@ -821,6 +855,8 @@ public class AgentExecutionEngine {
         executionEventStreamService.publishSimple(executionId, "TOOL_CALL", round,
                 "开始执行工具调用(" + limited.size() + "/" + toolCalls.size() + "个)", startMs);
         chatMemory.add(aiMsg);
+        // 模型消息已落盘，工具可以在此边界以后领取。
+        checkpoint(ctx, state, round);
 
         List<ToolResult> toolResults = new ArrayList<>();
         int execCount = limited.size();
@@ -879,6 +915,9 @@ public class AgentExecutionEngine {
                 continue;
             }
             if (decision.getDecision() == ToolExecutionDecisionEnum.PAUSE_APPROVAL) {
+                if (ctx.getRecoveryLease() != null) {
+                    ctx.getRecoveryLease().requireReview();
+                }
                 callStatuses.put(req.id(), ToolApprovalBatchService.CALL_STATUS_PENDING_APPROVAL);
                 ToolApprovalBatch batch = toolApprovalBatchService.createBatch(
                         tenantId, agentId, executionId, conversationId, round, aiMsg.toolExecutionRequests(), callStatuses);
@@ -951,7 +990,7 @@ public class AgentExecutionEngine {
         List<ToolExecutionOutcome> outcomes = toolHandler.executeBatch(
                 approvedRequests, compressionOptions, isParallel ? toolParallelPool : null,
                 params.getMaxParallelTools(), roundCtx.ioTypeIndex(), state.getBudget()::canDispatch,
-                request -> executeWithActivity(ctx, roundCtx, request, compressionOptions, round));
+                request -> executeTrackedTool(ctx, roundCtx, request, compressionOptions, round));
         // 发送并行工具组完成事件
         if (isParallel) {
             executionEventStreamService.publishWithPayload(executionId,
@@ -1601,6 +1640,9 @@ public class AgentExecutionEngine {
 
         String message = StringUtils.hasText(interrupted.getErrorMessage())
                 ? interrupted.getErrorMessage() : "工具执行命中安全策略";
+        if (ctx.getRecoveryLease() != null) {
+            ctx.getRecoveryLease().requireReview();
+        }
         Map<String, Object> payload = Map.of("toolCode", interrupted.getToolCode(),
                 "controlAction", interrupted.getControlAction());
 
@@ -1621,8 +1663,7 @@ public class AgentExecutionEngine {
                     .tokenOutput(state.getTotalTokenOutput()).rounds(round).build();
         }
         if (SecurityComplianceConstant.DECISION_BLOCK.equals(interrupted.getControlAction())) {
-            if (!agentLogService.tryTransitionExecutionStatus(executionId, STATUS_RUNNING, STATUS_FAILED,
-                    message, state.getTotalTokenInput(), state.getTotalTokenOutput(), null)) {
+            if (!tryFinalize(executionId, STATUS_FAILED, message, null, state)) {
                 return currentExecutionResult(executionId, round);
             }
             discardPendingSteeringOnTerminal(executionId);
@@ -1843,15 +1884,25 @@ public class AgentExecutionEngine {
         }
         String sanitized = state.getSecurityCheckedContent();
         state.setLastContent(sanitized);
+        if (ctx.getAcceptance() != null) {
+            AgentAcceptance.Verdict verdict = ctx.getAcceptance().evaluate(sanitized, state.isDegraded());
+            state.setAcceptanceStatus(verdict.status());
+            if (!verdict.passed()) {
+                state.setEndReason(AgentLoopEndReason.ACCEPTANCE_REJECTED);
+                return buildFailedResult(executionId, agentId, tenantId, state.getLastRound(), state, startMs,
+                        verdict.explanation());
+            }
+        }
         if (state.getEndReason() == null) {
             state.setEndReason(AgentLoopEndReason.MODEL_COMPLETED);
         }
-        String completedStatus = state.isDegraded() && StringUtils.hasText(ctx.getDesktopVerificationCommand())
-                && DesktopExecutionTarget.from(ctx.getInputContext()) != null
+        boolean partial = state.getAcceptanceStatus() == AgentAcceptance.Status.PARTIAL;
+        boolean desktopFallback = state.isDegraded() && StringUtils.hasText(ctx.getDesktopVerificationCommand())
+                && DesktopExecutionTarget.from(ctx.getInputContext()) != null;
+        String completedStatus = partial || desktopFallback
                 ? AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode() : STATUS_COMPLETED;
 
-        if (!agentLogService.tryTransitionExecutionStatus(executionId, STATUS_RUNNING, completedStatus,
-                null, state.getTotalTokenInput(), state.getTotalTokenOutput(), sanitized)) {
+        if (!tryFinalize(executionId, completedStatus, null, sanitized, state)) {
             return currentExecutionResult(executionId, state.getLastRound());
         }
         // 终态清理：执行完成后残留的 pending 引导不再消费
@@ -1917,8 +1968,7 @@ public class AgentExecutionEngine {
                     ? securityDecision.getMessage() : "输出内容命中安全策略";
             if (SecurityComplianceConstant.DECISION_BLOCK.equals(decision)) {
                 state.setEndReason(AgentLoopEndReason.SECURITY_BLOCKED);
-                if (!agentLogService.tryTransitionExecutionStatus(executionId, STATUS_RUNNING, STATUS_FAILED,
-                        message, state.getTotalTokenInput(), state.getTotalTokenOutput(), null)) {
+                if (!tryFinalize(executionId, STATUS_FAILED, message, null, state)) {
                     return currentExecutionResult(executionId, state.getLastRound());
                 }
                 // 终态清理：执行失败后残留的 pending 引导不再消费
@@ -1970,14 +2020,23 @@ public class AgentExecutionEngine {
         return null;
     }
 
+    private boolean tryFinalize(String executionId, String status, String error, String output,
+                                AgentLoopState state) {
+        if (state.getAcceptanceStatus() != null) {
+            return agentLogService.tryFinalizeAcceptance(executionId, status, error,
+                    state.getTotalTokenInput(), state.getTotalTokenOutput(), output, state.getAcceptanceStatus());
+        }
+        return agentLogService.tryTransitionExecutionStatus(executionId, STATUS_RUNNING, status,
+                error, state.getTotalTokenInput(), state.getTotalTokenOutput(), output);
+    }
+
     /** 构建失败结果并更新执行状态 */
     private AgentExecutionResult buildFailedResult(String executionId, String agentId, String tenantId,
                                                     int round, AgentLoopState state, long startMs, String errorMessage) {
         if (state.getEndReason() == null) {
             state.setEndReason(AgentLoopEndReason.INTERNAL_ERROR);
         }
-        if (!agentLogService.tryTransitionExecutionStatus(executionId, STATUS_RUNNING, STATUS_FAILED,
-                errorMessage, state.getTotalTokenInput(), state.getTotalTokenOutput(), null)) {
+        if (!tryFinalize(executionId, STATUS_FAILED, errorMessage, null, state)) {
             return currentExecutionResult(executionId, round);
         }
         // 终态清理：执行失败后残留的 pending 引导不再消费
@@ -2065,6 +2124,9 @@ public class AgentExecutionEngine {
 
     private Map<String, Object> completionPayload(AgentLoopState state, String content) {
         var payload = new LinkedHashMap<String, Object>();
+        if (state.getAcceptanceStatus() != null) {
+            payload.put("acceptanceStatus", state.getAcceptanceStatus().code());
+        }
         payload.put("endReason", state.getEndReason().name());
         payload.put("degraded", state.isDegraded());
         if (StringUtils.hasText(content)) {
@@ -2135,6 +2197,72 @@ public class AgentExecutionEngine {
         String summary = commentary != null ? activityPreview(commentary.replaceAll("\\s+", " "), 96)
                 : calls > 0 ? "计划调用 " + calls + " 个工具" : "本轮模型分析完成";
         return analysis.finish(true, summary, commentary, Map.of());
+    }
+
+    private ToolExecutionOutcome executeTrackedTool(AgentExecutionContext context,
+                                                    AgentToolSessionFactory.RoundToolContext roundContext,
+                                                    ToolExecutionRequest request,
+                                                    AgentLoopToolHandler.ToolResultCompressionOptions options,
+                                                    int round) {
+        AgentRunRecovery.Lease lease = context.getRecoveryLease();
+        if (lease != null) {
+            lease.claimTool(round, request);
+        }
+        ToolExecutionOutcome outcome = executeWithActivity(context, roundContext, request, options, round);
+        if (lease != null) {
+            lease.recordTool(round, outcome);
+        }
+        return outcome;
+    }
+
+    private void checkpoint(AgentExecutionContext context, AgentLoopState state, int round) {
+        if (context.getRecoveryLease() != null) {
+            context.getRecoveryLease().checkpoint(round, state.getTotalTokenInput(), state.getTotalTokenOutput(),
+                    state.getBudget().elapsedMillis());
+        }
+    }
+
+    private AgentExecutionResult restoreToolRound(AgentExecutionContext context, ArchivedChatMemory memory,
+                                                  AgentLoopState state, long startMs) {
+        var dispatches = context.getRecoveryLease().dispatches();
+        var unresolved = dispatches.stream()
+                .filter(call -> call.receipt() == null || call.requiresReview())
+                .map(call -> call.tool() + " (" + call.id() + ")").sorted().toList();
+        if (!unresolved.isEmpty()) {
+            state.setEndReason(AgentLoopEndReason.RECOVERY_REVIEW_REQUIRED);
+            return buildFailedResult(context.getExecutionId(), context.getAgentId(), context.getTenantId(),
+                    state.getLastRound(), state, startMs, "派发结果需人工核对：" + String.join("、", unresolved));
+        }
+        var recorded = dispatches.stream().collect(Collectors.toMap(AgentRunRecovery.Dispatch::id,
+                AgentRunRecovery.Dispatch::receipt));
+        List<ChatMessage> messages = new ArrayList<>(memory.messages());
+        int assistantIndex = messages.size() - 1;
+        while (assistantIndex >= 0 && messages.get(assistantIndex) instanceof ToolExecutionResultMessage) {
+            assistantIndex--;
+        }
+        if (assistantIndex < 0 || !(messages.get(assistantIndex) instanceof AiMessage assistant)
+                || !assistant.hasToolExecutionRequests()) {
+            return null;
+        }
+
+        Map<String, ToolExecutionResultMessage> priorResults = new LinkedHashMap<>();
+        for (int index = assistantIndex + 1; index < messages.size(); index++) {
+            var result = (ToolExecutionResultMessage) messages.get(index);
+            priorResults.put(result.id(), result);
+        }
+        List<ToolExecutionResultMessage> results = assistant.toolExecutionRequests().stream().map(request -> {
+            ToolExecutionResultMessage present = priorResults.get(request.id());
+            if (present != null) {
+                return present;
+            }
+            return recorded.getOrDefault(request.id(), ToolExecutionResultMessage.builder().id(request.id())
+                    .toolName(request.name()).text("执行中断，本次调用没有取得派发记录。").isError(true).build());
+        }).toList();
+        memory.recordResumedToolResults(results);
+        messages.subList(assistantIndex + 1, messages.size()).clear();
+        messages.addAll(results);
+        memory.set(messages);
+        return null;
     }
 
     private ToolExecutionOutcome executeWithActivity(AgentExecutionContext ctx,
@@ -2370,7 +2498,9 @@ public class AgentExecutionEngine {
                 }
             }
         }
-        if (StringUtils.hasText(ctx.getOutputFormat())) {
+        if (ctx.getAcceptance() != null) {
+            additionalContexts.add(ctx.getAcceptance().prompt());
+        } else if (StringUtils.hasText(ctx.getOutputFormat())) {
             switch (ctx.getOutputFormat().trim().toLowerCase()) {
                 case "markdown" -> additionalContexts.add("输出格式要求：请使用 Markdown 输出，适当使用标题、列表、表格和代码块。");
                 case "plain_text" -> additionalContexts.add("输出格式要求：请使用纯文本输出，不要添加 Markdown 标记。");

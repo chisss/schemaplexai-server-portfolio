@@ -126,6 +126,14 @@ public class AgentLogService {
                 errorMessage, tokenInput, tokenOutput, outputResult, null);
     }
 
+    /** 验收判定和业务终态必须由同一次条件更新提交。 */
+    public boolean tryFinalizeAcceptance(String executionId, String targetStatus, String errorMessage,
+                                         Long tokenInput, Long tokenOutput, String outputResult,
+                                         AgentAcceptance.Status acceptanceStatus) {
+        return updateExecutionStatus(executionId, AgentExecutionStatusEnum.RUNNING.getCode(), targetStatus,
+                errorMessage, tokenInput, tokenOutput, outputResult, null, acceptanceStatus);
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public boolean createTeamChildWhileParentRunning(AgentExecution child) {
         // 与同一父执行的取消写入排序，锁只覆盖子记录插入。
@@ -158,7 +166,19 @@ public class AgentLogService {
     private boolean updateExecutionStatus(String executionId, String expectedStatus, String status,
                                           String errorMessage, Long tokenInput, Long tokenOutput,
                                           String outputResult, Long runtimeElapsedMillis) {
+        return updateExecutionStatus(executionId, expectedStatus, status, errorMessage,
+                tokenInput, tokenOutput, outputResult, runtimeElapsedMillis, null);
+    }
+
+    private boolean updateExecutionStatus(String executionId, String expectedStatus, String status,
+                                          String errorMessage, Long tokenInput, Long tokenOutput,
+                                          String outputResult, Long runtimeElapsedMillis,
+                                          AgentAcceptance.Status acceptanceStatus) {
         AgentExecution update = new AgentExecution();
+        if (acceptanceStatus != null) {
+            update.setAcceptanceStatus(acceptanceStatus.code());
+        }
+
         update.setId(executionId);
         update.setStatus(status);
         update.setErrorMessage(errorMessage);
@@ -184,6 +204,16 @@ public class AgentLogService {
 
         LambdaUpdateWrapper<AgentExecution> condition = new LambdaUpdateWrapper<AgentExecution>()
                 .eq(AgentExecution::getId, executionId);
+        if (AgentExecutionStatusEnum.PAUSED.getCode().equals(status)) {
+            condition.setSql(TeamExecutionBudget.FREEZE_ON_PAUSE);
+        }
+        String recoveryOwner = AgentRunRecovery.currentOwner(executionId);
+        if (recoveryOwner != null) {
+            condition.apply("harness_owner = {0}::uuid AND harness_lease_until > clock_timestamp()", recoveryOwner);
+            if (AgentExecutionStatusEnum.PAUSED.getCode().equals(status)) {
+                condition.setSql("harness_lease_until = clock_timestamp()");
+            }
+        }
         if (expectedStatus == null) {
             condition.ne(AgentExecution::getStatus, AgentExecutionStatusEnum.STOPPED.getCode());
         } else {

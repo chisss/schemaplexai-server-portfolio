@@ -21,6 +21,9 @@ public class AgentExecutionVO {
     /** 状态: queued/running/completed/failed/stopped */
     private String status;
 
+    /** 任务验收状态，历史无验收要求的执行为空。 */
+    private String acceptanceStatus;
+
     /** 输入指令 */
     private String inputPrompt;
 

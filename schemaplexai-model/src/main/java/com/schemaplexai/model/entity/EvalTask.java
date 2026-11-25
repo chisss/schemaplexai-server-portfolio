@@ -34,6 +34,28 @@ public class EvalTask extends BaseEntity {
     private List<String> modelIds;
 
     /**
+     * 评估类型：QA=单轮问答（默认），TRAJECTORY=Agent 执行轨迹
+     */
+    private String taskType;
+
+    /**
+     * TRAJECTORY 模式被测 Agent ID 列表
+     */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private List<String> agentIds;
+
+    /**
+     * LLM-as-Judge 模型 ID 列表（空 = 退化纯规则分）
+     */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private List<String> judgeModelIds;
+
+    /**
+     * 任务创建时从数据集快照的通过分数线（历史判定自洽）
+     */
+    private Integer passScoreThreshold;
+
+    /**
      * 任务状态：PENDING/RUNNING/DONE/FAILED
      */
     private String status;

@@ -22,6 +22,7 @@ import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.AgentLoopQualityChecker;
 import com.schemaplexai.service.agent.execution.AgentLogService;
+import com.schemaplexai.service.agent.execution.TeamExecutionBudget;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringService;
@@ -78,7 +79,7 @@ class TeamAgentRuntimeStrategyCheckpointTest {
 
     private static final String DATASOURCE_URL = System.getenv().getOrDefault(
             "DB_TEST_URL", "jdbc:postgresql://localhost:5432/schemaplexai?stringtype=unspecified");
-    private static final String DATASOURCE_USERNAME = "schemaplexai";
+    private static final String DATASOURCE_USERNAME = System.getenv().getOrDefault("DB_USER", "schemaplexai");
     private static final String DATASOURCE_PASSWORD = System.getenv().getOrDefault("DB_PASSWORD", "schemaplexai123");
 
     private String schema;
@@ -210,7 +211,7 @@ class TeamAgentRuntimeStrategyCheckpointTest {
                 mock(ExecutionSteeringService.class),
                 new DefaultTeamQualityDetector(),
                 new TeamConversationArchive(mock(CompositeChatMemoryStore.class), mock(UserMemoryExtractionService.class), new ObjectMapper()),
-                mock(TeamChildApprovalService.class),
+                mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class),
                 Runnable::run
         );
 

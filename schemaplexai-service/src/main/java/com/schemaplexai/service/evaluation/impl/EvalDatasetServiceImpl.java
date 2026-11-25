@@ -47,6 +47,7 @@ public class EvalDatasetServiceImpl implements EvalDatasetService {
         dataset.setTenantId(SecurityUtil.getCurrentTenantId());
         dataset.setName(request.getName());
         dataset.setDescription(request.getDescription());
+        dataset.setPassScoreThreshold(request.getPassScoreThreshold());
         datasetMapper.insert(dataset);
         if (!CollectionUtils.isEmpty(request.getItems())) {
             replaceItems(dataset.getId(), request.getItems());
@@ -95,6 +96,10 @@ public class EvalDatasetServiceImpl implements EvalDatasetService {
         }
         if (request.getDescription() != null) {
             dataset.setDescription(request.getDescription());
+        }
+        // 阈值非空才更新（不传=保留原值，与 description 字段语义一致）
+        if (request.getPassScoreThreshold() != null) {
+            dataset.setPassScoreThreshold(request.getPassScoreThreshold());
         }
         datasetMapper.updateById(dataset);
         return getById(id);
