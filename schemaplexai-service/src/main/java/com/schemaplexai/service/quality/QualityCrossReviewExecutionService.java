@@ -19,4 +19,9 @@ public interface QualityCrossReviewExecutionService {
                                  String targetContent,
                                  String referenceContent,
                                  String tenantId);
+
+    CrossReview createAndExecute(String specId, String taskId, String profileId, String issueType,
+                                 List<String> modelIds, String sourceType, String sourceAgentId,
+                                 String targetContent, String referenceContent, String tenantId,
+                                 String originalTask);
 }

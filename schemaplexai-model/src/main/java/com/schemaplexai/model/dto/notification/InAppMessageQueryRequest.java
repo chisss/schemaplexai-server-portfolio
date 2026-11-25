@@ -16,4 +16,6 @@ public class InAppMessageQueryRequest {
     private String status;
 
     private String keyword;
+
+    private String businessType;
 }

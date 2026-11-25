@@ -1,6 +1,7 @@
 package com.schemaplexai.model.dto.skill;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
@@ -34,6 +35,10 @@ public class SkillCreateRequest {
     /** 分类: builtin/custom/mcp */
     @NotBlank(message = "技能分类不能为空")
     private String category;
+
+    /** 省略时兼容已有调用，桌面草稿使用 inactive。 */
+    @Pattern(regexp = "active|inactive", message = "初始状态必须为 active 或 inactive")
+    private String initialStatus;
 
     /** 参数定义 */
     private List<Object> parameters;

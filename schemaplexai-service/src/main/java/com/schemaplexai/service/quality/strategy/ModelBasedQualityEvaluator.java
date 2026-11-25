@@ -127,7 +127,8 @@ public class ModelBasedQualityEvaluator {
                 try {
                     String fallbackResponse = invokeOpenAiCompatibleFallback(evaluationConfig, systemPrompt, userPrompt);
                     log.info("质量评估已通过 OpenAI 兼容直连回退完成: modelId={}", modelId);
-                    return postProcessEvaluationResult(modelId, null, fallbackResponse);
+                    return describeVerifiedFallback(
+                            postProcessEvaluationResult(modelId, null, fallbackResponse), "compatible_transport_fallback");
                 } catch (Exception fallbackException) {
                     log.warn("质量评估 OpenAI 兼容直连回退失败: modelId={}, error={}",
                             modelId, fallbackException.getMessage());
@@ -178,7 +179,7 @@ public class ModelBasedQualityEvaluator {
             QualityEvaluationStrategy.EvaluationResult relaxedResult = parseRelaxedResponse(response);
             if (relaxedResult != null) {
                 log.info("模型评估结果已通过宽松解析恢复");
-                return relaxedResult;
+                return relaxedResult.withModelAssessment("unknown", "relaxed_response");
             }
             log.warn("解析模型评估结果失败，原始响应: {}", response, e);
             return buildFailureResult(
@@ -203,7 +204,30 @@ public class ModelBasedQualityEvaluator {
                 .map(this::toFinding)
                 .toList();
 
-        return new QualityEvaluationStrategy.EvaluationResult(hasIssue, score, summary, findings);
+        QualityEvaluationStrategy.EvaluationResult result =
+                new QualityEvaluationStrategy.EvaluationResult(hasIssue, score, summary, findings);
+        if (isStructuredAssessment(map, result, rawFindings)) {
+            return result.withModelAssessment("completed", null);
+        }
+        return result.withModelAssessment("unknown", "incomplete_response");
+    }
+
+    private boolean isStructuredAssessment(Map<String, Object> response,
+                                           QualityEvaluationStrategy.EvaluationResult result,
+                                           List<Map<String, Object>> findings) {
+        return response.get("hasIssue") instanceof Boolean
+                && response.get("score") instanceof Number score
+                && score.doubleValue() == result.score()
+                && result.score() >= 0 && result.score() <= 100
+                && hasTextField(response, "summary")
+                && response.get("findings") instanceof List<?>
+                && result.hasIssue() == !findings.isEmpty()
+                && findings.stream().allMatch(finding -> hasTextField(finding, "type")
+                        && hasTextField(finding, "severity") && hasTextField(finding, "title"));
+    }
+
+    private boolean hasTextField(Map<String, Object> value, String key) {
+        return value.get(key) instanceof String text && StringUtils.hasText(text);
     }
 
     private QualityEvaluationStrategy.EvaluationResult parseRelaxedResponse(String response) {
@@ -236,16 +260,27 @@ public class ModelBasedQualityEvaluator {
             if (hasStructuredFindings(repairedResult)) {
                 log.info("质量评估结果已通过结构化修复补全 findings: modelId={}, findingCount={}",
                         modelId, repairedResult.findings().size());
-                return repairedResult;
+                if ("completed".equals(repairedResult.modelAssessment().status())
+                        && repairedResult.score() != parsedResult.score()) {
+                    return repairedResult.withModelAssessment("unknown", "repair_changed_score");
+                }
+                return describeVerifiedFallback(repairedResult, "structured_repair");
             }
         }
         QualityEvaluationStrategy.EvaluationResult synthesizedResult = synthesizeFindingsFromSummary(parsedResult);
         if (hasStructuredFindings(synthesizedResult)) {
             log.warn("质量评估结果缺少结构化 findings，已基于评审总结生成兜底结果: modelId={}, findingCount={}",
                     modelId, synthesizedResult.findings().size());
-            return synthesizedResult;
+            return synthesizedResult.withModelAssessment("unknown", "locally_synthesized_findings");
         }
         return parsedResult;
+    }
+
+    private QualityEvaluationStrategy.EvaluationResult describeVerifiedFallback(
+            QualityEvaluationStrategy.EvaluationResult result, String reason) {
+        return "completed".equals(result.modelAssessment().status())
+                ? result.withModelAssessment("completed", reason)
+                : result;
     }
 
     private List<QualityEvaluationStrategy.Finding> extractFindings(String payload) {
@@ -311,7 +346,7 @@ public class ModelBasedQualityEvaluator {
                         "",
                         "检查模型配置、连通性和返回格式后重新执行质量检测"
                 ))
-        );
+        ).withModelAssessment("failed", ruleCode.substring("qa.infrastructure.".length()));
     }
 
     private String extractJson(String text) {

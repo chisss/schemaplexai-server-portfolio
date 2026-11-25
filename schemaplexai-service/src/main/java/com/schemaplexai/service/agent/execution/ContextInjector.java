@@ -8,6 +8,7 @@ import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.model.entity.AgentContextBinding;
 import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextItem;
+import com.schemaplexai.service.agent.memory.AgentInstructionsAutoService;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.context.ContextCacheService;
 import com.schemaplexai.service.memory.rag.RagContentRetrieverFactory;
@@ -62,6 +63,8 @@ public class ContextInjector {
 
     private static final Pattern KEYWORD_PATTERN = Pattern.compile("[\\p{IsHan}]{2,}|[A-Za-z0-9_./:-]{2,}");
     private static final int LEXICAL_FALLBACK_LIMIT = 5;
+    private static final String SECTION_SEPARATOR = "\n\n---\n\n";
+    private static final String TASK_CONTEXT_HEADER = "## 当前任务上下文\n";
 
     private final AgentContextBindingMapper agentContextBindingMapper;
     private final ContextEntityMapper contextEntityMapper;
@@ -176,19 +179,21 @@ public class ContextInjector {
         );
 
         String promptVariant = buildPromptVariant(modelConfig, budget);
-        String cachedStaticPart = modelConfig == null
+        String cachedStaticPart = temporaryChat ? null : (modelConfig == null
                 ? contextCacheService.getAgentPrompt(agentId)
-                : contextCacheService.getAgentPrompt(agentId, promptVariant);
+                : contextCacheService.getAgentPrompt(agentId, promptVariant));
         String staticPart;
         if (cachedStaticPart != null) {
             staticPart = cachedStaticPart;
             log.debug("命中 Agent prompt 缓存: agentId={}", agentId);
         } else {
-            staticPart = buildStaticPart(agentId, budget);
-            if (modelConfig == null) {
-                contextCacheService.cacheAgentPrompt(agentId, staticPart);
-            } else {
-                contextCacheService.cacheAgentPrompt(agentId, promptVariant, staticPart);
+            staticPart = buildStaticPart(agentId, budget, temporaryChat);
+            if (!temporaryChat) {
+                if (modelConfig == null) {
+                    contextCacheService.cacheAgentPrompt(agentId, staticPart);
+                } else {
+                    contextCacheService.cacheAgentPrompt(agentId, promptVariant, staticPart);
+                }
             }
         }
 
@@ -198,17 +203,28 @@ public class ContextInjector {
 
         StringBuilder promptBuilder = new StringBuilder(staticPart);
         if (StringUtils.hasText(runtimePart)) {
-            promptBuilder.append("\n\n---\n\n").append(runtimePart);
+            promptBuilder.append(SECTION_SEPARATOR).append(runtimePart);
         }
+        int dynamicStart = promptBuilder.length() + SECTION_SEPARATOR.length();
         if (StringUtils.hasText(dynamicPart.prompt())) {
-            promptBuilder.append("\n\n---\n\n").append(dynamicPart.prompt());
+            promptBuilder.append(SECTION_SEPARATOR).append(dynamicPart.prompt());
         }
+        TaskContextRange taskContext = null;
+        if (StringUtils.hasText(extraContext)) {
+            String compressed = compressText(extraContext, budget.l3BudgetChars());
+            int start = promptBuilder.length();
+            promptBuilder.append(SECTION_SEPARATOR).append(TASK_CONTEXT_HEADER).append(compressed);
+            if (compressed.equals(extraContext)) {
+                taskContext = new TaskContextRange(start, promptBuilder.length(), extraContext);
+            }
+        }
+        int dynamicChars = Math.max(0, promptBuilder.length() - dynamicStart);
 
         String prompt = promptBuilder.toString();
         return new PromptBuildResult(
                 prompt,
                 staticPart.length(),
-                dynamicPart.prompt().length(),
+                dynamicChars,
                 runtimePart.length(),
                 prompt.length(),
                 tokenEstimatorSupport.estimateText(modelConfig, prompt),
@@ -218,7 +234,8 @@ public class ContextInjector {
                 dynamicPart.retrievalCompressedChars(),
                 budget.totalPromptBudgetChars(),
                 dynamicPart.userMemoryStaticCount(),
-                dynamicPart.userMemoryContextualCount()
+                dynamicPart.userMemoryContextualCount(),
+                taskContext
         );
     }
 
@@ -239,17 +256,17 @@ public class ContextInjector {
     /**
      * 构建静态部分（L4 + L1），会被 Redis 缓存
      */
-    private String buildStaticPart(String agentId, PromptBudgetPlanner.PromptBudget budget) {
+    private String buildStaticPart(String agentId, PromptBudgetPlanner.PromptBudget budget, boolean temporaryChat) {
         List<String> sections = new ArrayList<>();
 
         // L4: Agent 专属指令（最优先，放在最前）
-        String agentInstructions = loadAgentInstructions(agentId);
+        String agentInstructions = loadAgentInstructions(agentId, temporaryChat);
         if (StringUtils.hasText(agentInstructions)) {
             sections.add(compressText(agentInstructions, budget.l4BudgetChars()));
         }
 
         // L1: 全局上下文
-        List<String> globalContent = loadContextByLevel("global", null);
+        List<String> globalContent = loadContextByLevel("global", null, temporaryChat);
         if (!globalContent.isEmpty()) {
             String globalText = String.join("\n\n", globalContent);
             sections.add("## 全局知识\n" + compressText(globalText, budget.l1BudgetChars()));
@@ -309,7 +326,7 @@ public class ContextInjector {
         }
 
         // L_user: 用户画像与偏好（按用户隔离，不能进入 Agent 静态缓存）
-        if (userMemoryInjectionService != null && StringUtils.hasText(tenantId) && StringUtils.hasText(userId)) {
+        if (!temporaryChat && userMemoryInjectionService != null && StringUtils.hasText(tenantId) && StringUtils.hasText(userId)) {
             try {
                 UserMemoryPromptPart userMemoryPart = userMemoryInjectionService.buildPromptPart(
                         tenantId, userId, agentId, projectId, extraContext, temporaryChat);
@@ -327,7 +344,7 @@ public class ContextInjector {
         }
 
         // L_memory: Agent 长期记忆（跨会话知识积累）
-        if (agentMemoryService != null && StringUtils.hasText(tenantId)) {
+        if (!temporaryChat && agentMemoryService != null && StringUtils.hasText(tenantId)) {
             try {
                 var memories = agentMemoryService.getActiveMemories(tenantId, agentId, 10);
                 if (memories != null && !memories.isEmpty()) {
@@ -344,12 +361,7 @@ public class ContextInjector {
             }
         }
 
-        // L3: 运行时附加上下文（任务级）
-        if (StringUtils.hasText(extraContext)) {
-            sections.add("## 当前任务上下文\n" + compressText(extraContext, budget.l3BudgetChars()));
-        }
-
-        return new DynamicPromptPart(String.join("\n\n---\n\n", sections),
+        return new DynamicPromptPart(String.join(SECTION_SEPARATOR, sections),
                 retrievalSource, retrievalHitCount, retrievalRawChars, retrievalCompressedChars,
                 userMemoryStaticCount, userMemoryContextualCount);
     }
@@ -371,7 +383,7 @@ public class ContextInjector {
     /**
      * 加载 Agent 绑定上下文中的专属指令条目
      */
-    private String loadAgentInstructions(String agentId) {
+    private String loadAgentInstructions(String agentId, boolean temporaryChat) {
         List<AgentContextBinding> bindings = agentContextBindingMapper.selectList(
                 new LambdaQueryWrapper<AgentContextBinding>()
                         .eq(AgentContextBinding::getAgentId, agentId)
@@ -383,7 +395,7 @@ public class ContextInjector {
                             .eq(ContextItem::getContextId, binding.getContextId())
                             .eq(ContextItem::getIsAgentInstructions, true)
                             .last("LIMIT 1"));
-            if (item != null) {
+            if (item != null && (!temporaryChat || !AgentInstructionsAutoService.isMemoryDerivedInstruction(item))) {
                 return item.getContent();
             }
         }
@@ -456,7 +468,7 @@ public class ContextInjector {
     /**
      * 按层级加载上下文条目内容
      */
-    private List<String> loadContextByLevel(String level, String projectId) {
+    private List<String> loadContextByLevel(String level, String projectId, boolean temporaryChat) {
         LambdaQueryWrapper<ContextEntity> ctxQuery = new LambdaQueryWrapper<ContextEntity>()
                 .eq(ContextEntity::getContextLevel, level)
                 .eq(ContextEntity::getStatus, CommonConstant.STATUS_ACTIVE);
@@ -473,6 +485,7 @@ public class ContextInjector {
                             .orderByAsc(ContextItem::getSortOrder)));
         }
         return allItems.stream()
+                .filter(item -> !temporaryChat || !AgentInstructionsAutoService.isMemoryDerivedInstruction(item))
                 .sorted(Comparator.comparing(item -> item.getSortOrder() != null ? item.getSortOrder() : 0))
                 .map(ContextItem::getContent)
                 .filter(c -> c != null && !c.isBlank())
@@ -681,7 +694,30 @@ public class ContextInjector {
                                     int retrievalCompressedChars,
                                     int promptBudgetChars,
                                     int userMemoryStaticCount,
-                                    int userMemoryContextualCount) {
+                                    int userMemoryContextualCount,
+                                    TaskContextRange taskContext) {
+        public PromptBuildResult(String prompt, int staticChars, int dynamicChars, int runtimeChars,
+                                 int totalChars, int estimatedTokens, String retrievalSource, int retrievalHitCount,
+                                 int retrievalRawChars, int retrievalCompressedChars, int promptBudgetChars,
+                                 int userMemoryStaticCount, int userMemoryContextualCount) {
+            this(prompt, staticChars, dynamicChars, runtimeChars, totalChars, estimatedTokens, retrievalSource,
+                    retrievalHitCount, retrievalRawChars, retrievalCompressedChars, promptBudgetChars,
+                    userMemoryStaticCount, userMemoryContextualCount, null);
+        }
+    }
+
+    /** 组装期间记录任务段边界，供候选请求在当前原文仍可见时使用。 */
+    record TaskContextRange(int start, int end, String exactUserText) {
+        String removeFrom(String systemText) {
+            String prefix = SECTION_SEPARATOR + TASK_CONTEXT_HEADER;
+            if (start < 0 || end > systemText.length() || end < start
+                    || end - start != prefix.length() + exactUserText.length()
+                    || !systemText.startsWith(prefix, start)
+                    || !systemText.startsWith(exactUserText, start + prefix.length())) {
+                return systemText;
+            }
+            return systemText.substring(0, start) + systemText.substring(end);
+        }
     }
 
     private record DynamicPromptPart(String prompt,

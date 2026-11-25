@@ -137,7 +137,7 @@ class AIModelRouterTest {
         AiModelGroupItemMapper groupItemMapper = mock(AiModelGroupItemMapper.class);
         LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);
         ModelLoadBalancer modelLoadBalancer = mock(ModelLoadBalancer.class);
-        when(modelFactory.getOrCreate(any())).thenReturn(mock(ChatModel.class));
+        when(modelFactory.getOrCreateForExecution(any())).thenReturn(mock(ChatModel.class));
 
         AiModel m1 = buildModel("m1-id", "Claude A", "claude-a", "success", 100);
         AiModel m2 = buildModel("m2-id", "Claude B", "claude-b", "success", 120);
@@ -186,7 +186,7 @@ class AIModelRouterTest {
         AiModelGroupItemMapper groupItemMapper = mock(AiModelGroupItemMapper.class);
         LangChain4jModelFactory modelFactory = mock(LangChain4jModelFactory.class);
         ModelLoadBalancer modelLoadBalancer = mock(ModelLoadBalancer.class);
-        when(modelFactory.getOrCreate(any())).thenReturn(mock(ChatModel.class));
+        when(modelFactory.getOrCreateForExecution(any())).thenReturn(mock(ChatModel.class));
 
         AiModel healthy = buildModel("m1-id", "Claude A", "claude-a", "success", 100);
 

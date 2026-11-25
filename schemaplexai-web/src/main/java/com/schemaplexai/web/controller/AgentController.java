@@ -4,7 +4,6 @@ import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.R;
-import com.schemaplexai.common.util.FilenameSanitizer;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.dto.agent.AgentConfigRequest;
 import com.schemaplexai.model.dto.agent.AgentContextBindingDTO;
@@ -29,13 +28,15 @@ import com.schemaplexai.model.vo.agent.AgentVO;
 import com.schemaplexai.model.vo.agent.AvailableToolVO;
 import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.service.agent.AgentService;
+import com.schemaplexai.service.agent.execution.AgentExecutionActivity;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
-import com.schemaplexai.service.storage.DocumentStorageService;
+import com.schemaplexai.service.desktop.DesktopAttachmentService;
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
+import com.schemaplexai.service.desktop.DesktopToolBroker;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.apache.tika.Tika;
 import org.springframework.http.MediaType;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -50,12 +51,9 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.ByteArrayInputStream;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Agent管理控制器
@@ -66,12 +64,10 @@ import java.util.UUID;
 @Tag(name = "Agent管理")
 public class AgentController {
 
-    private static final Tika TIKA = new Tika();
-    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy/MM/dd");
-
     private final AgentService agentService;
     private final ExecutionEventStreamService executionEventStreamService;
-    private final DocumentStorageService documentStorageService;
+    private final DesktopAttachmentService desktopAttachments;
+    private final DesktopToolBroker desktopToolBroker;
 
     @GetMapping
     @Operation(summary = "分页查询Agent列表")
@@ -226,6 +222,9 @@ public class AgentController {
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<AgentExecuteResultVO> execute(@PathVariable String id,
                                            @Valid @RequestBody AgentExecuteDTO dto) {
+        DesktopExecutionTarget.requireLegacyConversation(dto.getConversationId());
+        desktopToolBroker.validateTarget(SecurityUtil.getCurrentTenantId(), SecurityUtil.getCurrentUserId(),
+                DesktopExecutionTarget.from(dto.getContext()));
         return R.ok(agentService.execute(id, dto));
     }
 
@@ -236,34 +235,13 @@ public class AgentController {
         if (file == null || file.isEmpty()) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "上传文件不能为空");
         }
-        String tenantId = SecurityUtil.getCurrentTenantId();
-        String fileId = UUID.randomUUID().toString();
-        String fileName = FilenameSanitizer.sanitize(file.getOriginalFilename());
-        String datePath = LocalDate.now().format(DATE_FORMATTER);
-        String objectKey = "tenants/" + tenantId + "/chat/" + datePath + "/" + fileId + "/" + fileName;
-        byte[] bytes;
-        try {
-            bytes = file.getBytes();
-        } catch (Exception exception) {
+        try (var input = file.getInputStream()) {
+            var attachment = desktopAttachments.uploadChat(file.getOriginalFilename(), input, file.getSize());
+            return R.ok(Map.of("fileId", attachment.fileId(),
+                    "fileName", attachment.fileName(), "fileUrl", attachment.fileUrl()));
+        } catch (IOException exception) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "读取上传文件失败");
         }
-        String contentType = TIKA.detect(bytes, fileName);
-        documentStorageService.putObject(
-                documentStorageService.getDefaultBucket(),
-                objectKey,
-                new ByteArrayInputStream(bytes),
-                bytes.length,
-                contentType
-        );
-        return R.ok(Map.of(
-                "fileId", objectKey,
-                "fileName", fileName,
-                "fileUrl", documentStorageService.getPresignedDownloadUrl(
-                        documentStorageService.getDefaultBucket(),
-                        objectKey,
-                        3600
-                )
-        ));
     }
 
     @GetMapping("/{id}/executions")
@@ -301,6 +279,7 @@ public class AgentController {
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<Void> stopExecution(@PathVariable String id, @PathVariable String execId) {
         agentService.stopExecution(id, execId);
+        desktopToolBroker.cancelExecution(SecurityUtil.getCurrentTenantId(), SecurityUtil.getCurrentUserId(), execId);
         return R.ok();
     }
 
@@ -319,6 +298,13 @@ public class AgentController {
         return executionEventStreamService.subscribe(execId);
     }
 
+    @GetMapping("/{id}/executions/{execId}/activity")
+    @Operation(summary = "查询执行活动快照")
+    public R<List<AgentExecutionActivity>> executionActivity(@PathVariable String id, @PathVariable String execId) {
+        agentService.getExecution(id, execId);
+        return R.ok(executionEventStreamService.recentActivity(execId));
+    }
+
     @PostMapping("/{id}/executions/{execId}/input")
     @Operation(summary = "提交 Human-in-Loop 输入")
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
@@ -333,6 +319,7 @@ public class AgentController {
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_EXECUTE.getCode())")
     public R<Void> cancelExecution(@PathVariable String id, @PathVariable String execId) {
         agentService.stopExecution(id, execId);
+        desktopToolBroker.cancelExecution(SecurityUtil.getCurrentTenantId(), SecurityUtil.getCurrentUserId(), execId);
         return R.ok();
     }
 

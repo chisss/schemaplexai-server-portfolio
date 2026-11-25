@@ -3,6 +3,7 @@ package com.schemaplexai.service.agent.execution;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.AgentLoopPromptConstant;
+import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
@@ -11,7 +12,6 @@ import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.service.tool.ToolExecutionResult;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -26,15 +26,17 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
  * Agentic Loop 工具执行处理器
  * <p>负责工具调用的过滤、限流、执行及结果序列化，从 AgentExecutionEngine 中拆分出来</p>
  */
-@Slf4j
 @Component
 @RequiredArgsConstructor
 public class AgentLoopToolHandler {
@@ -311,108 +313,123 @@ public class AgentLoopToolHandler {
         }
     }
 
-    /**
-     * 并行执行工具调用（按原序扫描分组：相邻连续 READ 段内并行，段间含 WRITE 保持原序）。
-     *
-     * <p>修复审计 M3：原实现把全部 READ 提前到 WRITE 之前并行，破坏同轮 write→read
-     * 验证类调用依赖（读会读到写之前的值）。新实现仅在相邻连续 READ 段内并行，
-     * 写工具与各段之间严格保持模型请求的原始顺序。
-     *
-     * @param ioTypeIndex 工具 IO 类型索引（来自 DB 配置）
-     */
+    /** 按原顺序执行工具，只有相邻的只读调用可在有界批次内并行。 */
     public List<ToolExecutionOutcome> executeParallel(
             AgentToolSessionFactory.RoundToolContext roundCtx,
             List<ToolExecutionRequest> requests,
-            ToolResultCompressionOptions compressionOpts,
+            ToolResultCompressionOptions compressionOptions,
             Executor parallelExecutor,
             int maxParallelTools,
             Map<String, ToolIoTypeEnum> ioTypeIndex) {
+        return executeBatch(roundCtx, requests, compressionOptions, parallelExecutor,
+                maxParallelTools, ioTypeIndex, () -> true);
+    }
 
-        if (requests == null || requests.isEmpty()) return List.of();
-        if (requests.size() == 1) {
-            return List.of(executeOne(roundCtx, requests.get(0), compressionOpts));
+    List<ToolExecutionOutcome> executeBatch(
+            AgentToolSessionFactory.RoundToolContext roundCtx,
+            List<ToolExecutionRequest> requests,
+            ToolResultCompressionOptions compressionOptions,
+            Executor parallelExecutor,
+            int maxParallelTools,
+            Map<String, ToolIoTypeEnum> ioTypeIndex,
+            BooleanSupplier canDispatch) {
+        return executeBatch(requests, compressionOptions, parallelExecutor, maxParallelTools, ioTypeIndex,
+                canDispatch, request -> executeOne(roundCtx, request, compressionOptions));
+    }
+
+    List<ToolExecutionOutcome> executeBatch(
+            List<ToolExecutionRequest> requests,
+            ToolResultCompressionOptions compressionOptions,
+            Executor parallelExecutor,
+            int maxParallelTools,
+            Map<String, ToolIoTypeEnum> ioTypeIndex,
+            BooleanSupplier canDispatch,
+            Function<ToolExecutionRequest, ToolExecutionOutcome> execute) {
+        if (requests == null || requests.isEmpty()) {
+            return List.of();
         }
 
-        ToolExecutionOutcome[] results = new ToolExecutionOutcome[requests.size()];
-        List<ToolExecutionRequest> readSegment = new ArrayList<>();
-        List<Integer> readSegmentIndexes = new ArrayList<>();
-
-        for (int i = 0; i < requests.size(); i++) {
-            ToolExecutionRequest req = requests.get(i);
-            ToolIoTypeEnum ioType = ioTypeIndex != null
-                    ? ioTypeIndex.getOrDefault(req.name(), ToolIoTypeEnum.READ_WRITE)
-                    : ToolIoTypeEnum.READ_WRITE;
-            if (ioType == ToolIoTypeEnum.READ) {
-                readSegment.add(req);
-                readSegmentIndexes.add(i);
+        List<ToolExecutionOutcome> outcomes = new ArrayList<>(requests.size());
+        boolean interrupted = false;
+        int index = 0;
+        while (index < requests.size()) {
+            ToolExecutionRequest request = requests.get(index);
+            if (interrupted) {
+                outcomes.add(notDispatched(request, compressionOptions, "SKIPPED", "同轮工具触发安全中断，此调用已跳过"));
+                index++;
                 continue;
             }
-            // 遇到写工具：先按原序完成前置连续 READ 段，再串行执行写工具
-            flushReadSegment(roundCtx, compressionOpts, parallelExecutor, maxParallelTools,
-                    readSegment, readSegmentIndexes, results);
-            results[i] = executeOne(roundCtx, req, compressionOpts);
-        }
-        // 尾部连续 READ 段
-        flushReadSegment(roundCtx, compressionOpts, parallelExecutor, maxParallelTools,
-                readSegment, readSegmentIndexes, results);
-
-        return List.of(results);
-    }
-
-    /** 执行一个连续 READ 段（段内并行），结果按原索引回填 */
-    private void flushReadSegment(AgentToolSessionFactory.RoundToolContext roundCtx,
-                                  ToolResultCompressionOptions compressionOpts,
-                                  Executor parallelExecutor,
-                                  int maxParallelTools,
-                                  List<ToolExecutionRequest> readSegment,
-                                  List<Integer> readSegmentIndexes,
-                                  ToolExecutionOutcome[] results) {
-        if (readSegment.isEmpty()) {
-            return;
-        }
-        List<ToolExecutionOutcome> segmentResults = runParallel(
-                roundCtx, readSegment, compressionOpts, parallelExecutor, maxParallelTools);
-        for (int j = 0; j < readSegmentIndexes.size(); j++) {
-            results[readSegmentIndexes.get(j)] = segmentResults.get(j);
-        }
-        readSegment.clear();
-        readSegmentIndexes.clear();
-    }
-
-    private List<ToolExecutionOutcome> runParallel(
-            AgentToolSessionFactory.RoundToolContext roundCtx,
-            List<ToolExecutionRequest> group,
-            ToolResultCompressionOptions opts,
-            Executor executor,
-            int maxParallelTools) {
-        try {
-            if (maxParallelTools > 0 && group.size() > maxParallelTools) {
-                List<ToolExecutionOutcome> batchResults = new ArrayList<>(group.size());
-                for (int i = 0; i < group.size(); i += maxParallelTools) {
-                    List<ToolExecutionRequest> batch = group.subList(i, Math.min(i + maxParallelTools, group.size()));
-                    batchResults.addAll(doRunParallel(roundCtx, batch, opts, executor));
-                }
-                return batchResults;
+            if (parallelExecutor == null || !isReadOnly(request, ioTypeIndex)) {
+                ToolExecutionOutcome outcome = executeIfAllowed(request, compressionOptions, canDispatch, execute);
+                outcomes.add(outcome);
+                interrupted = isSecurityInterrupt(outcome);
+                index++;
+                continue;
             }
-            return doRunParallel(roundCtx, group, opts, executor);
-        } catch (Exception e) {
-            log.warn("[工具并行执行] 并行提交失败，降级为串行执行: {}", e.getMessage());
-            return group.stream()
-                    .map(req -> executeOne(roundCtx, req, opts))
-                    .toList();
+
+            // 等待当前批次的读取完成后再启动后继工具，保留写入与依赖读取的相对顺序。
+            int limit = maxParallelTools > 0 ? maxParallelTools : requests.size();
+            int end = index + 1;
+            while (end < requests.size() && end - index < limit && isReadOnly(requests.get(end), ioTypeIndex)) {
+                end++;
+            }
+            List<ToolExecutionOutcome> batch = submitReadBatch(requests.subList(index, end),
+                    compressionOptions, parallelExecutor, canDispatch, execute);
+            outcomes.addAll(batch);
+            interrupted = batch.stream().anyMatch(this::isSecurityInterrupt);
+            index = end;
         }
+        return outcomes;
     }
 
-    private List<ToolExecutionOutcome> doRunParallel(
-            AgentToolSessionFactory.RoundToolContext roundCtx,
-            List<ToolExecutionRequest> group,
-            ToolResultCompressionOptions opts,
-            Executor executor) {
-        List<CompletableFuture<ToolExecutionOutcome>> futures = group.stream()
-                .map(req -> CompletableFuture.supplyAsync(() -> executeOne(roundCtx, req, opts), executor))
-                .toList();
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+    private boolean isReadOnly(ToolExecutionRequest request, Map<String, ToolIoTypeEnum> ioTypeIndex) {
+        return ioTypeIndex != null && ioTypeIndex.get(request.name()) == ToolIoTypeEnum.READ;
+    }
+
+    private boolean isSecurityInterrupt(ToolExecutionOutcome outcome) {
+        String action = outcome.toolResult().getControlAction();
+        return SecurityComplianceConstant.DECISION_PAUSE.equals(action)
+                || SecurityComplianceConstant.DECISION_BLOCK.equals(action);
+    }
+
+    private List<ToolExecutionOutcome> submitReadBatch(
+            List<ToolExecutionRequest> requests,
+            ToolResultCompressionOptions options,
+            Executor executor,
+            BooleanSupplier canDispatch,
+            Function<ToolExecutionRequest, ToolExecutionOutcome> execute) {
+        List<CompletableFuture<ToolExecutionOutcome>> futures = new ArrayList<>(requests.size());
+        for (ToolExecutionRequest request : requests) {
+            try {
+                futures.add(CompletableFuture.supplyAsync(
+                        () -> executeIfAllowed(request, options, canDispatch, execute), executor));
+            } catch (RejectedExecutionException rejected) {
+                // 已提交的请求仍可完成，拒绝只影响当前未提交的工具。
+                futures.add(CompletableFuture.completedFuture(
+                        notDispatched(request, options, "BUSY", "工具执行队列繁忙，此调用未启动")));
+            }
+        }
         return futures.stream().map(CompletableFuture::join).toList();
+    }
+
+    private ToolExecutionOutcome executeIfAllowed(ToolExecutionRequest request,
+                                                 ToolResultCompressionOptions options,
+                                                 BooleanSupplier canDispatch,
+                                                 Function<ToolExecutionRequest, ToolExecutionOutcome> execute) {
+        if (!canDispatch.getAsBoolean()) {
+            return notDispatched(request, options, "SKIPPED", "执行已停止，此调用已跳过");
+        }
+        return execute.apply(request);
+    }
+
+    private ToolExecutionOutcome notDispatched(ToolExecutionRequest request,
+                                              ToolResultCompressionOptions options,
+                                              String dispatchStatus,
+                                              String reason) {
+        ToolResult failure = buildFailureResult(request.id(), request.name(), reason);
+        return new ToolExecutionOutcome(failure,
+                buildResultMessage(request, failure, Map.of("dispatchStatus", dispatchStatus), true, null, options),
+                null, 0L);
     }
 
     private long elapsed(long startMs) {
@@ -439,7 +456,12 @@ public class AgentLoopToolHandler {
     public record ToolExecutionOutcome(ToolResult toolResult,
                                        ToolExecutionResultMessage resultMessage,
                                        LocalDateTime startedAt,
-                                       long durationMs) {}
+                                       long durationMs) {
+
+        public boolean wasDispatched() {
+            return startedAt != null;
+        }
+    }
 
     public record ToolResultCompressionOptions(int maxMessageChars, int requestSummaryLimit) {
 

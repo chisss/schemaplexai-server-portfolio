@@ -8,7 +8,6 @@ import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.service.agent.tool.ToolApprovalAmendmentService;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import jakarta.annotation.PostConstruct;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
@@ -22,19 +21,20 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * 沙箱守卫（集成渐进式信任 Amendment 机制）
  */
-@Slf4j
 @Component
 public class SandboxGuard {
 
     private static final Pattern ENV_ASSIGNMENT_PATTERN = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]*=\\S+$");
     private static final Pattern SHELL_SUBSTITUTION_PATTERN = Pattern.compile("`|\\$\\(");
     private static final Pattern REDIRECTION_PATTERN = Pattern.compile("(^|\\s)(\\d*>>?|<<?|&>)");
-    private static final Pattern COMMAND_CHAIN_SPLITTER = Pattern.compile("\\|\\||&&|[|;]");
+    private static final Pattern SHELL_TOKEN_PATTERN = Pattern.compile(
+            "'[^']*+'|\"[^\"\\\\]*+(?:\\\\[\\s\\S][^\"\\\\]*+)*+\"|\\\\[^\\r\\n]|([|;&\\r\\n])");
     private static final Set<String> BLOCKED_SHELL_PREFIXES = Set.of("sudo", "su");
 
     @Value("${schemaplexai.sandbox.allowed-commands:ls,cat,head,tail,grep,find,wc,sort,uniq,diff,echo,pwd,date,whoami}")
@@ -139,11 +139,8 @@ public class SandboxGuard {
             return "STRICT 沙箱禁止所有 bash 命令";
         }
 
-        // 渐进式信任：检查 Amendment 规则是否自动放行
-        if (policy != null && amendmentService != null
-                && amendmentService.isAutoApproved(policy.getTenantId(), policy.getAgentId(), "sys.bash", command)) {
-            log.debug("Amendment 自动放行: command={}", command);
-            return null;
+        if (SHELL_SUBSTITUTION_PATTERN.matcher(command).find() || REDIRECTION_PATTERN.matcher(command).find()) {
+            return "检测到潜在命令注入模式";
         }
 
         Set<String> allowedCommands = resolveAllowedCommands(policy);
@@ -156,15 +153,15 @@ public class SandboxGuard {
             if (!StringUtils.hasText(baseCommand)) {
                 return "无法识别 bash 命令";
             }
-            if (BLOCKED_SHELL_PREFIXES.contains(baseCommand)) {
+            String executable = baseCommand.substring(baseCommand.lastIndexOf('/') + 1);
+            if (BLOCKED_SHELL_PREFIXES.contains(executable)) {
                 return "禁止使用提权命令: " + baseCommand;
             }
-            if (!allowedCommands.contains(baseCommand)) {
+            // 审批修订只补充单条命令的白名单，命令链逐段校验。
+            if (!allowedCommands.contains(baseCommand)
+                    && (segments.size() != 1 || !hasAmendment(policy, command))) {
                 return "命令 [" + baseCommand + "] 不在白名单中";
             }
-        }
-        if (containsInjectionPattern(command, allowedCommands)) {
-            return "检测到潜在命令注入模式";
         }
         return null;
     }
@@ -184,29 +181,9 @@ public class SandboxGuard {
         return tokens[index].trim().toLowerCase();
     }
 
-    boolean containsInjectionPattern(String command, Set<String> allowedCommands) {
-        if (!StringUtils.hasText(command)) {
-            return false;
-        }
-        if (SHELL_SUBSTITUTION_PATTERN.matcher(command).find()) {
-            return true;
-        }
-        if (REDIRECTION_PATTERN.matcher(command).find()) {
-            return true;
-        }
-        List<String> segments = splitCommandSegments(command);
-        if (segments.size() <= 1) {
-            return false;
-        }
-        for (int index = 1; index < segments.size(); index++) {
-            String chainedBaseCommand = extractBaseCommand(segments.get(index));
-            if (!StringUtils.hasText(chainedBaseCommand)
-                    || BLOCKED_SHELL_PREFIXES.contains(chainedBaseCommand)
-                    || !allowedCommands.contains(chainedBaseCommand)) {
-                return true;
-            }
-        }
-        return false;
+    private boolean hasAmendment(SandboxPolicy policy, String command) {
+        return policy != null && amendmentService != null
+                && amendmentService.isAutoApproved(policy.getTenantId(), policy.getAgentId(), "sys.bash", command);
     }
 
     private boolean isNetworkBuiltinTool(String toolCode) {
@@ -222,12 +199,23 @@ public class SandboxGuard {
 
     private List<String> splitCommandSegments(String command) {
         List<String> result = new ArrayList<>();
-        for (String segment : COMMAND_CHAIN_SPLITTER.split(command)) {
-            if (StringUtils.hasText(segment)) {
-                result.add(segment.trim());
+        Matcher matcher = SHELL_TOKEN_PATTERN.matcher(command);
+        int start = 0;
+        while (matcher.find()) {
+            if (matcher.group(1) == null) {
+                continue;
             }
+            addCommandSegment(result, command.substring(start, matcher.start()));
+            start = matcher.end();
         }
+        addCommandSegment(result, command.substring(start));
         return result;
+    }
+
+    private void addCommandSegment(List<String> segments, String segment) {
+        if (StringUtils.hasText(segment)) {
+            segments.add(segment.trim());
+        }
     }
 
     private Set<String> parseAllowedCommands(String configValue) {

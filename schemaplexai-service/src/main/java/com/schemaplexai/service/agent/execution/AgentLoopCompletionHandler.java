@@ -3,6 +3,7 @@ package com.schemaplexai.service.agent.execution;
 import com.schemaplexai.common.constant.AgentLoopPromptConstant;
 import com.schemaplexai.common.enums.AgentLoopLogTypeEnum;
 import com.schemaplexai.service.ai.LangChain4jResolution;
+import com.schemaplexai.service.ai.ChatMessageText;
 import com.schemaplexai.service.quality.detector.QualityDetector;
 import com.schemaplexai.service.quality.orchestrator.QualityOrchestrator;
 import com.schemaplexai.service.workflow.ArtifactSceneResolver;
@@ -63,7 +64,8 @@ public class AgentLoopCompletionHandler {
                                         String executionId, String agentId, String tenantId,
                                         int round, long startMs,
                                         AgentLogService agentLogService,
-                                        ExecutionEventStreamService eventStreamService) throws Exception {
+                                        ExecutionEventStreamService eventStreamService,
+                                        AgentExecutionBudget budget) throws Exception {
         String context = buildForceCompletionContext(chatMemory, params);
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
                 AgentLoopLogTypeEnum.ROUND_START.getCode(), round, null,
@@ -76,8 +78,9 @@ public class AgentLoopCompletionHandler {
         messages.add(UserMessage.from(context));
 
         ChatRequest request = ChatRequest.builder().messages(messages).toolSpecifications(List.of()).build();
+        log.info("agent_model_dispatch executionId={} round={} phase=convergence", executionId, round);
         ChatResponse response = modelInvoker.invokeWithRetry(resolution, request, params,
-                executionId, agentId, tenantId, round, startMs, agentLogService);
+                executionId, agentId, tenantId, round, startMs, agentLogService, budget, "convergence");
 
         if (response.aiMessage() != null && response.aiMessage().hasToolExecutionRequests()) {
             agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
@@ -109,13 +112,14 @@ public class AgentLoopCompletionHandler {
                                                        String executionId, String agentId, String tenantId,
                                                        int round, long startMs,
                                                        AgentLogService agentLogService,
-                                                       ExecutionEventStreamService eventStreamService) throws Exception {
+                                                       ExecutionEventStreamService eventStreamService,
+                                                       AgentExecutionBudget budget) throws Exception {
         QualityReflectionFeedback feedback = qualityChecker.buildFeedback(ctx, content, chatMemory, 0, params);
         if (feedback == null) {
             return CompletionRevisionResult.noop(content, round - 1);
         }
         return reviseWithFeedback(resolution, systemPrompt, chatMemory, feedback, content, params,
-                executionId, agentId, tenantId, round, startMs, agentLogService, eventStreamService);
+                executionId, agentId, tenantId, round, startMs, agentLogService, eventStreamService, budget);
     }
 
     /**
@@ -130,7 +134,8 @@ public class AgentLoopCompletionHandler {
                                                         String executionId, String agentId, String tenantId,
                                                         int round, long startMs,
                                                         AgentLogService agentLogService,
-                                                        ExecutionEventStreamService eventStreamService) throws Exception {
+                                                        ExecutionEventStreamService eventStreamService,
+                                                        AgentExecutionBudget budget) throws Exception {
         if (feedback == null) {
             return CompletionRevisionResult.noop(content, round - 1);
         }
@@ -142,7 +147,7 @@ public class AgentLoopCompletionHandler {
 
         ChatResponse revisionResponse = requestRevisionWithoutTools(resolution, systemPrompt, chatMemory,
                 feedback.prompt(), params, executionId, agentId, tenantId, round, startMs,
-                agentLogService, eventStreamService);
+                agentLogService, eventStreamService, budget);
 
         AiMessage revisionMsg = revisionResponse.aiMessage();
         if (revisionMsg != null && revisionMsg.hasToolExecutionRequests()) {
@@ -155,9 +160,7 @@ public class AgentLoopCompletionHandler {
         chatMemory.add(UserMessage.from(feedback.prompt()));
         if (revisionMsg != null) chatMemory.add(revisionMsg);
 
-        long tokenIn  = revisionResponse.metadata().tokenUsage() != null ? revisionResponse.metadata().tokenUsage().inputTokenCount()  : 0;
-        long tokenOut = revisionResponse.metadata().tokenUsage() != null ? revisionResponse.metadata().tokenUsage().outputTokenCount() : 0;
-        return new CompletionRevisionResult(revised, tokenIn, tokenOut, round, 1);
+        return new CompletionRevisionResult(revised, 0, 0, round, 1);
     }
 
     // =========================================================================
@@ -211,9 +214,9 @@ public class AgentLoopCompletionHandler {
         List<ChatMessage> messages = chatMemory.messages();
         for (int i = messages.size() - 1; i >= 0; i--) {
             ChatMessage msg = messages.get(i);
-            if (msg instanceof ToolExecutionResultMessage t && StringUtils.hasText(t.text())
+            if (msg instanceof ToolExecutionResultMessage t && StringUtils.hasText(ChatMessageText.textOf(t))
                     && toolEvidences.size() < params.getFallbackEvidenceLimit()) {
-                toolEvidences.addFirst("工具[" + t.toolName() + "] => " + compactText(t.text(), params.getFallbackTextLimit()));
+                toolEvidences.addFirst("工具[" + t.toolName() + "] => " + compactText(ChatMessageText.textOf(t), params.getFallbackTextLimit()));
             } else if (msg instanceof AiMessage a && StringUtils.hasText(a.text())
                     && aiEvidences.size() < params.getFallbackEvidenceLimit()) {
                 aiEvidences.addFirst("AI结论 => " + compactText(a.text(), params.getFallbackTextLimit()));
@@ -230,7 +233,7 @@ public class AgentLoopCompletionHandler {
         int count = 0;
         for (ChatMessage msg : chatMemory.messages()) {
             if ((msg instanceof AiMessage a && StringUtils.hasText(a.text()))
-                    || (msg instanceof ToolExecutionResultMessage t && StringUtils.hasText(t.text()))) {
+                    || (msg instanceof ToolExecutionResultMessage t && StringUtils.hasText(ChatMessageText.textOf(t)))) {
                 if (++count >= 2) return true;
             }
         }
@@ -249,7 +252,8 @@ public class AgentLoopCompletionHandler {
                                                       String executionId, String agentId, String tenantId,
                                                       int round, long startMs,
                                                       AgentLogService agentLogService,
-                                                      ExecutionEventStreamService eventStreamService) throws Exception {
+                                                      ExecutionEventStreamService eventStreamService,
+                                                      AgentExecutionBudget budget) throws Exception {
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
                 AgentLoopLogTypeEnum.ROUND_START.getCode(), round, null,
                 "最终质检修订轮开始，history=" + chatMemory.messages().size() + " msgs, effectiveTools=0",
@@ -263,8 +267,9 @@ public class AgentLoopCompletionHandler {
         messages.add(UserMessage.from(revisionPrompt));
 
         ChatRequest request = ChatRequest.builder().messages(messages).toolSpecifications(List.of()).build();
+        log.info("agent_model_dispatch executionId={} round={} phase=revision", executionId, round);
         ChatResponse response = modelInvoker.invokeWithRetry(resolution, request, params,
-                executionId, agentId, tenantId, round, startMs, agentLogService);
+                executionId, agentId, tenantId, round, startMs, agentLogService, budget, "revision");
 
         logAiResponse(response, params, executionId, agentId, tenantId, round, startMs, agentLogService);
         eventStreamService.publishSimple(executionId, "AI_RESPONSE", round, "已收到最终质检修订响应", startMs);
@@ -308,8 +313,11 @@ public class AgentLoopCompletionHandler {
     private String extractTaskSummary(ChatMemory chatMemory) {
         if (chatMemory == null || chatMemory.messages() == null) return null;
         for (ChatMessage msg : chatMemory.messages()) {
-            if (msg instanceof UserMessage u && StringUtils.hasText(u.singleText())) {
-                return u.singleText();
+            if (msg instanceof UserMessage) {
+                String text = ChatMessageText.textOf(msg);
+                if (StringUtils.hasText(text)) {
+                    return text;
+                }
             }
         }
         return null;
@@ -323,8 +331,8 @@ public class AgentLoopCompletionHandler {
         if (preview.length() > params.getLogContentLimit()) {
             preview = preview.substring(0, params.getLogContentLimit()) + "...[截断]";
         }
-        int outputTokens = response.metadata().tokenUsage() != null
-                ? (int) response.metadata().tokenUsage().outputTokenCount() : 0;
+        Integer reportedOutput = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : null;
+        int outputTokens = reportedOutput != null ? reportedOutput : 0;
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
                 AgentLoopLogTypeEnum.AI_RESPONSE.getCode(), round, null, preview, outputTokens, elapsed(startMs));
     }

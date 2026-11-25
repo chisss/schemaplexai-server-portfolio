@@ -45,6 +45,9 @@ public class AgentExecutionVO {
     /** 最终输出结果 */
     private String outputResult;
 
+    /** 当前待审批工具调用；断线重连后可据此恢复审批操作。 */
+    private AgentPendingApprovalVO pendingApproval;
+
     /** 父执行 ID */
     private String parentExecutionId;
 

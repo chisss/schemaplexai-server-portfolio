@@ -10,6 +10,7 @@ import com.schemaplexai.dao.mapper.UserMemorySettingMapper;
 import com.schemaplexai.model.dto.user.UserMemoryCreateRequest;
 import com.schemaplexai.model.entity.UserMemory;
 import com.schemaplexai.model.entity.UserMemorySetting;
+import com.schemaplexai.service.user.impl.UserMemoryInjectionServiceImpl;
 import com.schemaplexai.service.user.impl.UserMemoryServiceImpl;
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +22,21 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class UserMemoryServiceImplTest {
+
+    @Test
+    void shouldTellModelToUseOnlyMemoryMatchingTheRequestedFact() {
+        var memory = new UserMemory();
+        memory.setMemoryKind(UserMemoryKindEnum.PREFERENCE.getCode());
+        memory.setMemoryScope(UserMemoryScopeEnum.USER_AGENT.getCode());
+        memory.setSourceType(UserMemorySourceTypeEnum.EXPLICIT.getCode());
+        memory.setContent("项目默认使用 Java 17");
+        var service = mock(UserMemoryService.class);
+        when(service.findStaticMemories("tenant-1", "user-1", "agent-1", null, 8)).thenReturn(List.of(memory));
+        var result = new UserMemoryInjectionServiceImpl(service)
+                .buildPromptPart("tenant-1", "user-1", "agent-1", null, "问另一个项目的数据库版本", false);
+        assertThat(result.staticPrompt()).contains("仅使用与当前请求直接相关的记忆", "缺失时按用户要求回答", "项目默认使用 Java 17");
+        assertThat(result.staticCount()).isEqualTo(1);
+    }
 
     @Test
     void shouldCreateExplicitMemoryAsActiveForCurrentUser() {

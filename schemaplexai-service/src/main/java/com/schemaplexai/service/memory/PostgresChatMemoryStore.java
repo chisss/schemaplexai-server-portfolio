@@ -5,9 +5,12 @@ import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.ChatMessageMapper;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.ChatMessageEntity;
+import com.schemaplexai.service.ai.ChatMessageText;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.ChatMessageDeserializer;
+import dev.langchain4j.data.message.ChatMessageSerializer;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -18,10 +21,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 基于 PostgreSQL 的 ChatMemoryStore 实现
@@ -41,23 +48,126 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
     @Override
     public List<ChatMessage> getMessages(Object memoryId) {
         String conversationId = memoryId.toString();
-        try {
-            List<ChatMessageEntity> entities = chatMessageMapper.selectList(
-                    new LambdaQueryWrapper<ChatMessageEntity>()
-                            .eq(ChatMessageEntity::getConversationId, conversationId)
-                            .orderByAsc(ChatMessageEntity::getMessageIndex));
+        List<ChatMessage> messages = chatMessageMapper.selectList(
+                        new LambdaQueryWrapper<ChatMessageEntity>()
+                                .eq(ChatMessageEntity::getConversationId, conversationId)
+                                .orderByAsc(ChatMessageEntity::getMessageIndex))
+                .stream()
+                .map(this::toLangChain4jMessage)
+                .toList();
+        log.debug("从 PostgreSQL 加载对话历史: conversationId={}, count={}", conversationId, messages.size());
+        return messages;
+    }
 
-            List<ChatMessage> messages = entities.stream()
-                    .map(this::toLangChain4jMessage)
-                    .filter(java.util.Objects::nonNull)
-                    .toList();
+    /** 单次读取最近的逻辑轮次，恢复时用原执行轮次约束视图。 */
+    public List<ChatMessage> loadWindow(String conversationId, String executionId, int limit) {
+        Integer turnIndex = findTurnIndex(conversationId, executionId);
+        List<ChatMessageEntity> recent = chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessageEntity>()
+                .eq(ChatMessageEntity::getConversationId, conversationId)
+                .and(turnIndex != null, scope -> scope.le(ChatMessageEntity::getTurnIndex, turnIndex)
+                        .or().isNull(ChatMessageEntity::getTurnIndex))
+                .apply("""
+                        (execution_id = {0} OR NOT EXISTS (
+                            SELECT 1 FROM sf_agent_execution source
+                            WHERE source.id::text = sf_chat_message.execution_id
+                            AND (source.temporary_chat IS TRUE OR source.memory_project_id IS DISTINCT FROM (
+                                SELECT current_run.memory_project_id FROM sf_agent_execution current_run
+                                WHERE current_run.id::text = {0}
+                            ))
+                        ))
+                        """, executionId)
+                .last("ORDER BY turn_index DESC NULLS LAST, message_index DESC LIMIT " + limit));
+        return recent.reversed().stream().map(this::toLangChain4jMessage).toList();
+    }
 
-            log.debug("从 PostgreSQL 加载对话历史: conversationId={}, count={}", conversationId, messages.size());
-            return messages;
-        } catch (Exception e) {
-            log.error("从 PostgreSQL 加载对话历史失败: conversationId={}", conversationId, e);
-            return List.of();
+    /** 原始轨迹中的消息只在创建时写入，窗口淘汰不触碰这些记录。 */
+    @Transactional(rollbackFor = Exception.class)
+    public void appendMessages(String conversationId, String executionId, List<ArchivedMessage> messages) {
+        if (messages.isEmpty()) {
+            return;
         }
+        AgentExecution owner = agentExecutionMapper.selectById(executionId);
+        if (owner == null || !conversationId.equals(owner.getConversationId())) {
+            throw new IllegalStateException("原始消息与执行记录不匹配");
+        }
+        chatMessageMapper.lockConversation(conversationId);
+        Integer turnIndex = findTurnIndex(conversationId, executionId);
+        int turn = turnIndex != null ? turnIndex : chatMessageMapper.nextTurnIndex(conversationId);
+        int index = chatMessageMapper.nextMessageIndex(conversationId);
+        for (ArchivedMessage message : messages) {
+            ChatMessageEntity entity = fromLangChain4jMessage(message.message(), owner, conversationId, index++);
+            entity.setArchiveEntry(true);
+            entity.setAuthoredText(message.authoredText());
+            entity.setTurnIndex(turn);
+            if (chatMessageMapper.insert(entity) != 1) {
+                throw new IllegalStateException("写入原始对话消息失败");
+            }
+        }
+    }
+
+    /** 恢复审批后补齐已提交的结果，跳过暂停前已写入的调用结果。 */
+    @Transactional(rollbackFor = Exception.class)
+    public void appendMissingToolResults(String conversationId, String executionId,
+                                         List<ToolExecutionResultMessage> results) {
+        if (results.isEmpty()) {
+            return;
+        }
+        chatMessageMapper.lockConversation(conversationId);
+        List<String> callIds = results.stream().map(ToolExecutionResultMessage::id).toList();
+        Set<String> storedIds = chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessageEntity>()
+                        .select(ChatMessageEntity::getToolCallId)
+                        .eq(ChatMessageEntity::getConversationId, conversationId)
+                        .eq(ChatMessageEntity::getExecutionId, executionId)
+                        .eq(ChatMessageEntity::getMessageType, "TOOL_EXECUTION_RESULT")
+                        .in(ChatMessageEntity::getToolCallId, callIds))
+                .stream().map(ChatMessageEntity::getToolCallId).collect(Collectors.toSet());
+        appendMessages(conversationId, executionId, results.stream()
+                .filter(result -> storedIds.add(result.id()))
+                .map(result -> new ArchivedMessage(result, null))
+                .toList());
+    }
+
+    private Integer findTurnIndex(String conversationId, String executionId) {
+        ChatMessageEntity current = chatMessageMapper.selectOne(new LambdaQueryWrapper<ChatMessageEntity>()
+                .select(ChatMessageEntity::getTurnIndex)
+                .eq(ChatMessageEntity::getConversationId, conversationId)
+                .eq(ChatMessageEntity::getExecutionId, executionId)
+                .isNotNull(ChatMessageEntity::getTurnIndex)
+                .orderByDesc(ChatMessageEntity::getTurnIndex)
+                .last("LIMIT 1"));
+        return current != null ? current.getTurnIndex() : null;
+    }
+
+    public List<ChatMessage> loadExecutionForExtraction(String conversationId, String executionId) {
+        List<ChatMessageEntity> entries = chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessageEntity>()
+                .eq(ChatMessageEntity::getConversationId, conversationId)
+                .eq(ChatMessageEntity::getExecutionId, executionId)
+                .eq(ChatMessageEntity::getArchiveEntry, true)
+                .orderByDesc(ChatMessageEntity::getMessageIndex)
+                .last("LIMIT 100"));
+        return entries.reversed().stream()
+                .filter(entry -> !"USER".equals(entry.getMessageType()) || StringUtils.hasText(entry.getAuthoredText()))
+                .map(entry -> "USER".equals(entry.getMessageType())
+                        ? UserMessage.from(entry.getAuthoredText()) : toLangChain4jMessage(entry))
+                .toList();
+    }
+
+    public List<ChatMessage> loadAuthoredExecutionInputs(String conversationId, String executionId) {
+        return chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessageEntity>()
+                        .select(ChatMessageEntity::getAuthoredText)
+                        .eq(ChatMessageEntity::getConversationId, conversationId)
+                        .eq(ChatMessageEntity::getExecutionId, executionId)
+                        .eq(ChatMessageEntity::getArchiveEntry, true)
+                        .eq(ChatMessageEntity::getMessageType, "USER")
+                        .isNotNull(ChatMessageEntity::getAuthoredText)
+                        .orderByAsc(ChatMessageEntity::getMessageIndex)).stream()
+                .map(ChatMessageEntity::getAuthoredText)
+                .filter(StringUtils::hasText)
+                .<ChatMessage>map(UserMessage::from)
+                .toList();
+    }
+
+    public record ArchivedMessage(ChatMessage message, String authoredText) {
     }
 
     private static final int MAX_VERSION_CAS_ATTEMPTS = 3;
@@ -66,62 +176,43 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
     @Transactional(rollbackFor = Exception.class)
     public void updateMessages(Object memoryId, List<ChatMessage> messages) {
         String conversationId = memoryId.toString();
-        try {
-            AgentExecution messageOwner = resolveMessageOwner(conversationId);
-            if (messageOwner == null) {
-                log.warn("未找到对话所属执行记录，跳过写入对话历史: conversationId={}", conversationId);
+        AgentExecution messageOwner = resolveMessageOwner(conversationId);
+        if (messageOwner == null) {
+            throw new IllegalStateException("未找到对话所属执行记录");
+        }
+
+        // 在修改数据库前转换完整的窗口视图。序列化或写入失败会回滚整个更新。
+        List<ChatMessageEntity> entities = new ArrayList<>(messages.size());
+        for (int i = 0; i < messages.size(); i++) {
+            entities.add(fromLangChain4jMessage(messages.get(i), messageOwner, conversationId, i));
+        }
+        for (int attempt = 1; attempt <= MAX_VERSION_CAS_ATTEMPTS; attempt++) {
+            int expectedVersion = messageOwner.getChatVersion() != null ? messageOwner.getChatVersion() : 0;
+            if (agentExecutionMapper.casIncrementChatVersion(messageOwner.getId(), expectedVersion) == 1) {
+                deleteMessages(memoryId);
+                for (ChatMessageEntity entity : entities) {
+                    if (chatMessageMapper.insert(entity) != 1) {
+                        throw new IllegalStateException("写入对话消息失败");
+                    }
+                }
+                log.debug("更新 PostgreSQL 对话历史: conversationId={}, count={}, attempt={}",
+                        conversationId, entities.size(), attempt);
                 return;
             }
-
-            // 会话版本乐观锁：CAS 成功后在同一事务内全删全插，并发写冲突时重读版本重试
-            for (int attempt = 1; attempt <= MAX_VERSION_CAS_ATTEMPTS; attempt++) {
-                int expectedVersion = messageOwner.getChatVersion() != null ? messageOwner.getChatVersion() : 0;
-                int rows = agentExecutionMapper.casIncrementChatVersion(messageOwner.getId(), expectedVersion);
-                if (rows == 1) {
-                    writeMessages(conversationId, messageOwner, messages);
-                    log.debug("更新 PostgreSQL 对话历史: conversationId={}, count={}, attempt={}",
-                            conversationId, messages.size(), attempt);
-                    return;
-                }
-                log.warn("会话写入版本冲突，重试: conversationId={}, attempt={}/{}",
-                        conversationId, attempt, MAX_VERSION_CAS_ATTEMPTS);
-                messageOwner = agentExecutionMapper.selectById(messageOwner.getId());
+            AgentExecution refreshedOwner = agentExecutionMapper.selectById(messageOwner.getId());
+            if (refreshedOwner == null) {
+                throw new IllegalStateException("对话所属执行记录已移除");
             }
-            log.error("会话写入版本冲突超限，放弃本次写入（保留上一版消息）: conversationId={}", conversationId);
-        } catch (Exception e) {
-            log.error("更新 PostgreSQL 对话历史失败: conversationId={}", conversationId, e);
+            messageOwner = refreshedOwner;
         }
-    }
-
-    /**
-     * 删除旧消息并批量插入新消息（物理删除，因为 ChatMemory 的 eviction 机制需要精确覆盖）
-     */
-    private void writeMessages(String conversationId, AgentExecution messageOwner, List<ChatMessage> messages) {
-        chatMessageMapper.delete(
-                new LambdaQueryWrapper<ChatMessageEntity>()
-                        .eq(ChatMessageEntity::getConversationId, conversationId));
-
-        for (int i = 0; i < messages.size(); i++) {
-            ChatMessage msg = messages.get(i);
-            ChatMessageEntity entity = fromLangChain4jMessage(msg, messageOwner, conversationId, i);
-            if (entity != null) {
-                chatMessageMapper.insert(entity);
-            }
-        }
+        throw new IllegalStateException("对话消息版本冲突");
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deleteMessages(Object memoryId) {
-        String conversationId = memoryId.toString();
-        try {
-            chatMessageMapper.delete(
-                    new LambdaQueryWrapper<ChatMessageEntity>()
-                            .eq(ChatMessageEntity::getConversationId, conversationId));
-            log.debug("删除 PostgreSQL 对话历史: conversationId={}", conversationId);
-        } catch (Exception e) {
-            log.error("删除 PostgreSQL 对话历史失败: conversationId={}", conversationId, e);
-        }
+        chatMessageMapper.delete(new LambdaQueryWrapper<ChatMessageEntity>()
+                .eq(ChatMessageEntity::getConversationId, memoryId.toString()));
     }
 
     // =========================================================================
@@ -134,6 +225,10 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
     private ChatMessage toLangChain4jMessage(ChatMessageEntity entity) {
         String type = entity.getMessageType();
         String content = entity.getTextContent();
+
+        if (entity.getMessagePayload() != null) {
+            return restoreStructuredMessage(entity.getMessagePayload());
+        }
 
         return switch (type) {
             case "SYSTEM" -> SystemMessage.from(content != null ? content : "");
@@ -153,10 +248,7 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
                     entity.getToolCallId(),
                     entity.getToolName(),
                     content != null ? content : "");
-            default -> {
-                log.warn("未知的消息类型: {}", type);
-                yield null;
-            }
+            default -> throw new IllegalStateException("未知的持久化对话消息类型");
         };
     }
 
@@ -179,7 +271,10 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
             entity.setTextContent(sm.text());
         } else if (msg instanceof UserMessage um) {
             entity.setMessageType("USER");
-            entity.setTextContent(um.singleText());
+            entity.setTextContent(ChatMessageText.textOf(um));
+            if (!um.hasSingleText() || um.name() != null || !um.attributes().isEmpty()) {
+                entity.setMessagePayload(serializeStructuredMessage(um));
+            }
         } else if (msg instanceof AiMessage am) {
             entity.setMessageType("AI");
             entity.setTextContent(am.text());
@@ -187,7 +282,7 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
             if (am.hasToolExecutionRequests() && am.toolExecutionRequests() != null) {
                 var toolCallMaps = am.toolExecutionRequests().stream()
                         .map(req -> {
-                            java.util.Map<String, Object> map = new java.util.HashMap<>();
+                            Map<String, Object> map = new HashMap<>();
                             map.put("id", req.id());
                             map.put("name", req.name());
                             map.put("arguments", req.arguments());
@@ -198,15 +293,35 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
             }
         } else if (msg instanceof ToolExecutionResultMessage trm) {
             entity.setMessageType("TOOL_EXECUTION_RESULT");
-            entity.setTextContent(trm.text());
+            entity.setTextContent(ChatMessageText.textOf(trm));
+            if (!trm.hasSingleText() || Boolean.TRUE.equals(trm.isError()) || !trm.attributes().isEmpty()) {
+                entity.setMessagePayload(serializeStructuredMessage(trm));
+            }
             entity.setToolCallId(trm.id());
             entity.setToolName(trm.toolName());
         } else {
-            log.warn("不支持的消息类型: {}", msg.getClass().getSimpleName());
-            return null;
+            throw new IllegalArgumentException("不支持持久化该对话消息类型");
         }
 
         return entity;
+    }
+
+    private byte[] serializeStructuredMessage(ChatMessage message) {
+        try {
+            return ChatMessageSerializer.messageToJson(message).getBytes(StandardCharsets.UTF_8);
+        } catch (RuntimeException exception) {
+            log.warn("编码对话消息失败: errorType={}", exception.getClass().getSimpleName());
+            throw new IllegalStateException("无法编码对话消息");
+        }
+    }
+
+    private ChatMessage restoreStructuredMessage(byte[] payload) {
+        try {
+            return ChatMessageDeserializer.messageFromJson(new String(payload, StandardCharsets.UTF_8));
+        } catch (RuntimeException exception) {
+            log.warn("解码对话消息失败: errorType={}", exception.getClass().getSimpleName());
+            throw new IllegalStateException("无法解码持久化对话消息");
+        }
     }
 
     private List<ToolExecutionRequest> restoreToolExecutionRequests(List<Map<String, Object>> toolCalls) {

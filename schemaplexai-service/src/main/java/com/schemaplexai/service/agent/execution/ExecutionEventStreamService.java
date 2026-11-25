@@ -1,5 +1,8 @@
 package com.schemaplexai.service.agent.execution;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
@@ -7,8 +10,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -17,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class ExecutionEventStreamService {
 
     private static final long SSE_TIMEOUT_MS = 30L * 60L * 1000L;
@@ -24,14 +30,51 @@ public class ExecutionEventStreamService {
 
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<SseEmitter>> emitterMap = new ConcurrentHashMap<>();
     private final RabbitTemplate rabbitTemplate;
+    private final AgentLogService agentLogService;
+    private final ObjectMapper objectMapper;
 
-    public ExecutionEventStreamService(RabbitTemplate rabbitTemplate) {
-        this.rabbitTemplate = rabbitTemplate;
+    public void publishActivity(String executionId, String agentId, String tenantId, AgentExecutionActivity activity) {
+        try {
+            agentLogService.appendLog(executionId, agentId, tenantId, "INFO", AgentExecutionActivity.EVENT_TYPE,
+                    activity.round(), null, objectMapper.writeValueAsString(activity), null, null);
+        } catch (Exception e) {
+            log.warn("执行活动存档失败: executionId={}, activityId={}", executionId, activity.id(), e);
+        }
+        publishActivityProgress(executionId, activity);
+    }
+
+    public void publishActivityProgress(String executionId, AgentExecutionActivity activity) {
+        publish(AgentExecutionEvent.builder()
+                .eventType(AgentExecutionActivity.EVENT_TYPE)
+                .executionId(executionId)
+                .roundNum(activity.round())
+                .message(activity.summary())
+                .payload(activity)
+                .timestamp(activity.updatedAt())
+                .build());
+    }
+
+    public List<AgentExecutionActivity> recentActivity(String executionId) {
+        Map<String, AgentExecutionActivity> latest = new LinkedHashMap<>();
+        for (var row : agentLogService.recentActivity(executionId)) {
+            try {
+                var activity = objectMapper.readValue(row.getContent(), AgentExecutionActivity.class);
+                latest.merge(activity.id(), activity,
+                        (a, b) -> a.updatedAt().isAfter(b.updatedAt()) ? a : b);
+            } catch (JsonProcessingException | IllegalArgumentException e) {
+                log.warn("执行活动记录解析失败: executionId={}", executionId, e);
+            }
+        }
+        return latest.values().stream().sorted(Comparator.comparing(AgentExecutionActivity::startedAt)).toList();
     }
 
     public SseEmitter subscribe(String executionId) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
-        emitterMap.computeIfAbsent(executionId, k -> new CopyOnWriteArrayList<>()).add(emitter);
+        emitterMap.compute(executionId, (id, current) -> {
+            var emitters = current == null ? new CopyOnWriteArrayList<SseEmitter>() : current;
+            emitters.add(emitter);
+            return emitters;
+        });
 
         emitter.onTimeout(() -> removeEmitter(executionId, emitter));
         emitter.onCompletion(() -> removeEmitter(executionId, emitter));
@@ -77,17 +120,12 @@ public class ExecutionEventStreamService {
         if (emitters == null || emitters.isEmpty()) {
             return;
         }
-        List<SseEmitter> closedEmitters = new ArrayList<>();
         for (SseEmitter emitter : emitters) {
             try {
                 emitter.send(SseEmitter.event().name("message").data(event));
-            } catch (IOException e) {
-                closedEmitters.add(emitter);
+            } catch (IOException | IllegalStateException e) {
+                removeEmitter(event.getExecutionId(), emitter);
             }
-        }
-        if (!closedEmitters.isEmpty()) {
-            emitters.removeAll(closedEmitters);
-            cleanupIfEmpty(event.getExecutionId(), emitters);
         }
     }
 
@@ -121,17 +159,9 @@ public class ExecutionEventStreamService {
     }
 
     private void removeEmitter(String executionId, SseEmitter emitter) {
-        CopyOnWriteArrayList<SseEmitter> emitters = emitterMap.get(executionId);
-        if (emitters == null) {
-            return;
-        }
-        emitters.remove(emitter);
-        cleanupIfEmpty(executionId, emitters);
-    }
-
-    private void cleanupIfEmpty(String executionId, CopyOnWriteArrayList<SseEmitter> emitters) {
-        if (emitters.isEmpty()) {
-            emitterMap.remove(executionId, emitters);
-        }
+        emitterMap.computeIfPresent(executionId, (id, emitters) -> {
+            emitters.remove(emitter);
+            return emitters.isEmpty() ? null : emitters;
+        });
     }
 }

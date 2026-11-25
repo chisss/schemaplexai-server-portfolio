@@ -159,7 +159,8 @@ public class QualityReviewPolicyService {
         String summary = StringUtils.hasText(rawResult.summary())
                 ? rawResult.summary()
                 : "检测完成，发现 " + filtered.size() + " 项需要关注的问题";
-        return new QualityEvaluationStrategy.EvaluationResult(true, rawResult.score(), summary, filtered);
+        return new QualityEvaluationStrategy.EvaluationResult(
+                true, rawResult.score(), summary, filtered, rawResult.modelAssessment());
     }
 
     private QualityEvaluationStrategy.EvaluationResult buildFilteredFallbackResult(
@@ -174,7 +175,8 @@ public class QualityReviewPolicyService {
                     rawResult.hasIssue(),
                     rawResult.score(),
                     summary,
-                    List.of()
+                    List.of(),
+                    rawResult.modelAssessment()
             );
         }
 
@@ -203,7 +205,8 @@ public class QualityReviewPolicyService {
                 true,
                 Math.min(rawResult.score(), scoreCeiling),
                 fallbackSummary,
-                List.of(fallbackFinding)
+                List.of(fallbackFinding),
+                rawResult.modelAssessment()
         );
     }
 

@@ -43,7 +43,12 @@ public class LangChain4jModelFactory {
      * 获取或创建 ChatModel 实例
      */
     public ChatModel getOrCreate(AiModelConfig config) {
-        return modelCache.get(config.cacheKey(), key -> buildModel(config));
+        return modelCache.get(config.cacheKey(), key -> buildModel(config, null));
+    }
+
+    /** Agent 的每次重试由执行引擎单独计量。 */
+    public ChatModel getOrCreateForExecution(AiModelConfig config) {
+        return modelCache.get("execution:" + config.cacheKey(), key -> buildModel(config, 0));
     }
 
     /**
@@ -63,7 +68,7 @@ public class LangChain4jModelFactory {
         streamingModelCache.invalidateAll();
     }
 
-    private ChatModel buildModel(AiModelConfig config) {
+    private ChatModel buildModel(AiModelConfig config, Integer sdkRetries) {
         Duration timeout = resolveTimeout(config);
         log.info("创建 LangChain4j 模型实例: provider={}, protocol={}, modelId={}, reasoning={}",
                 config.getProvider(), config.getProtocol(), config.getModelId(), config.getReasoningStrength());
@@ -72,6 +77,7 @@ public class LangChain4jModelFactory {
                 var builder = AnthropicChatModel.builder()
                         .apiKey(config.getApiKey())
                         .modelName(config.getModelId())
+                        .maxRetries(sdkRetries)
                         .timeout(timeout)
                         .baseUrl(config.getBaseUrl());
                 applyAnthropicThinking(builder, config);
@@ -83,11 +89,12 @@ public class LangChain4jModelFactory {
                         .baseUrl(config.getBaseUrl())
                         .modelName(config.getModelId())
                         .maxOutputTokens(config.getMaxTokens())
+                        .maxRetries(sdkRetries)
                         .timeout(timeout);
                 applyGeminiThinking(builder, config);
                 yield builder.build();
             }
-            default -> buildOpenAiCompatibleModel(config, timeout);
+            default -> buildOpenAiCompatibleModel(config, timeout, sdkRetries);
         };
     }
 
@@ -129,15 +136,19 @@ public class LangChain4jModelFactory {
         } else {
             builder.maxCompletionTokens(config.getMaxTokens());
         }
+        if (shouldUseOkHttpClient(config)) {
+            builder.httpClientBuilder(new LangChainOkHttpClientBuilder());
+        }
         applyOpenAiReasoning(builder, config);
         return builder.build();
     }
 
-    private ChatModel buildOpenAiCompatibleModel(AiModelConfig config, Duration timeout) {
+    private ChatModel buildOpenAiCompatibleModel(AiModelConfig config, Duration timeout, Integer sdkRetries) {
         OpenAiChatModel.OpenAiChatModelBuilder builder = OpenAiChatModel.builder()
                 .apiKey(config.getApiKey())
                 .baseUrl(config.getBaseUrl())
                 .modelName(config.getModelId())
+                .maxRetries(sdkRetries)
                 .timeout(timeout);
         if (shouldUseLegacyMaxTokens(config)) {
             builder.maxTokens(config.getMaxTokens());
@@ -250,6 +261,6 @@ public class LangChain4jModelFactory {
         if (!config.isReasoningSupported()) {
             return;
         }
-        builder.reasoningEffort(config.getReasoningStrength().toLowerCase());
+        builder.reasoningEffort(config.getReasoningStrength().toLowerCase()).returnThinking(true);
     }
 }

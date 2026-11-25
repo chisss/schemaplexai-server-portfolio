@@ -1,5 +1,6 @@
 package com.schemaplexai.service.quality.orchestrator;
 
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.service.quality.detector.DetectorRegistry;
 import com.schemaplexai.service.quality.detector.QualityDetector;
 import lombok.RequiredArgsConstructor;
@@ -30,6 +31,7 @@ public class QualityOrchestrator {
 
         Map<String, Object> message = new HashMap<>();
         message.put("taskId", taskId);
+        message.put("tenantId", SecurityUtil.getCurrentTenantId());
         message.put("specId", specId);
         message.put("agentExecutionId", agentExecutionId);
         message.put("dimensionCode", dimensionCode);

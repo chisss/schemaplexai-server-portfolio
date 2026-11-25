@@ -89,11 +89,13 @@ class QualityReviewPolicyServiceTest {
                                 new QualityEvaluationStrategy.Finding("ambiguity", "warning", 66,
                                         "RULE-3", "表达模糊", "性能要求未量化", "requirements#performance", "补充明确指标")
                         )
-                ),
+                ).withModelAssessment("completed", "structured_repair"),
                 policy
         );
 
         assertThat(filtered.hasIssue()).isTrue();
+        assertThat(filtered.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("completed", "structured_repair"));
         assertThat(filtered.findings()).hasSize(2);
         assertThat(filtered.findings()).extracting(QualityEvaluationStrategy.Finding::title)
                 .containsExactly("缺少验收标准", "表达模糊");
@@ -128,11 +130,13 @@ class QualityReviewPolicyServiceTest {
                                 "design#rollback",
                                 "补充异常处理与回滚策略"
                         ))
-                ),
+                ).withModelAssessment("failed", "model_response_invalid"),
                 policy
         );
 
         assertThat(filtered.hasIssue()).isTrue();
+        assertThat(filtered.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("failed", "model_response_invalid"));
         assertThat(filtered.score()).isLessThan(80);
         assertThat(filtered.findings()).hasSize(1);
         assertThat(filtered.summary()).contains("人工复核");

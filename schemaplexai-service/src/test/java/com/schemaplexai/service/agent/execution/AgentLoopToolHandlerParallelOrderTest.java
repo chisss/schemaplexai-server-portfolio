@@ -2,24 +2,34 @@ package com.schemaplexai.service.agent.execution;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.enums.ToolIoTypeEnum;
+import com.schemaplexai.common.model.ToolResult;
 import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory.RoundToolContext;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.service.tool.ToolExecutionResult;
 import dev.langchain4j.service.tool.ToolExecutor;
 import dev.langchain4j.service.tool.ToolServiceContext;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -29,7 +39,12 @@ import static org.mockito.Mockito.when;
 class AgentLoopToolHandlerParallelOrderTest {
 
     private final AgentLoopToolHandler handler = new AgentLoopToolHandler(new ObjectMapper());
-    private final Executor parallelExecutor = Executors.newFixedThreadPool(4);
+    private final ExecutorService parallelExecutor = Executors.newFixedThreadPool(4);
+
+    @AfterEach
+    void closeExecutor() {
+        parallelExecutor.close();
+    }
 
     private ToolExecutionRequest request(String id, String name) {
         return ToolExecutionRequest.builder().id(id).name(name).arguments("{}").build();
@@ -119,5 +134,92 @@ class AgentLoopToolHandlerParallelOrderTest {
         assertThat(outcomes).hasSize(2);
         assertThat(String.valueOf(outcomes.get(0).toolResult().getResult())).contains("r1");
         assertThat(String.valueOf(outcomes.get(1).toolResult().getResult())).contains("r2");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"block", "pause"})
+    void shouldSkipFollowingWritesAfterReadBatchInterrupt(String action) {
+        ToolExecutor interrupted = interruptingExecutor("1", "read_1", action);
+        ToolExecutor write = executor("write");
+        ToolExecutor laterRead = executor("read");
+        RoundToolContext ctx = roundCtx(Map.of("read_1", interrupted, "write", write, "read_2", laterRead),
+                Map.of("read_1", ToolIoTypeEnum.READ, "write", ToolIoTypeEnum.WRITE, "read_2", ToolIoTypeEnum.READ));
+
+        var results = handler.executeParallel(ctx,
+                List.of(request("1", "read_1"), request("2", "write"), request("3", "read_2")),
+                null, parallelExecutor, 1, ctx.ioTypeIndex());
+
+        assertThat(results).extracting(outcome -> outcome.resultMessage().id()).containsExactly("1", "2", "3");
+        assertThat(results).extracting(AgentLoopToolHandler.ToolExecutionOutcome::wasDispatched)
+                .containsExactly(true, false, false);
+        assertThat(results.getFirst().toolResult().getControlAction()).isEqualTo(action);
+        verifyNoInteractions(write, laterRead);
+    }
+
+    @Test
+    void shouldSkipFollowingWritesInSequentialMode() {
+        ToolExecutor interrupted = interruptingExecutor("1", "first", "pause");
+        ToolExecutor write = executor("write");
+        RoundToolContext ctx = roundCtx(Map.of("first", interrupted, "write", write),
+                Map.of("first", ToolIoTypeEnum.WRITE, "write", ToolIoTypeEnum.WRITE));
+
+        var results = handler.executeBatch(ctx, List.of(request("1", "first"), request("2", "write")),
+                null, null, 4, ctx.ioTypeIndex(), () -> true);
+
+        assertThat(results.getLast().resultMessage().attributes()).containsEntry("dispatchStatus", "SKIPPED");
+        verifyNoInteractions(write);
+    }
+
+    @Test
+    void shouldKeepAlreadySubmittedCallsWhenLaterSubmissionIsRejected() {
+        ToolExecutor first = executor("first");
+        ToolExecutor rejected = executor("rejected");
+        ToolExecutor last = executor("last");
+        RoundToolContext ctx = roundCtx(Map.of("first", first, "rejected", rejected, "last", last),
+                Map.of("first", ToolIoTypeEnum.READ, "rejected", ToolIoTypeEnum.READ, "last", ToolIoTypeEnum.READ));
+        AtomicInteger submissions = new AtomicInteger();
+        Executor partialExecutor = runnable -> {
+            if (submissions.incrementAndGet() == 2) {
+                throw new RejectedExecutionException();
+            }
+            parallelExecutor.execute(runnable);
+        };
+
+        var results = handler.executeParallel(ctx,
+                List.of(request("1", "first"), request("2", "rejected"), request("3", "last")),
+                null, partialExecutor, 4, ctx.ioTypeIndex());
+
+        assertThat(results).extracting(outcome -> outcome.resultMessage().id()).containsExactly("1", "2", "3");
+        assertThat(results.get(1).resultMessage().attributes()).containsEntry("dispatchStatus", "BUSY");
+        verify(first).executeWithContext(any(), any());
+        verify(last).executeWithContext(any(), any());
+        verifyNoInteractions(rejected);
+    }
+
+    @Test
+    void shouldCheckCancellationInsideQueuedReadTask() {
+        ToolExecutor read = executor("read");
+        RoundToolContext ctx = roundCtx(Map.of("read", read), Map.of("read", ToolIoTypeEnum.READ));
+        AtomicBoolean running = new AtomicBoolean(true);
+        Executor queued = task -> {
+            running.set(false);
+            task.run();
+        };
+
+        var results = handler.executeBatch(ctx, List.of(request("1", "read")), null, queued, 1,
+                ctx.ioTypeIndex(), running::get);
+
+        assertThat(results.getFirst().wasDispatched()).isFalse();
+        verifyNoInteractions(read);
+    }
+
+    private ToolExecutor interruptingExecutor(String id, String name, String action) {
+        ToolExecutor tool = mock(ToolExecutor.class);
+        when(tool.executeWithContext(any(), any())).thenReturn(ToolExecutionResult.builder()
+                .isError(true)
+                .resultText("测试安全中断")
+                .result(ToolResult.builder().callId(id).toolCode(name).controlAction(action).build())
+                .build());
+        return tool;
     }
 }

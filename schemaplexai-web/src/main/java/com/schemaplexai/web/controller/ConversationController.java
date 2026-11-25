@@ -1,5 +1,6 @@
 package com.schemaplexai.web.controller;
 
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.dto.agent.ConversationRollbackRequest;
 import com.schemaplexai.service.agent.execution.ConversationRollbackService;
@@ -30,6 +31,7 @@ public class ConversationController {
     @Operation(summary = "回滚对话到指定轮次")
     public R<Integer> rollback(@PathVariable String conversationId,
                                @Valid @RequestBody ConversationRollbackRequest request) {
+        DesktopExecutionTarget.requireLegacyConversation(conversationId);
         int deleted = rollbackService.rollback(conversationId, request.getTargetTurnIndex());
         return R.ok(deleted);
     }

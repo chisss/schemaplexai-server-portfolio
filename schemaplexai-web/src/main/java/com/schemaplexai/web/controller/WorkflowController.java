@@ -2,6 +2,7 @@ package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.R;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.dto.workflow.*;
 import com.schemaplexai.model.vo.workflow.WorkflowAiArrangeVO;
 import com.schemaplexai.model.vo.workflow.WorkflowInstanceVO;
@@ -104,6 +105,7 @@ public class WorkflowController {
     @Operation(summary = "创建工作流实例")
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).WORKFLOW_EXECUTE.getCode())")
     public R<WorkflowInstanceVO> createInstance(@Valid @RequestBody WorkflowInstanceCreateRequest request) {
+        request.setTenantId(SecurityUtil.getCurrentTenantId());
         return R.ok(instanceService.create(request));
     }
 

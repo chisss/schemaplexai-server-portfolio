@@ -3,6 +3,8 @@ package com.schemaplexai.service.agent.memory;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.schemaplexai.common.enums.MemoryPhaseEnum;
+import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.common.util.SystemTenantContext;
 import com.schemaplexai.dao.mapper.AgentMemoryMapper;
 import com.schemaplexai.model.entity.AgentMemory;
 import com.schemaplexai.service.ai.AIModelRouter;
@@ -20,7 +22,6 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -120,22 +121,23 @@ public class AgentMemoryConsolidationService {
      */
     public void consolidateAll() {
         // 查找有待合并记忆的 agent
-        List<AgentMemory> samples = memoryMapper.selectList(new LambdaQueryWrapper<AgentMemory>()
+        List<AgentMemory> samples = SystemTenantContext.callAsSystem(() -> memoryMapper.selectList(new LambdaQueryWrapper<AgentMemory>()
                 .eq(AgentMemory::getPhase, MemoryPhaseEnum.RAW.getCode())
                 .isNull(AgentMemory::getConsolidatedInto)
                 .select(AgentMemory::getTenantId, AgentMemory::getAgentId)
-                .groupBy(AgentMemory::getTenantId, AgentMemory::getAgentId));
-
-        Map<String, List<AgentMemory>> grouped = samples.stream()
-                .collect(Collectors.groupingBy(m -> m.getTenantId() + "|" + m.getAgentId()));
+                .groupBy(AgentMemory::getTenantId, AgentMemory::getAgentId)));
 
         int totalConsolidated = 0;
-        for (Map.Entry<String, List<AgentMemory>> entry : grouped.entrySet()) {
-            String[] parts = entry.getKey().split("\\|", 2);
+        String previousTenantId = SecurityUtil.getCurrentTenantId();
+        for (AgentMemory sample : samples) {
+            SecurityUtil.setCurrentTenantId(sample.getTenantId());
             try {
-                totalConsolidated += consolidate(parts[0], parts[1]);
+                totalConsolidated += consolidate(sample.getTenantId(), sample.getAgentId());
             } catch (Exception e) {
-                log.warn("Agent记忆合并异常: key={}, error={}", entry.getKey(), e.getMessage());
+                log.warn("Agent记忆合并异常: tenantId={}, agentId={}",
+                        sample.getTenantId(), sample.getAgentId(), e);
+            } finally {
+                SecurityUtil.setCurrentTenantId(previousTenantId);
             }
         }
         if (totalConsolidated > 0) {

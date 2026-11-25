@@ -18,6 +18,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -152,13 +153,19 @@ class BuiltinQualityAssuranceServiceTest {
                 )),
                 70, "发现偏离", null, 200, "async", "succeeded", 1, 1
         );
-        when(pipeline.execute(any())).thenReturn(mockResult);
+        when(pipeline.execute(any(), eq("task-1"))).thenReturn(mockResult);
 
-        Map<String, Object> result = service.handleDeviationMessage("task-1", "spec-1", "exec-1", "当前输出");
+        Map<String, Object> result = service.handleDeviationMessage(
+                "task-1", "spec-1", "exec-1", "当前输出", "原始任务");
 
         assertThat(result).containsEntry("qualityTaskId", "task-1");
         assertThat(result).containsEntry("qualityTaskStatus", "succeeded");
         assertThat(result).containsEntry("qualityScore", 70);
+        var request = ArgumentCaptor.forClass(QualityCheckRequest.class);
+        verify(pipeline).execute(request.capture(), eq("task-1"));
+        assertThat(request.getValue().targetContent()).isEqualTo("当前输出");
+        assertThat(request.getValue().originalTask()).isEqualTo("原始任务");
+        assertThat(request.getValue().referenceContent()).isNull();
     }
 
     @Test
@@ -171,7 +178,7 @@ class BuiltinQualityAssuranceServiceTest {
                 )),
                 66, "发现意图缺陷", null, 300, "async", "succeeded", 1, 1
         );
-        when(pipeline.execute(any())).thenReturn(mockResult);
+        when(pipeline.execute(any(), eq("task-2"))).thenReturn(mockResult);
 
         Map<String, Object> result = service.handleIntentMessage("task-2", "spec-1", "requirements");
 

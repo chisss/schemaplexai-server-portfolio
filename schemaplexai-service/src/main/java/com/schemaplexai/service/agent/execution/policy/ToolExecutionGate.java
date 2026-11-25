@@ -36,6 +36,9 @@ public class ToolExecutionGate {
         if (!policy.isAllowWriteTools()) {
             return decision(ToolExecutionDecisionEnum.DENY, "当前执行模式不允许写入工具");
         }
+        if (request.isDesktopTool() && policy.getMode() == ExecutionModeEnum.AUTO) {
+            return execute("本机工具由客户端权限和企业风险策略控制");
+        }
         ToolExecutionRequest toolRequest = request.getToolRequest();
         String toolCode = toolRequest != null ? toolRequest.name() : null;
         String arguments = toolRequest != null ? toolRequest.arguments() : null;

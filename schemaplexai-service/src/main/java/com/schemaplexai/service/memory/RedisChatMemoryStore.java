@@ -43,7 +43,7 @@ public class RedisChatMemoryStore implements ChatMemoryStore {
             log.debug("Redis 缓存命中对话历史: key={}, count={}", key, messages.size());
             return messages;
         } catch (Exception e) {
-            log.debug("Redis 读取对话历史失败（降级）: key={}, error={}", key, e.getMessage());
+            log.debug("Redis 读取对话历史失败（降级）: key={}, errorType={}", key, e.getClass().getSimpleName());
             return null;
         }
     }
@@ -56,7 +56,7 @@ public class RedisChatMemoryStore implements ChatMemoryStore {
             redisTemplate.opsForValue().set(key, json, TTL);
             log.debug("Redis 缓存更新对话历史: key={}, count={}", key, messages.size());
         } catch (Exception e) {
-            log.debug("Redis 写入对话历史失败（忽略）: key={}, error={}", key, e.getMessage());
+            log.debug("Redis 写入对话历史失败（忽略）: key={}, errorType={}", key, e.getClass().getSimpleName());
         }
     }
 
@@ -67,7 +67,7 @@ public class RedisChatMemoryStore implements ChatMemoryStore {
             redisTemplate.delete(key);
             log.debug("Redis 删除对话历史: key={}", key);
         } catch (Exception e) {
-            log.debug("Redis 删除对话历史失败（忽略）: key={}, error={}", key, e.getMessage());
+            log.debug("Redis 删除对话历史失败（忽略）: key={}, errorType={}", key, e.getClass().getSimpleName());
         }
     }
 

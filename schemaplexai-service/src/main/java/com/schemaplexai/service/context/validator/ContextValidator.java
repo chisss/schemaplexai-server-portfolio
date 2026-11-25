@@ -30,8 +30,7 @@ public class ContextValidator {
 
     private static final Set<String> PROJECT_REQUIRED_LEVELS = Set.of(
             ContextLevelEnum.PROJECT.getCode(),
-            ContextLevelEnum.TASK.getCode(),
-            ContextLevelEnum.AGENT.getCode()
+            ContextLevelEnum.TASK.getCode()
     );
 
     /**
@@ -52,7 +51,7 @@ public class ContextValidator {
     }
 
     /**
-     * 校验 project/task/agent 层级必须有 projectId
+     * 校验项目和任务级上下文必须关联项目
      */
     public void validateProjectRequired(String level, String projectId) {
         if (PROJECT_REQUIRED_LEVELS.contains(level) && !StringUtils.hasText(projectId)) {

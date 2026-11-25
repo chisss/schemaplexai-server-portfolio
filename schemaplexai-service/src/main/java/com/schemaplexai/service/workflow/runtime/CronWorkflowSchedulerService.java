@@ -3,6 +3,8 @@ package com.schemaplexai.service.workflow.runtime;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.common.util.SystemTenantContext;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
 import com.schemaplexai.model.dto.workflow.WorkflowInstanceCreateRequest;
@@ -56,17 +58,21 @@ public class CronWorkflowSchedulerService {
             fixedDelayString = "${schemaplexai.workflow.cron.poll-interval-ms:30000}"
     )
     public void scheduleCronWorkflows() {
-        List<WorkflowTemplate> templates = workflowTemplateMapper.selectList(
+        List<WorkflowTemplate> templates = SystemTenantContext.callAsSystem(() -> workflowTemplateMapper.selectList(
                 new LambdaQueryWrapper<WorkflowTemplate>()
                         .eq(WorkflowTemplate::getStatus, "published")
                         .orderByAsc(WorkflowTemplate::getUpdatedAt)
-        );
+        ));
+        String previousTenantId = SecurityUtil.getCurrentTenantId();
         for (WorkflowTemplate template : templates) {
+            SecurityUtil.setCurrentTenantId(template.getTenantId());
             try {
                 triggerTemplateIfDue(template);
             } catch (Exception exception) {
                 log.error("Cron 模板调度失败: templateId={}, name={}, error={}",
                         template.getId(), template.getName(), exception.getMessage(), exception);
+            } finally {
+                SecurityUtil.setCurrentTenantId(previousTenantId);
             }
         }
     }

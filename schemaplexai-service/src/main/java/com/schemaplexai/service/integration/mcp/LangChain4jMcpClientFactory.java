@@ -44,12 +44,26 @@ public class LangChain4jMcpClientFactory {
             throw new BusinessException(ResultCode.BAD_REQUEST, "MCP Server 配置不能为空");
         }
         McpServer runtimeServer = databaseCredentialMaterializer.materialize(server);
+        McpTransport transport = buildTransport(runtimeServer);
+        try {
+            return buildClient(server, transport);
+        } catch (RuntimeException failure) {
+            try {
+                transport.close();
+            } catch (Exception cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
+        }
+    }
+
+    private McpClient buildClient(McpServer server, McpTransport transport) {
         return DefaultMcpClient.builder()
                 .key(server.getId())
                 .clientName("SchemaPlexAI")
                 .clientVersion("1.0.0")
                 .protocolVersion("2024-11-05")
-                .transport(buildTransport(runtimeServer))
+                .transport(transport)
                 .initializationTimeout(DEFAULT_INITIALIZATION_TIMEOUT)
                 .toolExecutionTimeout(DEFAULT_TOOL_TIMEOUT)
                 .resourcesTimeout(DEFAULT_RESOURCE_TIMEOUT)
@@ -76,6 +90,8 @@ public class LangChain4jMcpClientFactory {
                     .timeout(DEFAULT_TOOL_TIMEOUT)
                     .subsidiaryChannel(true)
                     .build();
+            case LEGACY_SSE -> new LegacySseMcpTransport(requireUrl(server), resolveHeadersSupplier(server),
+                    DEFAULT_INITIALIZATION_TIMEOUT);
             case STDIO -> StdioMcpTransport.builder()
                     .command(resolveCommand(server))
                     .environment(resolveEnvironment(server))

@@ -12,10 +12,15 @@ public enum McpTransportTypeEnum {
 
     STREAMABLE_HTTP("streamable_http", "HTTP Streamable"),
     SSE("sse", "HTTP SSE"),
+    LEGACY_SSE("legacy_sse", "Legacy HTTP SSE"),
     STDIO("stdio", "STDIO");
 
     private final String code;
     private final String description;
+
+    public boolean requiresUrl() {
+        return this != STDIO;
+    }
 
     public static McpTransportTypeEnum fromCode(String code) {
         if (code == null) {

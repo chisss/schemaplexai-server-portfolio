@@ -13,7 +13,7 @@ spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/schemaplexai}
     username: ${DB_USERNAME:change-me}
-    password: ${DB_PASSWORD:change-me}
+    password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
   data:
     redis:
@@ -25,15 +25,20 @@ spring:
     host: ${RABBITMQ_HOST:localhost}
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USERNAME:change-me}
-    password: ${RABBITMQ_PASSWORD:change-me}
+    password: ${RABBITMQ_PASSWORD}
     virtual-host: ${RABBITMQ_VHOST:/schemaplexai}
 
 jwt:
-  secret: ${JWT_SECRET:change-me-with-at-least-32-characters}
+  secret: ${JWT_SECRET}
   expiration: 86400
   refresh-expiration: 604800
 
 schemaplexai:
+  agent:
+    team:
+      checkpoint:
+        retention-days: 30
+        cleanup-interval-ms: 3600000
   security:
     aes-key: ${AES_SECRET_KEY:}
   sandbox:

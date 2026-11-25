@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -41,6 +42,16 @@ import java.util.regex.Pattern;
 @Service
 @RequiredArgsConstructor
 public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardService {
+
+    private static final Set<String> INPUT_LENGTH_CONTROL_POINTS = Set.of("input", "system_prompt", "instruction_chain");
+    private static final Set<String> RUNTIME_SCENES = Set.of(
+            SecurityComplianceConstant.CHECK_SCENE_AGENT_EXECUTE,
+            SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_START,
+            SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_NODE,
+            SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE,
+            SecurityComplianceConstant.CHECK_SCENE_TOOL_POST,
+            SecurityComplianceConstant.CHECK_SCENE_OUTPUT
+    );
 
     private final SecurityPolicyMapper securityPolicyMapper;
     private final SecurityBindingMapper securityBindingMapper;
@@ -57,6 +68,9 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
                 : UUID.randomUUID().toString().replace("-", "");
         String tenantId = resolveTenantId(request);
         String content = buildCorpus(request);
+        String resourceType = StringUtils.hasText(request.getResourceType())
+                ? request.getResourceType()
+                : SecurityComplianceConstant.RESOURCE_TYPE_POLICY;
 
         List<SecurityMatchedRuleVO> matchedPolicies = matchPolicies(request, tenantId, content);
         List<SecurityMatchedRuleVO> matchedRulePacks = matchRulePacks(request, tenantId, content);
@@ -77,14 +91,14 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
                     result,
                     tenantId,
                     request.getDomainCode(),
-                    request.getResourceType(),
+                    resourceType,
                     request.getResourceId(),
                     request.getResourceName()
             );
             result.setIncidentId(incidentId);
         }
 
-        recordAuditEvent(request, auditContext, result, tenantId, traceId);
+        recordAuditEvent(request, auditContext, result, tenantId, traceId, resourceType);
         return result;
     }
 
@@ -107,7 +121,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         List<SecurityPolicy> policies = securityPolicyMapper.selectList(wrapper);
         List<SecurityMatchedRuleVO> results = new ArrayList<>();
         for (SecurityPolicy policy : policies) {
-            if (!matchesTarget(policy, request, tenantId)) {
+            if (!matchesScene(policy, request.getScene()) || !matchesTarget(policy, request, tenantId)) {
                 continue;
             }
             String hitReason = evaluatePolicy(policy, request, corpus);
@@ -293,7 +307,8 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         }
         Number maxLength = numberValue(config.get("maxLength"));
         if (maxLength != null && StringUtils.hasText(request.getContent())
-                && request.getContent().length() > maxLength.intValue()) {
+                && request.getContent().length() > maxLength.intValue()
+                && appliesLengthLimit(policy, request)) {
             return "内容长度超出限制: " + maxLength;
         }
 
@@ -408,6 +423,23 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         return SecurityComplianceConstant.DECISION_ALLOW;
     }
 
+    private boolean appliesLengthLimit(SecurityPolicy policy, SecurityRuntimeCheckRequest request) {
+        String scene = request.getScene();
+        if (!SecurityComplianceConstant.CHECK_SCENE_OUTPUT.equals(scene)
+                && !SecurityComplianceConstant.CHECK_SCENE_TOOL_POST.equals(scene)) {
+            return true;
+        }
+        // 只有明确限于输入的控制点才收窄长度规则，兼容未标注范围的旧策略。
+        List<String> points = stringList(policy.getControlPoints());
+        return points.isEmpty() || !points.stream().allMatch(INPUT_LENGTH_CONTROL_POINTS::contains);
+    }
+
+    private boolean matchesScene(SecurityPolicy policy, String scene) {
+        List<String> points = stringList(policy.getControlPoints());
+        // 保留旧 input 等控制点的内容检查行为，精确运行时阶段按声明匹配。
+        return points.isEmpty() || !points.stream().allMatch(RUNTIME_SCENES::contains) || points.contains(scene);
+    }
+
     private String resolveAction(String enforcementMode, Map<String, Object> config) {
         String hitAction = stringValue(config.get("hitAction"));
         if (StringUtils.hasText(hitAction) && SecurityComplianceConstant.CHECK_DECISIONS.contains(hitAction)) {
@@ -429,7 +461,8 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
                                   SecurityAuditContext auditContext,
                                   SecurityCheckDecisionVO result,
                                   String tenantId,
-                                  String traceId) {
+                                  String traceId,
+                                  String resourceType) {
         String eventStatus = switch (result.getDecision()) {
             case SecurityComplianceConstant.DECISION_BLOCK -> SecurityComplianceConstant.AUDIT_STATUS_BLOCKED;
             case SecurityComplianceConstant.DECISION_PAUSE, SecurityComplianceConstant.DECISION_WARN ->
@@ -446,7 +479,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
                 request.getDomainCode(),
                 firstPolicyId(result),
                 firstPolicyCode(result),
-                request.getResourceType(),
+                resourceType,
                 request.getResourceId(),
                 "运行时安全检查",
                 result.getMessage(),

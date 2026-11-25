@@ -10,6 +10,8 @@ import java.util.Map;
  */
 public class TeamGraphState extends AgentState {
 
+    static final String ATTACHMENT_IDS = "attachmentIds";
+
     public TeamGraphState(Map<String, Object> initData) {
         super(initData);
     }
@@ -18,6 +20,13 @@ public class TeamGraphState extends AgentState {
     public List<Map<String, Object>> memberResults() {
         return value(TeamGraphConstants.STATE_MEMBER_RESULTS)
                 .map(v -> (List<Map<String, Object>>) v)
+                .orElse(List.of());
+    }
+
+    public List<String> attachmentIds() {
+        return value(ATTACHMENT_IDS)
+                .filter(List.class::isInstance)
+                .map(raw -> ((List<?>) raw).stream().map(String.class::cast).toList())
                 .orElse(List.of());
     }
 

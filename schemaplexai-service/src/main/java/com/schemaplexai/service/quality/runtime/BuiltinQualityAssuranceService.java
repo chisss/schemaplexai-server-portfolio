@@ -2,6 +2,7 @@ package com.schemaplexai.service.quality.runtime;
 
 import com.schemaplexai.common.enums.ExecutionStrategyEnum;
 import com.schemaplexai.common.enums.QualityIssueTypeEnum;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.entity.WorkflowInstance;
 import com.schemaplexai.model.entity.WorkflowNodeExecution;
 import com.schemaplexai.service.integration.git.GitOperationService;
@@ -79,15 +80,22 @@ public class BuiltinQualityAssuranceService {
      * MQ 偏离检测消息处理（ASYNC 策略）
      */
     @Transactional(rollbackFor = Exception.class)
-    public Map<String, Object> handleDeviationMessage(String taskId, String specId, String agentExecutionId, String targetContent) {
+    public Map<String, Object> handleDeviationMessage(String taskId, String specId, String agentExecutionId,
+                                                      String targetContent) {
+        return handleDeviationMessage(taskId, specId, agentExecutionId, targetContent, null);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> handleDeviationMessage(String taskId, String specId, String agentExecutionId,
+                                                      String targetContent, String originalTask) {
         QualityCheckRequest request = new QualityCheckRequest(
                 specId, targetContent, null,
                 QualityIssueTypeEnum.DEVIATION.getCode(), "manual",
                 ExecutionStrategyEnum.ASYNC.getCode(), null, Map.of(),
                 null, agentExecutionId, "manual_quality_check", "质量保障中心偏离检测",
-                null, null, 0
+                null, SecurityUtil.getCurrentTenantId(), 0, originalTask
         );
-        QualityCheckResult checkResult = qualityExecutionPipeline.execute(request);
+        QualityCheckResult checkResult = qualityExecutionPipeline.execute(request, taskId);
         return checkResult.toOutputMap();
     }
 
@@ -106,8 +114,9 @@ public class BuiltinQualityAssuranceService {
      */
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> handleIntentMessage(String taskId, String specId, String docType) {
-        QualityCheckRequest request = QualityCheckRequest.forIntentDefect(specId, null, docType, null, null);
-        QualityCheckResult checkResult = qualityExecutionPipeline.execute(request);
+        QualityCheckRequest request = QualityCheckRequest.forIntentDefect(
+                specId, null, docType, null, SecurityUtil.getCurrentTenantId());
+        QualityCheckResult checkResult = qualityExecutionPipeline.execute(request, taskId);
         return checkResult.toOutputMap();
     }
 

@@ -2,7 +2,12 @@ package com.schemaplexai.service.agent.execution;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.ChatMessageMapper;
+import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.ChatMessageEntity;
 import com.schemaplexai.service.memory.CompositeChatMemoryStore;
 import lombok.RequiredArgsConstructor;
@@ -11,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 对话回滚服务
@@ -24,6 +30,7 @@ import java.util.List;
 public class ConversationRollbackService {
 
     private final ChatMessageMapper chatMessageMapper;
+    private final AgentExecutionMapper agentExecutionMapper;
     private final CompositeChatMemoryStore chatMemoryStore;
 
     /**
@@ -35,28 +42,44 @@ public class ConversationRollbackService {
      */
     @Transactional
     public int rollback(String conversationId, int targetTurnIndex) {
-        List<ChatMessageEntity> toDelete = chatMessageMapper.selectList(
-                new LambdaQueryWrapper<ChatMessageEntity>()
-                        .eq(ChatMessageEntity::getConversationId, conversationId)
-                        .gt(ChatMessageEntity::getTurnIndex, targetTurnIndex)
-                        .orderByAsc(ChatMessageEntity::getMessageIndex));
-
-        if (toDelete.isEmpty()) {
-            log.debug("无需回滚: conversationId={}, targetTurn={}", conversationId, targetTurnIndex);
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        String userId = SecurityUtil.getCurrentUserId();
+        if (tenantId == null || userId == null) {
+            throw new BusinessException(ResultCode.FORBIDDEN);
+        }
+        String canonicalId = conversationId.startsWith(tenantId + ":") || conversationId.startsWith("team:")
+                ? conversationId : tenantId + ":" + conversationId;
+        List<AgentExecution> executions = findExecutions(tenantId, canonicalId);
+        if (executions.isEmpty() && !conversationId.equals(canonicalId)) {
+            canonicalId = conversationId;
+            executions = findExecutions(tenantId, canonicalId);
+        }
+        if (executions.isEmpty()) {
             return 0;
         }
+        if (executions.stream().anyMatch(execution -> !Objects.equals(userId, execution.getCreatedBy()))) {
+            throw new BusinessException(ResultCode.FORBIDDEN);
+        }
 
+        chatMessageMapper.lockConversation(canonicalId);
         int deleted = chatMessageMapper.update(null,
                 new LambdaUpdateWrapper<ChatMessageEntity>()
-                        .eq(ChatMessageEntity::getConversationId, conversationId)
+                        .eq(ChatMessageEntity::getTenantId, tenantId)
+                        .eq(ChatMessageEntity::getConversationId, canonicalId)
                         .gt(ChatMessageEntity::getTurnIndex, targetTurnIndex)
                         .set(ChatMessageEntity::getDeleted, 1));
 
-        chatMemoryStore.invalidateCache(conversationId);
-
+        chatMemoryStore.invalidateCache(canonicalId);
         log.info("对话回滚完成: conversationId={}, targetTurn={}, deletedMessages={}",
-                conversationId, targetTurnIndex, deleted);
+                canonicalId, targetTurnIndex, deleted);
         return deleted;
+    }
+
+    private List<AgentExecution> findExecutions(String tenantId, String conversationId) {
+        return agentExecutionMapper.selectList(new LambdaQueryWrapper<AgentExecution>()
+                .select(AgentExecution::getCreatedBy)
+                .eq(AgentExecution::getTenantId, tenantId)
+                .eq(AgentExecution::getConversationId, conversationId));
     }
 
     /**
@@ -66,6 +89,7 @@ public class ConversationRollbackService {
         ChatMessageEntity last = chatMessageMapper.selectOne(
                 new LambdaQueryWrapper<ChatMessageEntity>()
                         .eq(ChatMessageEntity::getConversationId, conversationId)
+                        .isNotNull(ChatMessageEntity::getTurnIndex)
                         .orderByDesc(ChatMessageEntity::getTurnIndex)
                         .last("LIMIT 1"));
         return last != null && last.getTurnIndex() != null ? last.getTurnIndex() : 0;

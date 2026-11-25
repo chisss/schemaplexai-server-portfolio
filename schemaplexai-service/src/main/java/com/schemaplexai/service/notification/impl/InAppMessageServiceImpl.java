@@ -22,6 +22,9 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.util.Set;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,14 +95,26 @@ public class InAppMessageServiceImpl implements InAppMessageService {
     public PageResult<InAppMessageVO> pageInbox(InAppMessageQueryRequest request) {
         String currentUserId = SecurityUtil.getCurrentUserId();
         Page<InAppMessageRecipient> page = new Page<>(
-                request.getPage() == null ? 1 : request.getPage(),
-                request.getSize() == null ? 20 : request.getSize()
+                request.getPage() == null ? 1 : Math.max(1, request.getPage()),
+                request.getSize() == null ? 20 : Math.clamp(request.getSize(), 1, 100)
         );
         LambdaQueryWrapper<InAppMessageRecipient> wrapper = new LambdaQueryWrapper<InAppMessageRecipient>()
                 .eq(InAppMessageRecipient::getRecipientUserId, currentUserId)
-                .orderByDesc(InAppMessageRecipient::getCreatedAt);
+                .orderByDesc(InAppMessageRecipient::getCreatedAt).orderByAsc(InAppMessageRecipient::getId);
         if (StringUtils.hasText(request.getStatus())) {
             wrapper.eq(InAppMessageRecipient::getStatus, request.getStatus().trim());
+        }
+        if (StringUtils.hasText(request.getKeyword()) || StringUtils.hasText(request.getBusinessType())) {
+            String keyword = StringUtils.hasText(request.getKeyword()) ? request.getKeyword().trim() : "";
+            String type = StringUtils.hasText(request.getBusinessType()) ? request.getBusinessType().trim() : "";
+            wrapper.apply("""
+                    EXISTS (SELECT 1 FROM sf_in_app_message m
+                      WHERE m.id=sf_in_app_message_recipient.message_id
+                      AND m.tenant_id=sf_in_app_message_recipient.tenant_id AND m.deleted=0
+                      AND ({0}='' OR position({0} in m.title)>0 OR position({0} in m.content)>0
+                           OR position({0} in m.business_type)>0)
+                      AND ({1}='' OR m.business_type={1}))
+                    """, keyword, type);
         }
         Page<InAppMessageRecipient> result = recipientMapper.selectPage(page, wrapper);
         List<InAppMessageRecipient> recipients = result.getRecords();
@@ -115,8 +130,6 @@ public class InAppMessageServiceImpl implements InAppMessageService {
         List<InAppMessageVO> records = recipients.stream()
                 .map(recipient -> toVO(recipient, messageMap.get(recipient.getMessageId())))
                 .filter(Objects::nonNull)
-                .filter(vo -> !StringUtils.hasText(request.getKeyword())
-                        || containsKeyword(vo, request.getKeyword().trim()))
                 .toList();
         return new PageResult<>(records, result.getTotal(), result.getCurrent(), result.getSize());
     }
@@ -250,10 +263,27 @@ public class InAppMessageServiceImpl implements InAppMessageService {
                 specId, workflowNodeId, recipients.size());
     }
 
-    private boolean containsKeyword(InAppMessageVO vo, String keyword) {
-        return (vo.getTitle() != null && vo.getTitle().contains(keyword))
-                || (vo.getContent() != null && vo.getContent().contains(keyword))
-                || (vo.getBusinessType() != null && vo.getBusinessType().contains(keyword));
+    @Override
+    public InAppMessageVO detail(String recipientId) {
+        var recipient = requireOwnedRecipient(recipientId);
+        var result = toVO(recipient, inAppMessageMapper.selectById(recipient.getMessageId()));
+        if (result == null) throw new BusinessException(ResultCode.NOT_FOUND, "站内信不存在");
+        return result;
+    }
+
+    @Override
+    public long markAllRead(OffsetDateTime readBefore) {
+        var now = LocalDateTime.now();
+        var watermark = readBefore.atZoneSameInstant(ZoneId.systemDefault()).toLocalDateTime();
+        if (watermark.isAfter(now)) watermark = now;
+        return recipientMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<InAppMessageRecipient>()
+                .eq(InAppMessageRecipient::getTenantId, SecurityUtil.getCurrentTenantId())
+                .eq(InAppMessageRecipient::getRecipientUserId, SecurityUtil.getCurrentUserId())
+                .eq(InAppMessageRecipient::getStatus, InAppMessageRecipientStatusEnum.UNREAD.getCode())
+                .le(InAppMessageRecipient::getCreatedAt, watermark)
+                .set(InAppMessageRecipient::getStatus, InAppMessageRecipientStatusEnum.READ.getCode())
+                .set(InAppMessageRecipient::getReadAt, now)
+                .set(InAppMessageRecipient::getUpdatedAt, now));
     }
 
     private InAppMessageVO toVO(InAppMessageRecipient recipient, InAppMessage message) {
@@ -270,6 +300,11 @@ public class InAppMessageServiceImpl implements InAppMessageService {
         vo.setSourceType(message.getSourceType());
         vo.setSourceId(message.getSourceId());
         vo.setActionUrl(message.getActionUrl());
+        if (message.getSourceType() != null && message.getSourceId() != null
+                && Set.of("review_session", "workflow_review", "quality_issue", "security_incident",
+                          "agent_execution", "workflow_instance", "desktop_schedule").contains(message.getSourceType())) {
+            vo.setTarget(new InAppMessageVO.Target(message.getSourceType(), message.getSourceId()));
+        }
         vo.setStatus(recipient.getStatus());
         vo.setReadAt(recipient.getReadAt());
         vo.setArchivedAt(recipient.getArchivedAt());
@@ -280,7 +315,8 @@ public class InAppMessageServiceImpl implements InAppMessageService {
 
     private InAppMessageRecipient requireOwnedRecipient(String recipientId) {
         InAppMessageRecipient recipient = recipientMapper.selectById(recipientId);
-        if (recipient == null || !SecurityUtil.getCurrentUserId().equals(recipient.getRecipientUserId())) {
+        if (recipient == null || !Objects.equals(SecurityUtil.getCurrentUserId(), recipient.getRecipientUserId())
+                || !Objects.equals(SecurityUtil.getCurrentTenantId(), recipient.getTenantId())) {
             throw new BusinessException(ResultCode.NOT_FOUND, "站内信不存在");
         }
         return recipient;

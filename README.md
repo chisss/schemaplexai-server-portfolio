@@ -4,8 +4,8 @@
 
 [![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white)](https://openjdk.org/)
 [![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.3-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
-[![LangChain4j](https://img.shields.io/badge/LangChain4j-1.13-2F6BFF)](https://docs.langchain4j.dev/)
-[![LangGraph4j](https://img.shields.io/badge/LangGraph4j-1.8-111827)](https://github.com/bsorrentino/langgraph4j)
+[![LangChain4j](https://img.shields.io/badge/LangChain4j-1.24.0-2F6BFF)](https://docs.langchain4j.dev/)
+[![LangGraph4j](https://img.shields.io/badge/LangGraph4j-1.9.9-111827)](https://github.com/bsorrentino/langgraph4j)
 [![Apache Jena](https://img.shields.io/badge/Apache_Jena-6.2-D22128)](https://jena.apache.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](#权利声明)
 
@@ -177,6 +177,8 @@ flowchart TD
 - **强制收敛与降级输出**：轮次耗尽、空响应但已有证据、循环或模型异常时，系统尝试生成基于现有证据的可交付结果。
 - **完整可观测性**：轮次、工具调用、Token、耗时、fallback、质量反馈和状态变更均进入事件流与 Trace。
 
+桌面执行通过现有 SSE 接收 `ACTIVITY_STEP` 活动快照。同一步骤使用固定 ID，模型阶段、工具结果和 Team 成员活动都可以更新原步骤。断线后使用 `GET /agents/{id}/executions/{execId}/activity` 回读最近 600 条已保存的步骤快照，并沿用执行详情的访问校验。模型流式回调发送阶段概述，工具详情使用明确选取的定位字段和结果元数据。最终文本继续经执行内核校验后交付。
+
 ## Multi-Agent 与 Agentic Graph
 
 Team Agent 使用 LangGraph4j `StateGraph<TeamGraphState>` 建模，而不是在 Service 中堆叠分支逻辑。
@@ -214,7 +216,7 @@ stateDiagram-v2
 | 会话记忆 | Redis L1 + PostgreSQL L2 | 每轮模型消息与工具结果持久化 | Redis 命中优先，未命中回源 PostgreSQL 并回填缓存 |
 | Agent 原始记忆 | PostgreSQL，按租户与 Agent 隔离 | 执行完成后异步从对话提取 `FACT / PREFERENCE / CONSTRAINT / PATTERN` | 作为两阶段长期记忆管线的原料 |
 | Agent 合并记忆 | PostgreSQL，带相关度和过期时间 | 主模型去重、合并互补信息并淘汰过时条目 | 取高相关记忆注入后续任务 |
-| 用户显式记忆 | PostgreSQL，按用户、Agent、项目作用域隔离 | 仅识别“请记住”等显式表达；临时会话和关闭记忆时不写入 | 分为静态画像与当前任务相关记忆注入 Prompt |
+| 用户显式记忆 | PostgreSQL，按用户、Agent、项目作用域隔离 | Solo 和 Team 在发出完成通知前，从本次执行的用户原文识别明确的记忆请求。临时会话和关闭记忆时跳过写入 | 分为静态画像与当前任务相关记忆注入 Prompt |
 | RAG 知识 | Milvus + 业务上下文存储 | 文档与 Context 进入向量检索链路 | LangChain4j Retriever 优先，Milvus 与词法检索提供 fallback |
 | Team 共享证据 | Redis 团队上下文 + Graph State | 成员执行后写入摘要与结果 | 后续 Contributor 和 Leader 消费上游证据 |
 
@@ -423,18 +425,20 @@ schemaplexai-server/
 
 环境要求：Java 21、Maven 3.9+。
 
+Agent 框架使用 LangChain4j `1.24.0`，其嵌入、RAG、Skills、MCP 扩展使用配套的 `1.24.0-beta34`；Community MCP Server 独立发布，使用 `1.23.0-beta33`。LangGraph4j 使用 `1.9.9`：截至 2026-11-19，GitHub 已发布 `1.9.10`，但 Maven Central 尚无对应 BOM、Core 和 PostgreSQL Saver 制品，故采用最新可解析正式版。
+
 ```bash
 mvn -DskipTests compile
 ```
 
-完整运行还需要 PostgreSQL、Redis 等基础设施。公开仓库提供无敏感值的 `application.example.yml`，但不发布数据库初始化 SQL、实际环境配置或部署密钥。
+[示例配置](schemaplexai-web/src/main/resources/application.example.yml)展示服务端所需的环境变量。运行数据库集成测试、初始化行业模板或升级现有部署时，需要从完整交付环境取得相应的数据库初始化与迁移资源。Team checkpoint 的存储格式及恢复边界见[运行时设计](schemaplexai-service/DESIGN.md)。
 
 ## 项目边界
 
 - 这是个人项目展示仓库，不是开箱即用的公共 SaaS 服务。
 - 默认 Team Member 当前采用流水线执行；并行执行代码已具备，但未作为默认策略启用。
-- 完整集成测试依赖 PostgreSQL、Redis、Milvus 等外部服务。
-- 生产部署必须替换所有示例密钥，并根据组织策略配置权限、沙箱和安全规则。
+- 数据库集成测试依赖相应的迁移资源和 PostgreSQL、Redis、Milvus 等外部服务。
+- 生产部署必须通过安全环境变量注入实际凭据，并根据组织策略配置权限、沙箱和安全规则。
 
 ## 权利声明
 

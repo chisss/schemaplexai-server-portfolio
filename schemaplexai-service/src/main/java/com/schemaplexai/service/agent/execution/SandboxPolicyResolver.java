@@ -17,8 +17,8 @@ import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
@@ -65,7 +65,7 @@ public class SandboxPolicyResolver {
     /**
      * 监听策略变更事件，原子替换缓存
      */
-    @EventListener
+    @TransactionalEventListener(fallbackExecution = true)
     public void onPolicyChanged(SandboxPolicyChangedEvent event) {
         if (event != null && StringUtils.hasText(event.tenantId())) {
             policyCache.remove(event.tenantId());

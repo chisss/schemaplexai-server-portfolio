@@ -24,13 +24,23 @@ public record QualityCheckRequest(
         String nodeLabel,
         String docType,
         String tenantId,
-        int retryCount
+        int retryCount,
+        String originalTask
 ) {
 
     public QualityCheckRequest {
         executionStrategy = executionStrategy == null ? ExecutionStrategyEnum.SHORT_WAIT.getCode() : executionStrategy;
         nodeConfig = nodeConfig == null ? Map.of() : nodeConfig;
         retryCount = Math.max(0, retryCount);
+    }
+
+    public QualityCheckRequest(String specId, String targetContent, String referenceContent,
+                               String issueType, String sourceType, String executionStrategy,
+                               String profileId, Map<String, Object> nodeConfig, String workflowTemplateId,
+                               String agentExecutionId, String nodeId, String nodeLabel, String docType,
+                               String tenantId, int retryCount) {
+        this(specId, targetContent, referenceContent, issueType, sourceType, executionStrategy, profileId,
+                nodeConfig, workflowTemplateId, agentExecutionId, nodeId, nodeLabel, docType, tenantId, retryCount, null);
     }
 
     /** 快捷构造：工作流场景 */

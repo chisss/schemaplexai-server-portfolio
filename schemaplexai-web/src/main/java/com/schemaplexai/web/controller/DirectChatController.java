@@ -1,5 +1,7 @@
 package com.schemaplexai.web.controller;
 
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
+import com.schemaplexai.service.desktop.DesktopAttachmentService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
@@ -15,6 +17,8 @@ import com.schemaplexai.service.ai.LangChain4jModelFactory;
 import com.schemaplexai.service.ai.ImageGenerationService;
 import com.schemaplexai.service.ai.MultimodalMessageBuilder;
 import com.schemaplexai.service.chat.DirectChatStreamRequest;
+import com.schemaplexai.service.desktop.DesktopAttachmentService;
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
 import com.schemaplexai.service.chat.DirectChatStreamService;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -53,6 +57,7 @@ import java.util.UUID;
 @Tag(name = "直接模型对话")
 public class DirectChatController {
 
+    private final DesktopAttachmentService desktopAttachments;
     private final AiModelMapper aiModelMapper;
     private final ChatMessageMapper chatMessageMapper;
     private final LangChain4jModelFactory modelFactory;
@@ -75,6 +80,8 @@ public class DirectChatController {
                 ? request.getConversationId()
                 : UUID.randomUUID().toString().replace("-", "");
 
+        DesktopExecutionTarget.requireLegacyConversation(conversationId);
+        desktopAttachments.validateObjectKeys(request.getAttachmentIds(), false);
         List<ChatMessageEntity> historyEntities = loadHistoryEntities(conversationId);
         List<ChatMessage> messages = new ArrayList<>();
         historyEntities.stream()

@@ -72,6 +72,15 @@ public class AIModelRouter {
     }
 
     public List<LangChain4jResolution> resolveRouteChain(String modelDisplayName, String reasoningStrength) {
+        return resolveRouteChain(modelDisplayName, reasoningStrength, false);
+    }
+
+    public List<LangChain4jResolution> resolveRouteChainForExecution(String modelDisplayName, String reasoningStrength) {
+        return resolveRouteChain(modelDisplayName, reasoningStrength, true);
+    }
+
+    private List<LangChain4jResolution> resolveRouteChain(String modelDisplayName, String reasoningStrength,
+                                                         boolean executionManagedRetries) {
         AiModel primaryModel = requireActiveModelByName(modelDisplayName);
         LinkedHashSet<String> modelIds = new LinkedHashSet<>();
         modelIds.add(primaryModel.getId());
@@ -98,7 +107,7 @@ public class AIModelRouter {
 
         List<LangChain4jResolution> chain = new ArrayList<>();
         for (AiModel model : orderedModels) {
-            chain.add(buildResolution(model, reasoningStrength));
+            chain.add(buildResolution(model, reasoningStrength, executionManagedRetries));
         }
         return chain;
     }
@@ -190,7 +199,7 @@ public class AIModelRouter {
         List<LangChain4jResolution> chain = new ArrayList<>();
         for (String modelId : orderedIds) {
             try {
-                chain.add(buildResolution(requireActiveModelById(modelId), reasoningStrength));
+                chain.add(buildResolution(requireActiveModelById(modelId), reasoningStrength, true));
             } catch (Exception e) {
                 log.warn("模型组降级，跳过: groupId={}, modelId={}, error={}", groupId, modelId, e.getMessage());
             }
@@ -396,14 +405,15 @@ public class AIModelRouter {
     }
 
     private LangChain4jResolution buildResolution(AiModel aiModel) {
-        return buildResolution(aiModel, null);
+        return buildResolution(aiModel, null, false);
     }
 
-    private LangChain4jResolution buildResolution(AiModel aiModel, String reasoningStrength) {
+    private LangChain4jResolution buildResolution(AiModel aiModel, String reasoningStrength, boolean executionManagedRetries) {
         AiModelConfig config = AiModelConfig.from(aiModel, reasoningStrength);
         log.info("AI 模型解析成功: modelName={}, provider={}, modelId={}",
                 aiModel.getName(), config.getProvider(), config.getModelId());
-        return new LangChain4jResolution(modelFactory.getOrCreate(config), config);
+        var model = executionManagedRetries ? modelFactory.getOrCreateForExecution(config) : modelFactory.getOrCreate(config);
+        return new LangChain4jResolution(model, config);
     }
 
     private record IndexedModel(int index, AiModel model) {}
@@ -488,5 +498,9 @@ public class AIModelRouter {
      */
     public dev.langchain4j.model.chat.ChatModel buildChatModel(AiModelConfig config) {
         return modelFactory.getOrCreate(config);
+    }
+
+    public dev.langchain4j.model.chat.ChatModel buildChatModelForExecution(AiModelConfig config) {
+        return modelFactory.getOrCreateForExecution(config);
     }
 }

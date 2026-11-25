@@ -7,7 +7,10 @@ import com.schemaplexai.dao.mapper.AgentMemoryMapper;
 import com.schemaplexai.model.entity.AgentMemory;
 import com.schemaplexai.service.agent.execution.AgentModelInvoker;
 import com.schemaplexai.service.ai.AIModelRouter;
+import com.schemaplexai.service.ai.ChatMessageText;
 import com.schemaplexai.service.ai.AiModelConfig;
+import com.schemaplexai.service.memory.MemoryExtractionWriter;
+import com.schemaplexai.service.memory.MemoryExtractionWriter.Extractor;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -70,6 +73,7 @@ public class AgentMemoryExtractionService {
 
     private final AgentMemoryMapper memoryMapper;
     private final AIModelRouter modelRouter;
+    private final MemoryExtractionWriter extractionWriter;
 
     /**
      * 异步提取记忆（执行完成后调用）
@@ -122,11 +126,7 @@ public class AgentMemoryExtractionService {
 
             List<AgentMemory> memories = parseMemories(tenantId, agentId, executionId, output,
                     conversationHistory.size());
-            for (AgentMemory memory : memories) {
-                memoryMapper.insert(memory);
-            }
-            log.info("记忆提取完成: agentId={}, executionId={}, count={}", agentId, executionId, memories.size());
-            return memories;
+            return extractionWriter.writeOnce(executionId, Extractor.AGENT, memories, memoryMapper::insert);
         } catch (Exception e) {
             log.warn("模型记忆提取失败，降级到正则提取: error={}", e.getMessage());
             return extractByRegex(tenantId, agentId, executionId, conversationHistory);
@@ -169,8 +169,7 @@ public class AgentMemoryExtractionService {
             ChatMessage msg = messages.get(i);
             String role = msg instanceof UserMessage ? "用户" :
                     msg instanceof AiMessage ? "AI" : "系统";
-            String text = msg instanceof UserMessage um ? um.singleText() :
-                    msg instanceof AiMessage am ? am.text() : msg.toString();
+            String text = ChatMessageText.textOf(msg);
             if (StringUtils.hasText(text)) {
                 sb.insert(0, role + ": " + truncate(text, 1000) + "\n\n");
             }
@@ -210,7 +209,7 @@ public class AgentMemoryExtractionService {
         List<AgentMemory> memories = new ArrayList<>();
         for (ChatMessage msg : messages) {
             if (!(msg instanceof UserMessage um)) continue;
-            String text = um.singleText();
+            String text = ChatMessageText.textOf(um);
             if (!StringUtils.hasText(text) || text.length() < 20) continue;
             // 提取包含"必须"、"不要"、"总是"等约束性关键词的用户消息
             if (text.contains("必须") || text.contains("不要") || text.contains("总是")
@@ -228,11 +227,7 @@ public class AgentMemoryExtractionService {
                 if (memories.size() >= 3) break;
             }
         }
-        if (!memories.isEmpty()) {
-            memories.forEach(memoryMapper::insert);
-            log.info("正则降级记忆提取: agentId={}, count={}", agentId, memories.size());
-        }
-        return memories;
+        return extractionWriter.writeOnce(executionId, Extractor.AGENT, memories, memoryMapper::insert);
     }
 
     private String truncate(String text, int maxLen) {

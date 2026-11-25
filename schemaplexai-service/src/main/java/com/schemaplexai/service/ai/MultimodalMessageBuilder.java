@@ -1,5 +1,9 @@
 package com.schemaplexai.service.ai;
 
+import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.service.desktop.DesktopAttachmentService;
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
 import com.schemaplexai.service.storage.DocumentStorageService;
 import com.schemaplexai.service.util.FileContentExtractor;
 import dev.langchain4j.data.message.ImageContent;
@@ -7,6 +11,7 @@ import dev.langchain4j.data.message.TextContent;
 import dev.langchain4j.data.message.UserMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.tika.Tika;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -29,8 +34,19 @@ public class MultimodalMessageBuilder {
 
     private static final Set<String> IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp");
 
+    private static final int MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+    private static final Tika TIKA = new Tika();
+
+    private final DesktopAttachmentService attachments;
     private final DocumentStorageService documentStorageService;
     private final FileContentExtractor fileContentExtractor;
+
+    public UserMessage buildForExecution(String userText, List<String> attachmentIds, boolean multimodal,
+                                         String tenantId, String ownerId, String conversationId) {
+        attachments.validateObjectKeys(attachmentIds, DesktopExecutionTarget.workspaceConversation(conversationId),
+                tenantId, ownerId);
+        return build(userText, attachmentIds, multimodal);
+    }
 
     /**
      * 构建用户消息：多模态模型将图片附件转为 ImageContent，文档附件转为文本摘要追加到文本中。
@@ -67,7 +83,7 @@ public class MultimodalMessageBuilder {
             } else {
                 String extracted = extractText(attachmentId);
                 if (StringUtils.hasText(extracted)) {
-                    textAppend.append("\n\n### ").append(attachmentId).append("\n").append(extracted);
+                    textAppend.append("\n\n### ").append(resolveFileName(attachmentId)).append("\n").append(extracted);
                 }
             }
         }
@@ -81,12 +97,20 @@ public class MultimodalMessageBuilder {
     private java.util.Optional<ImageContent> buildImageContent(String objectKey, String ext) {
         try (InputStream is = documentStorageService.getObject(
                 documentStorageService.getDefaultBucket(), objectKey)) {
-            byte[] bytes = is.readAllBytes();
-            String base64 = Base64.getEncoder().encodeToString(bytes);
+            byte[] bytes = is.readNBytes(MAX_IMAGE_BYTES + 1);
+            if (bytes.length > MAX_IMAGE_BYTES) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "图片附件不能超过 12 MiB");
+            }
             String mimeType = resolveMimeType(ext);
+            if (!mimeType.equals(TIKA.detect(bytes))) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "图片格式与文件内容不匹配");
+            }
+            String base64 = Base64.getEncoder().encodeToString(bytes);
             return java.util.Optional.of(ImageContent.from(base64, mimeType));
+        } catch (BusinessException exception) {
+            throw exception;
         } catch (Exception e) {
-            log.warn("[Multimodal] 读取图片附件失败: objectKey={}, error={}", objectKey, e.getMessage());
+            log.warn("[Multimodal] 读取图片附件失败: errorType={}", e.getClass().getSimpleName());
             return java.util.Optional.empty();
         }
     }
@@ -121,7 +145,7 @@ public class MultimodalMessageBuilder {
             if (!StringUtils.hasText(attachmentId)) continue;
             String extracted = extractText(attachmentId);
             if (StringUtils.hasText(extracted)) {
-                sections.add("### " + attachmentId + "\n" + extracted);
+                sections.add("### " + resolveFileName(attachmentId) + "\n" + extracted);
             }
         }
         return String.join("\n\n", sections);

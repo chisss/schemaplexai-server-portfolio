@@ -14,6 +14,8 @@ import dev.langchain4j.http.client.HttpRequest;
 import dev.langchain4j.http.client.SuccessfulHttpResponse;
 import dev.langchain4j.http.client.sse.ServerSentEventListener;
 import dev.langchain4j.http.client.sse.ServerSentEventParser;
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.Headers;
 import okhttp3.MediaType;
 import okhttp3.MultipartBody;
@@ -21,6 +23,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,7 +37,7 @@ import java.util.Map;
 /**
  * 使用 OkHttp 适配 LangChain4j HTTP SPI。
  *
- * <p>当前主要用于 OpenAI 兼容代理的同步调用，避免 JDK HttpClient 与部分自定义网关的兼容性问题。
+ * <p>用于 OpenAI 兼容代理，避免 JDK HttpClient 与部分自定义网关的兼容性问题。
  */
 public class LangChainOkHttpClientBuilder implements HttpClientBuilder {
 
@@ -111,7 +114,34 @@ public class LangChainOkHttpClientBuilder implements HttpClientBuilder {
 
         @Override
         public void execute(HttpRequest request, ServerSentEventParser parser, ServerSentEventListener listener) {
-            listener.onError(new UnsupportedOperationException("当前 OkHttp 适配器未实现流式 SSE 调用"));
+            okHttpClient.newCall(toOkHttpRequest(request)).enqueue(new Callback() {
+                @Override
+                public void onFailure(Call call, IOException error) {
+                    listener.onError(error instanceof SocketTimeoutException ? new TimeoutException(error) : error);
+                }
+
+                @Override
+                public void onResponse(Call call, Response response) {
+                    try (response) {
+                        ResponseBody body = response.body();
+                        if (!response.isSuccessful()) {
+                            listener.onError(new HttpException(response.code(), body == null ? "" : body.string()));
+                            return;
+                        }
+                        MediaType type = body == null ? null : body.contentType();
+                        if (body == null || (type != null && "json".equals(type.subtype()))) {
+                            listener.onError(new HttpException(501, "模型代理未返回 SSE 响应"));
+                            return;
+                        }
+                        listener.onOpen(SuccessfulHttpResponse.builder()
+                                .statusCode(response.code()).headers(toLangChainHeaders(response.headers())).build());
+                        parser.parse(body.byteStream(), listener);
+                        listener.onClose();
+                    } catch (IOException | RuntimeException error) {
+                        listener.onError(error);
+                    }
+                }
+            });
         }
 
         private Request toOkHttpRequest(HttpRequest request) {
@@ -175,6 +205,9 @@ public class LangChainOkHttpClientBuilder implements HttpClientBuilder {
                 copyIfPresent(objectNode, normalized, "temperature");
                 copyIfPresent(objectNode, normalized, "top_p");
                 copyIfPresent(objectNode, normalized, "stop");
+                if (objectNode.path("stream").asBoolean()) {
+                    copyIfPresent(objectNode, normalized, "stream");
+                }
                 ArrayList<String> removedFields = new ArrayList<>();
                 objectNode.fieldNames().forEachRemaining(field -> {
                     if (!normalized.has(field)

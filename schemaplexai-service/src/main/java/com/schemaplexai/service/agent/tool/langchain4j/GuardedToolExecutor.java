@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.model.ToolResult;
+import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.execution.SandboxGuard;
@@ -33,6 +34,7 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
     private final ObjectMapper objectMapper;
     private final String tenantId;
     private final String agentId;
+    private final String executionId;
     private final AgentToolBinding binding;
     private final String sourceType;
     private final SandboxPolicy sandboxPolicy;
@@ -48,15 +50,33 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
                                SandboxPolicy sandboxPolicy,
                                SandboxGuard sandboxGuard,
                                SecurityRuntimeGuardService securityRuntimeGuardService) {
+        this(delegate, objectMapper, tenantId, agentId, binding, sourceType, sandboxPolicy, sandboxGuard,
+                securityRuntimeGuardService, null);
+    }
+
+    GuardedToolExecutor(dev.langchain4j.service.tool.ToolExecutor delegate,
+                        ObjectMapper objectMapper, String tenantId, String agentId,
+                        AgentToolBinding binding, String sourceType,
+                        SandboxPolicy sandboxPolicy, SandboxGuard sandboxGuard,
+                        SecurityRuntimeGuardService securityRuntimeGuardService, String executionId) {
         this.delegate = delegate;
         this.objectMapper = objectMapper;
         this.tenantId = tenantId;
         this.agentId = agentId;
+        this.executionId = executionId;
         this.binding = binding;
         this.sourceType = sourceType;
         this.sandboxPolicy = sandboxPolicy;
         this.sandboxGuard = sandboxGuard;
         this.securityRuntimeGuardService = securityRuntimeGuardService;
+    }
+
+    boolean isDesktopTool() {
+        return delegate instanceof LangChain4jBindingToolExecutor executor && executor.isDesktopTool();
+    }
+
+    public String sourceType() {
+        return sourceType;
     }
 
     @Override
@@ -80,8 +100,7 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
         // ② 运行时合规前置检查
         if (securityRuntimeGuardService != null) {
             SecurityCheckDecisionVO preDecision = securityRuntimeGuardService.evaluate(
-                    ToolSecuritySupport.buildCheckRequest(
-                            SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE, tenantId, agentId, toolCall, null, objectMapper),
+                    buildCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE, toolCall, null),
                     null
             );
             if (ToolSecuritySupport.requiresInterrupt(preDecision)) {
@@ -97,9 +116,8 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
         // ④ 运行时合规后置检查
         if (securityRuntimeGuardService != null) {
             SecurityCheckDecisionVO postDecision = securityRuntimeGuardService.evaluate(
-                    ToolSecuritySupport.buildCheckRequest(
-                            SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, tenantId, agentId, toolCall,
-                            toPlatformResult(request, result), objectMapper),
+                    buildCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, toolCall,
+                            toPlatformResult(request, result)),
                     null
             );
             if (ToolSecuritySupport.requiresInterrupt(postDecision)) {
@@ -114,6 +132,16 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
     @Override
     public String execute(ToolExecutionRequest request, Object memoryId) {
         return executeWithContext(request, null).resultText();
+    }
+
+    private SecurityRuntimeCheckRequest buildCheckRequest(String scene, ToolCall call, ToolResult result) {
+        SecurityRuntimeCheckRequest request =
+                ToolSecuritySupport.buildCheckRequest(scene, tenantId, agentId, call, result, objectMapper);
+        if (isDesktopTool() && StringUtils.hasText(executionId)) {
+            request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION);
+            request.setResourceId(executionId);
+        }
+        return request;
     }
 
     private ToolExecutionResult blockedResult(ToolCall toolCall, String message, String controlAction) {

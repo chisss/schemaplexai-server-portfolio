@@ -2,6 +2,12 @@
 
 业务服务模块，承载数据库数据源、Agent 执行、工具治理和语义查询的应用编排与基础设施适配。
 
+旧 PostgreSQL 库升级时将 Agent 记忆正文列扩展为 `TEXT`，迁移脚本由完整交付环境提供。`AgentMemoryContentMigrationPostgresTest` 使用 `DB_TEST_URL` 在临时表上验证长记忆和兼容性。
+
+## 企业 Desktop 执行桥
+
+`com.schemaplexai.service.desktop` 将显式指定设备的 `sys.*` 调用路由到企业员工本机，保持 Server Agent 循环及沙箱、安全检查。设备登记、领取、执行前核验和结果回传绑定 JWT 租户与用户；本机执行的历史、会话和控制限定 owner。当前为单节点有界内存通道，不重发未知结果的写操作。协议与部署限制见 [设备桥设计](src/main/java/com/schemaplexai/service/desktop/DESIGN.md)。
+
 ## 语义数据查询
 
 数据库接入能力位于 `com.schemaplexai.service.database`：
@@ -27,7 +33,7 @@
 - `application` 编排当前租户下的模型 CRUD 和草稿版本创建；
 - `infrastructure.database` 适配 MyBatis，并通过 tenant + revision 条件执行读写；
 - 草稿版本可绑定当前租户的 Schema 快照，后续自动构建本体时可追溯到确定的物理结构基线；
-- PostgreSQL 迁移见工作区 `sql/54_semantic_catalog.sql`。
+- PostgreSQL 语义目录结构由完整交付环境的数据库迁移初始化。
 
 Schema 快照链路复用租户数据库 MCP 数据源：
 
@@ -49,4 +55,4 @@ Schema 快照链路复用租户数据库 MCP 数据源：
 
 对外提供 `/semantic/query/interpret`、`/plan`、`/explain`、`/execute` 四阶段 REST 契约。客户端不能提交 graph IRI、原始 SPARQL、SQL、Mongo pipeline 或物理字段映射。
 
-详细方案见工作区的 [后端语义查询技术文档](../../document/tech/backend/07-语义数据查询与本体引擎技术文档.md)。
+语义层的完整查询流程见[项目说明](../README.md#本体驱动的企业数据查询)。

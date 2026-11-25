@@ -4,13 +4,19 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.schemaplexai.dao.mapper.ExecutionSteeringMapper;
 import com.schemaplexai.model.entity.ExecutionSteering;
+import com.schemaplexai.service.memory.CompositeChatMemoryStore;
+import com.schemaplexai.service.memory.PostgresChatMemoryStore.ArchivedMessage;
+import dev.langchain4j.data.message.UserMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -38,6 +44,7 @@ public class ExecutionSteeringService {
     }
 
     private final ExecutionSteeringMapper steeringMapper;
+    private final CompositeChatMemoryStore chatMemoryStore;
 
     /**
      * 投递一条引导（运行中/暂停中均可投递），seq 在同执行内单调递增。
@@ -83,12 +90,36 @@ public class ExecutionSteeringService {
      * 一次性应用：pending→applied CAS，重复消费返回 false
      */
     public boolean markApplied(String steeringId) {
+        return markApplied(new LambdaUpdateWrapper<ExecutionSteering>()
+                .eq(ExecutionSteering::getId, steeringId));
+    }
+
+    /** 提交引导消费状态及原始消息后，调用方才可将该消息加入执行窗口。 */
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public Optional<UserMessage> applyAndArchive(ExecutionSteering steering, String conversationId) {
+        if (steering == null || !StringUtils.hasText(steering.getId())
+                || !StringUtils.hasText(steering.getTenantId()) || !StringUtils.hasText(steering.getExecutionId())
+                || !StringUtils.hasText(steering.getContent()) || !StringUtils.hasText(conversationId)) {
+            throw new IllegalArgumentException("缺少待处理引导或会话信息");
+        }
+        boolean applied = markApplied(new LambdaUpdateWrapper<ExecutionSteering>()
+                .eq(ExecutionSteering::getId, steering.getId())
+                .eq(ExecutionSteering::getTenantId, steering.getTenantId())
+                .eq(ExecutionSteering::getExecutionId, steering.getExecutionId()));
+        if (!applied) {
+            return Optional.empty();
+        }
+        UserMessage message = UserMessage.from(buildSteeringWrapper(steering.getContent()));
+        chatMemoryStore.appendMessages(conversationId, steering.getExecutionId(),
+                List.of(new ArchivedMessage(message, steering.getContent())));
+        return Optional.of(message);
+    }
+
+    private boolean markApplied(LambdaUpdateWrapper<ExecutionSteering> scope) {
         ExecutionSteering update = new ExecutionSteering();
         update.setStatus(STATUS_APPLIED);
         update.setAppliedAt(LocalDateTime.now());
-        int rows = steeringMapper.update(update, new LambdaUpdateWrapper<ExecutionSteering>()
-                .eq(ExecutionSteering::getId, steeringId)
-                .eq(ExecutionSteering::getStatus, STATUS_PENDING));
+        int rows = steeringMapper.update(update, scope.eq(ExecutionSteering::getStatus, STATUS_PENDING));
         return rows == 1;
     }
 

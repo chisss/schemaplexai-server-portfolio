@@ -1,5 +1,10 @@
 package com.schemaplexai.task;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.dao.mapper.TenantMapper;
+import com.schemaplexai.model.entity.Tenant;
 import com.schemaplexai.service.workflow.ReviewSessionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -16,6 +21,7 @@ import org.springframework.stereotype.Component;
 public class ApprovalTimeoutTask {
 
     private final ReviewSessionService reviewSessionService;
+    private final TenantMapper tenantMapper;
 
     /**
      * 每30分钟检查超时的审批请求
@@ -26,11 +32,20 @@ public class ApprovalTimeoutTask {
     public void handleApprovalTimeout() {
         log.debug("开始检查审批超时...");
 
-        try {
-            reviewSessionService.handleTimeoutSessions();
-            log.debug("审批超时检查完成");
-        } catch (Exception e) {
-            log.error("审批超时处理异常", e);
+        var tenants = tenantMapper.selectList(new LambdaQueryWrapper<Tenant>()
+                .select(Tenant::getId)
+                .eq(Tenant::getStatus, CommonConstant.STATUS_ACTIVE));
+        String previousTenantId = SecurityUtil.getCurrentTenantId();
+        for (Tenant tenant : tenants) {
+            SecurityUtil.setCurrentTenantId(tenant.getId());
+            try {
+                reviewSessionService.handleTimeoutSessions();
+            } catch (Exception e) {
+                log.error("审批超时处理异常: tenantId={}", tenant.getId(), e);
+            } finally {
+                SecurityUtil.setCurrentTenantId(previousTenantId);
+            }
         }
+        log.debug("审批超时检查完成");
     }
 }

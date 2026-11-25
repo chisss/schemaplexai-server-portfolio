@@ -25,6 +25,10 @@ import com.schemaplexai.service.agent.tool.executor.SkillToolExecutor;
 import com.schemaplexai.service.agent.tool.model.ToolDefinition;
 import com.schemaplexai.service.integration.mcp.LangChain4jMcpClientFactory;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
+import com.schemaplexai.service.desktop.DesktopToolBroker;
+import com.schemaplexai.service.desktop.DesktopToolExecutor;
+import com.schemaplexai.service.desktop.DesktopToolSchema;
 import dev.langchain4j.agent.tool.SearchBehavior;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -51,6 +55,7 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -68,7 +73,7 @@ import java.util.UUID;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class AgentToolSessionFactory {
 
     private static final String ACTIVATE_SKILL_TOOL_NAME = "activate_skill";
@@ -91,10 +96,31 @@ public class AgentToolSessionFactory {
     private final LangChain4jMcpClientFactory mcpClientFactory;
     private final SandboxGuard sandboxGuard;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
+    private final DesktopToolBroker desktopToolBroker;
 
     private final LangChainToolSearchAdapter toolSearchAdapter = new LangChainToolSearchAdapter();
 
+    /** 兼容既有云端工具调用方；本机目标仍按缺少通道拒绝，禁止回退到云端目录。 */
+    public AgentToolSessionFactory(ObjectMapper objectMapper, AgentToolBindingMapper agentToolBindingMapper,
+                                   BuiltinToolMapper builtinToolMapper, SkillMapper skillMapper,
+                                   McpServerMapper mcpServerMapper, ApiGatewayMapper apiGatewayMapper,
+                                   BuiltinToolExecutor builtinToolExecutor, SkillToolExecutor skillToolExecutor,
+                                   ApiGatewayToolExecutor apiGatewayToolExecutor, LangChain4jToolSpecProvider toolSpecProvider,
+                                   LangChain4jMcpClientFactory mcpClientFactory, SandboxGuard sandboxGuard,
+                                   ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider) {
+        this(objectMapper, agentToolBindingMapper, builtinToolMapper, skillMapper, mcpServerMapper, apiGatewayMapper,
+                builtinToolExecutor, skillToolExecutor, apiGatewayToolExecutor, toolSpecProvider, mcpClientFactory,
+                sandboxGuard, securityRuntimeGuardServiceProvider, null);
+    }
+
     public AgentToolSession openSession(AgentExecutionContext ctx, String conversationId) {
+        DesktopExecutionTarget target = DesktopExecutionTarget.from(ctx.getInputContext());
+        if (target != null) {
+            if (desktopToolBroker == null) {
+                throw new IllegalStateException("本机工具通道不可用，禁止在云端代执行");
+            }
+            desktopToolBroker.validateTarget(ctx.getTenantId(), ctx.getUserId(), target);
+        }
         List<AgentToolBinding> bindings = resolveBindings(ctx.getTenantId(), ctx.getAgentId(), ctx.getOverrideToolBindings());
         LinkedHashMap<String, ToolSpecification> availableTools = new LinkedHashMap<>();
         LinkedHashMap<String, dev.langchain4j.service.tool.ToolExecutor> executors = new LinkedHashMap<>();
@@ -266,6 +292,7 @@ public class AgentToolSessionFactory {
                                     Map<String, ToolSpecification> availableTools,
                                     Map<String, dev.langchain4j.service.tool.ToolExecutor> executors,
                                     Map<String, ToolIoTypeEnum> ioTypeIndex) {
+        DesktopExecutionTarget target = DesktopExecutionTarget.from(ctx.getInputContext());
         for (AgentToolBinding binding : bindings) {
             String sourceType = normalizeSourceType(binding.getSourceType());
             if (SourceTypeEnum.MCP.getCode().equals(sourceType)
@@ -277,18 +304,36 @@ public class AgentToolSessionFactory {
             if (definition == null || !StringUtils.hasText(definition.getCode())) {
                 continue;
             }
+            boolean desktopBuiltin = target != null && SourceTypeEnum.BUILTIN.getCode().equals(sourceType)
+                    && definition.getCode().startsWith("sys.");
+            if (desktopBuiltin) {
+                boolean supportsExactEdit = "sys.edit".equals(definition.getCode()) && desktopToolBroker.supportsExactEdit(
+                        ctx.getTenantId(), ctx.getUserId(), target.deviceId());
+                boolean supportsReadRange = "sys.read".equals(definition.getCode()) && desktopToolBroker.supportsReadRange(
+                        ctx.getTenantId(), ctx.getUserId(), target.deviceId());
+                JsonNode desktopSchema = DesktopToolSchema.forCode(definition.getCode(), objectMapper, supportsExactEdit,
+                        supportsReadRange);
+                if (desktopSchema == null) {
+                    continue;
+                }
+                definition.setInputSchema(desktopSchema);
+            }
             SearchBehavior searchBehavior = SourceTypeEnum.BUILTIN.getCode().equals(sourceType)
                     ? SearchBehavior.ALWAYS_VISIBLE
                     : SearchBehavior.SEARCHABLE;
             ToolSpecification specification = toolSpecProvider.toToolSpecification(definition, searchBehavior);
-            ioTypeIndex.putIfAbsent(specification.name(), definition.getIoType());
-            availableTools.putIfAbsent(specification.name(), specification);
+            if (availableTools.putIfAbsent(specification.name(), specification) != null) {
+                continue;
+            }
+            ioTypeIndex.put(specification.name(), definition.getIoType());
 
             com.schemaplexai.service.agent.tool.executor.ToolExecutor delegate;
             if (SourceTypeEnum.API_GATEWAY.getCode().equals(sourceType)) {
                 delegate = apiGatewayToolExecutor;
             } else if (SourceTypeEnum.BUILTIN.getCode().equals(sourceType)) {
-                delegate = builtinToolExecutor;
+                delegate = desktopBuiltin
+                        ? new DesktopToolExecutor(desktopToolBroker, ctx, target, sandboxGuard)
+                        : builtinToolExecutor;
             } else {
                 delegate = skillToolExecutor;
             }
@@ -629,7 +674,8 @@ public class AgentToolSessionFactory {
                 sourceType,
                 ctx.getSandboxPolicy(),
                 sandboxGuard,
-                securityRuntimeGuardServiceProvider.getObject()
+                securityRuntimeGuardServiceProvider.getObject(),
+                ctx.getExecutionId()
         );
     }
 
@@ -689,11 +735,73 @@ public class AgentToolSessionFactory {
                     .timestamp(Instant.now())
                     .build();
             ToolServiceContext effectiveContext = toolSearchAdapter.adjust(baseContext, chatMemory, invocationContext);
+            Map<String, ToolIoTypeEnum> effectiveIoTypes = new LinkedHashMap<>(ioTypeIndex);
+            // 框架在此处只新增工具搜索执行器，搜索仅查询本轮工具目录。
+            effectiveContext.toolExecutors().forEach((name, executor) -> {
+                if (baseContext.toolExecutors().get(name) != executor) {
+                    effectiveIoTypes.put(name, ToolIoTypeEnum.READ);
+                }
+            });
             effectiveContext = mergeActivatedSkillTools(effectiveContext, chatMemory);
-            return new RoundToolContext(effectiveContext, invocationContext, ioTypeIndex);
+            return new RoundToolContext(effectiveContext, invocationContext, effectiveIoTypes);
         }
 
-        public String augmentSystemPrompt(String systemPrompt) {
+        public String augmentSystemPrompt(String systemPrompt, int maxToolCallsPerRound) {
+            if (DesktopExecutionTarget.from(executionContext.getInputContext()) != null) {
+                boolean supportsExactEdit = baseContext.availableTools().stream().anyMatch(tool ->
+                        "sys_edit".equals(tool.name()) && tool.parameters() instanceof JsonObjectSchema schema
+                                && schema.properties().containsKey("oldText"));
+                String editingInstructions = supportsExactEdit
+                        ? "sys_write 用完整 content 保存新文件。局部修改优先用 sys_edit，提供唯一 oldText 和 newText。"
+                        : "sys.write 与 sys.edit 都接收 path 和完整 content。";
+                String desktopInstructions = "\n\n## 本机工作区执行边界\n"
+                        + "本任务的所有 sys.* 工具均在当前用户已授权的本机工作区执行。"
+                        + "desktopWorkspaceId 只是授权标识，不是真实目录。"
+                        + "path、workingDirectory、source、destination 等文件参数必须使用工作区相对路径，工作区根目录用 .。"
+                        + "不要使用服务端工作区路径、绝对路径、..、~ 或推测用户设备目录；"
+                        + "项目文件与开发环境以本机工具返回的实际内容为准，企业知识仍作为任务规则。"
+                        + "\n修改已有文件前，仅查看完成改动所需的文件，可同轮读取相互独立的文件。"
+                        + "文件未发生变化时，复用同一文件已成功读取且未截断的内容。文件已变化或现有证据不足时，再读取相关文件。"
+                        + "写入新文件前确认父目录存在。若需使用 sys_mkdir，先单独创建目录，拿到成功回执后再提交依赖该目录的写入。"
+                        + editingInstructions + "保存成功后按任务要求验证改动，优先用测试或构建实证。"
+                        + "交付中只列相对于授权工作区的路径，Git 根验证报告是否与授权目录一致。"
+                        + "需要可复核证据时，按原任务列出检查对象、输入、实际输出和退出码。"
+                        + "测试数以最终构建回执的汇总为准。若先验证此前构建的 CLI、再完成最终构建，分别说明两者。\n"
+                        + "任何本机工具失败、超时或离线都不得改在云端执行，也不得自动重试状态不明的写操作。";
+                boolean supportsReadRange = baseContext.availableTools().stream().anyMatch(tool ->
+                        "sys_read".equals(tool.name()) && tool.parameters() instanceof JsonObjectSchema schema
+                                && schema.properties().containsKey("startLine"));
+                if (supportsReadRange) {
+                    desktopInstructions += "\n已知待修改的行号时，用 sys_read 的 startLine 和 endLine 读取必要片段。"
+                            + "需要理解完整类或重写文件时读取全文。片段的行号仅用于定位，不属于原文。";
+                }
+                systemPrompt = (systemPrompt == null ? "" : systemPrompt) + desktopInstructions;
+                String shellName = ToolNameNormalizer.normalize("sys.bash");
+                if (StringUtils.hasText(executionContext.getDesktopVerificationCommand())
+                        && baseContext.toolExecutors().get(shellName) instanceof GuardedToolExecutor shell
+                        && shell.isDesktopTool()) {
+                    systemPrompt += "\n每项 Shell 验收使用可独立核对退出码的调用，避免命令串联、管道和重定向。"
+                            + "每轮最多可提交 " + maxToolCallsPerRound + " 笔工具调用。"
+                            + "按此上限将同一产物上互不依赖的 CLI 检查成组提交，先逐项覆盖工单要求的正常和异常输入。"
+                            + "无效输入的退出码和输出符合预期时，该用例已通过。"
+                            + "同一产物未变化且回执已证明契约时，复用该回执。有具体证据缺口时才追加变体。"
+                            + "核对 Java 输出时，JDK 自动打印的 Picked up JDK_JAVA_OPTIONS: 行属于启动器诊断。"
+                            + "保留沙箱工具链环境，直接核对其余标准错误内容、标准输出和退出码。";
+                    if (!StringUtils.hasText(executionContext.getParentExecutionId())) {
+                        systemPrompt += "\n文件已核对且随后未被修改时，最终构建前复用已有读取证据。"
+                                + "文件可能有变化或证据不足时，重新读取所需文件。";
+                    }
+                    if (!executionContext.isDesktopVerificationDelegated()) {
+                        systemPrompt += "\n完成实现和测试的第一次可运行改动后，及时运行相关构建或测试。"
+                                + "编译失败时集中修复回执中的相关错误，再重新构建。"
+                                + "\n若你负责最终验证，先完成用户要求的各项检查和写入，收到并核对全部前序回执。"
+                                + "在接下来的一轮只用 " + shellName + " 在工作区根目录（workingDirectory 为 .）执行以下命令。"
+                                + "命令必须原样提交，退出码必须为 0，之后直接输出交付结果。"
+                                + "若未取得有效回执，在交付说明中明确指出。\n"
+                                + executionContext.getDesktopVerificationCommand();
+                    }
+                }
+            }
             if (!StringUtils.hasText(skillPromptBlock)) {
                 return systemPrompt;
             }
@@ -769,6 +877,10 @@ public class AgentToolSessionFactory {
     public record RoundToolContext(ToolServiceContext toolServiceContext,
                                    InvocationContext invocationContext,
                                    Map<String, ToolIoTypeEnum> ioTypeIndex) {
+        public boolean isDesktopTool(String name) {
+            return toolServiceContext.toolExecutors().get(name) instanceof GuardedToolExecutor executor
+                    && executor.isDesktopTool();
+        }
     }
 
     private record ExecutableSkillTool(String skillName,

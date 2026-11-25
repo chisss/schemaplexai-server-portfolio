@@ -66,6 +66,7 @@ public class IntentDefectServiceImpl implements IntentDefectService {
 
         Map<String, Object> message = new HashMap<>();
         message.put("taskId", taskId);
+        message.put("tenantId", SecurityUtil.getCurrentTenantId());
         message.put("specId", request.getSpecId());
         message.put("docType", request.getDocType());
         message.put("type", "intent_defect_analyze");

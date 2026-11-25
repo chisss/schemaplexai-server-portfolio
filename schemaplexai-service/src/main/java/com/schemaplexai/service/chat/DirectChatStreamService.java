@@ -1,5 +1,7 @@
 package com.schemaplexai.service.chat;
 
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
+import com.schemaplexai.service.desktop.DesktopAttachmentService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.constant.CommonConstant;
@@ -7,6 +9,8 @@ import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.service.desktop.DesktopAttachmentService;
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
 import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.dao.mapper.ChatMessageMapper;
 import com.schemaplexai.model.entity.AiModel;
@@ -42,6 +46,7 @@ public class DirectChatStreamService {
 
     private static final long SSE_TIMEOUT_MS = 5 * 60 * 1000L;
 
+    private final DesktopAttachmentService desktopAttachments;
     private final AiModelMapper aiModelMapper;
     private final ChatMessageMapper chatMessageMapper;
     private final LangChain4jModelFactory modelFactory;
@@ -63,6 +68,8 @@ public class DirectChatStreamService {
         String conversationId = StringUtils.hasText(request.getConversationId())
                 ? request.getConversationId()
                 : UUID.randomUUID().toString().replace("-", "");
+        DesktopExecutionTarget.requireLegacyConversation(conversationId);
+        desktopAttachments.validateObjectKeys(request.getAttachmentIds(), false);
 
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         String tenantId = SecurityUtil.getCurrentTenantId();

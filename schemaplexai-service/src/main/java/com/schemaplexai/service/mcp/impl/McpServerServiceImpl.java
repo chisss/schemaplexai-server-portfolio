@@ -221,7 +221,7 @@ public class McpServerServiceImpl implements McpServerService {
         if (transportType == null) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "不支持的 MCP 传输类型: " + mcpServer.getTransportType());
         }
-        if ((transportType == McpTransportTypeEnum.STREAMABLE_HTTP || transportType == McpTransportTypeEnum.SSE)
+        if (transportType.requiresUrl()
                 && !StringUtils.hasText(mcpServer.getUrl())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "当前传输类型必须填写 URL");
         }

@@ -3,6 +3,7 @@ package com.schemaplexai.service.agent.memory;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.schemaplexai.common.constant.CommonConstant;
+import com.schemaplexai.common.util.HashUtils;
 import com.schemaplexai.dao.mapper.AgentContextBindingMapper;
 import com.schemaplexai.dao.mapper.ContextEntityMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
@@ -24,7 +25,14 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -35,6 +43,12 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class AgentInstructionsAutoService {
+
+    private static final String GENERATED_TITLE = "Agent 专属指令（自动生成）";
+    private static final String MEMORY_INSTRUCTIONS_METADATA_KEY = "derivedFromAgentMemory";
+    private static final String INSTRUCTIONS_INPUT_DIGEST = "agentMemoryInstructionsInputSha256";
+    private static final String INSTRUCTIONS_OUTPUT_DIGEST = "agentMemoryInstructionsOutputSha256";
+    private static final String SYSTEM_PROMPT = "你是一个精确的 Agent 指令生成助手。";
 
     private static final int MAX_INSTRUCTIONS_LINES = 100;
     private static final BigDecimal HIGH_RELEVANCE_THRESHOLD = new BigDecimal("1.0");
@@ -75,6 +89,7 @@ public class AgentInstructionsAutoService {
     private final AgentContextBindingMapper agentContextBindingMapper;
     private final AgentMemoryExtractionService memoryExtractionService;
     private final AIModelRouter modelRouter;
+    private final Set<InstructionScope> updating = ConcurrentHashMap.newKeySet();
 
     /**
      * 首次执行时自动创建专属指令（幂等）
@@ -109,7 +124,7 @@ public class AgentInstructionsAutoService {
             binding.setAgentId(agentId);
             binding.setContextId(contextId);
             binding.setSourceType("manual");
-            binding.setTitle("Agent 专属指令（自动生成）");
+            binding.setTitle(GENERATED_TITLE);
             binding.setSortOrder(0);
             binding.setStatus(CommonConstant.STATUS_ACTIVE);
             agentContextBindingMapper.insert(binding);
@@ -120,7 +135,7 @@ public class AgentInstructionsAutoService {
         ContextItem item = new ContextItem();
         item.setContextId(contextId);
         item.setItemType("config");
-        item.setTitle("Agent 专属指令（自动生成）");
+        item.setTitle(GENERATED_TITLE);
         item.setContent(INIT_CONTENT);
         item.setIsAgentInstructions(true);
         item.setSortOrder(0);
@@ -133,14 +148,21 @@ public class AgentInstructionsAutoService {
      */
     @Async("agentExecutorPool")
     public void updateFromMemoriesAsync(String tenantId, String agentId, String executionId) {
+        var scope = new InstructionScope(tenantId, agentId);
+        if (!updating.add(scope)) {
+            return;
+        }
         try {
-            updateFromMemories(tenantId, agentId);
+            updateFromMemories(tenantId, agentId, executionId);
         } catch (Exception e) {
-            log.warn("Agent专属指令自动更新失败: agentId={}, executionId={}, error={}", agentId, executionId, e.getMessage());
+            log.warn("Agent专属指令自动更新失败: agentId={}, executionId={}, errorType={}",
+                    agentId, executionId, e.getClass().getSimpleName());
+        } finally {
+            updating.remove(scope);
         }
     }
 
-    private void updateFromMemories(String tenantId, String agentId) {
+    private void updateFromMemories(String tenantId, String agentId, String executionId) {
         List<AgentMemory> allMemories = memoryExtractionService.getActiveMemories(tenantId, agentId, MAX_MEMORIES_TO_FETCH);
         if (CollectionUtils.isEmpty(allMemories)) {
             return;
@@ -161,7 +183,13 @@ public class AgentInstructionsAutoService {
         }
 
         ContextItem instructionsItem = findInstructionsItem(agentId);
-        if (instructionsItem == null) {
+        if (instructionsItem == null || !isMemoryDerivedInstruction(instructionsItem)) {
+            return;
+        }
+        Map<String, Object> metadata = instructionsItem.getMetadata() == null
+                ? new LinkedHashMap<>() : new LinkedHashMap<>(instructionsItem.getMetadata());
+        Object previousOutput = metadata.get(INSTRUCTIONS_OUTPUT_DIGEST);
+        if (previousOutput != null && !previousOutput.equals(digest(instructionsItem.getContent()))) {
             return;
         }
 
@@ -175,31 +203,72 @@ public class AgentInstructionsAutoService {
         }
 
         String memoriesText = memories.stream()
-                .map(m -> "[" + m.getMemoryType() + "] " + m.getContent())
+                .sorted(Comparator.comparing(AgentMemory::getRelevanceScore).reversed()
+                        .thenComparing(AgentInstructionsAutoService::formatMemory))
+                .map(AgentInstructionsAutoService::formatMemory)
                 .collect(Collectors.joining("\n"));
 
-        try {
-            ChatModel chatModel = modelRouter.buildChatModel(model);
-            String prompt = String.format(COMPRESS_PROMPT, MAX_INSTRUCTIONS_LINES, memoriesText);
-            ChatResponse response = chatModel.chat(List.of(
-                    SystemMessage.from("你是一个精确的 Agent 指令生成助手。"),
-                    UserMessage.from(prompt)
-            ));
-            String compressed = response.aiMessage().text();
-            if (!StringUtils.hasText(compressed)) {
-                return;
-            }
-
-            // 截断保底
-            compressed = truncateToMaxLines(compressed, MAX_INSTRUCTIONS_LINES);
-
-            contextItemMapper.update(null, new LambdaUpdateWrapper<ContextItem>()
-                    .eq(ContextItem::getId, instructionsItem.getId())
-                    .set(ContextItem::getContent, compressed));
-            log.info("Agent专属指令已更新: agentId={}, lines={}", agentId, compressed.lines().count());
-        } catch (Exception e) {
-            log.warn("Agent专属指令压缩失败: agentId={}, error={}", agentId, e.getMessage());
+        String prompt = String.format(COMPRESS_PROMPT, MAX_INSTRUCTIONS_LINES, memoriesText);
+        String inputDigest = digest(SYSTEM_PROMPT, prompt, model.getConfigId(), model.getProvider(),
+                model.getProtocol(), model.getBaseUrl(), model.getModelId(),
+                Integer.toString(model.getMaxTokens()), model.getReasoningStrength());
+        if (previousOutput != null && inputDigest.equals(metadata.get(INSTRUCTIONS_INPUT_DIGEST))) {
+            log.debug("复用未变化的Agent专属指令: agentId={}, executionId={}", agentId, executionId);
+            return;
         }
+
+        var observedAt = instructionsItem.getUpdatedAt();
+        ChatModel chatModel = modelRouter.buildChatModel(model);
+        ChatResponse response = chatModel.chat(List.of(SystemMessage.from(SYSTEM_PROMPT), UserMessage.from(prompt)));
+        var usage = response.tokenUsage();
+        log.info("Agent专属指令模型已响应: agentId={}, executionId={}, inputTokens={}, outputTokens={}",
+                agentId, executionId, usage == null ? null : usage.inputTokenCount(),
+                usage == null ? null : usage.outputTokenCount());
+        String compressed = response.aiMessage().text();
+        if (!StringUtils.hasText(compressed)) {
+            return;
+        }
+
+        compressed = truncateToMaxLines(compressed, MAX_INSTRUCTIONS_LINES);
+        metadata.put(MEMORY_INSTRUCTIONS_METADATA_KEY, true);
+        metadata.put(INSTRUCTIONS_INPUT_DIGEST, inputDigest);
+        metadata.put(INSTRUCTIONS_OUTPUT_DIGEST, digest(compressed));
+        ContextItem update = new ContextItem();
+        update.setContent(compressed);
+        update.setMetadata(metadata);
+        var unchanged = new LambdaUpdateWrapper<ContextItem>()
+                .eq(ContextItem::getId, instructionsItem.getId());
+        if (observedAt == null) {
+            unchanged.isNull(ContextItem::getUpdatedAt);
+        } else {
+            unchanged.eq(ContextItem::getUpdatedAt, observedAt);
+        }
+        if (contextItemMapper.update(update, unchanged) == 1) {
+            log.info("Agent专属指令已更新: agentId={}, lines={}", agentId, compressed.lines().count());
+        }
+    }
+
+    private static String formatMemory(AgentMemory memory) {
+        return "[" + memory.getMemoryType() + "] " + memory.getContent();
+    }
+
+    private static String digest(String... values) {
+        var data = new StringBuilder();
+        for (String value : values) {
+            String part = Objects.toString(value, "");
+            data.append(part.length()).append(':').append(part);
+        }
+        return HashUtils.sha256Hex(data.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private record InstructionScope(String tenantId, String agentId) {
+    }
+
+    /** 保留已有自动生成项的识别方式，并为新更新记录显式来源。 */
+    public static boolean isMemoryDerivedInstruction(ContextItem item) {
+        return GENERATED_TITLE.equals(item.getTitle())
+                || (item.getMetadata() != null
+                && Boolean.TRUE.equals(item.getMetadata().get(MEMORY_INSTRUCTIONS_METADATA_KEY)));
     }
 
     private ContextItem findInstructionsItem(String agentId) {

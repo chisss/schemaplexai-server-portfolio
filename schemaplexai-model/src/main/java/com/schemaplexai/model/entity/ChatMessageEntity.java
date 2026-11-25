@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import lombok.Data;
+import lombok.ToString;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
@@ -43,6 +44,10 @@ public class ChatMessageEntity implements Serializable {
     /** 消息文本内容 */
     private String textContent;
 
+    /** 结构化消息的 UTF-8 JSON 字节，文本列仍可单独读取。 */
+    @ToString.Exclude
+    private byte[] messagePayload;
+
     /** AI 消息中的工具调用请求（JSON 数组） */
     @TableField(typeHandler = JacksonTypeHandler.class)
     private List<Map<String, Object>> toolCalls;
@@ -58,6 +63,13 @@ public class ChatMessageEntity implements Serializable {
 
     /** 消息在会话中的顺序索引 */
     private Integer messageIndex;
+
+    /** 运行器直接追加的原始消息，空值代表历史写入方式。 */
+    private Boolean archiveEntry;
+
+    /** 用户输入原文，排除运行器合成内容和附件文本。 */
+    @ToString.Exclude
+    private String authoredText;
 
     /** 对话轮次索引（用于回滚） */
     private Integer turnIndex;

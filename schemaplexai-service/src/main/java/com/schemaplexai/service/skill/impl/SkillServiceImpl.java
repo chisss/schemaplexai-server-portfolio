@@ -2,6 +2,8 @@ package com.schemaplexai.service.skill.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.schemaplexai.common.enums.SkillStatusEnum;
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
@@ -37,10 +39,14 @@ public class SkillServiceImpl implements SkillService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public SkillVO create(SkillCreateRequest request) {
-        // 校验名称唯一性
+        var tenantId = requireTenant();
         skillValidator.validateNameUnique(request.getName());
 
         var skill = skillConverter.fromCreateRequest(request);
+        skill.setTenantId(tenantId);
+        if (SkillStatusEnum.INACTIVE.getCode().equals(request.getInitialStatus())) {
+            skill.setStatus(SkillStatusEnum.INACTIVE.getCode());
+        }
         skillMapper.insert(skill);
         log.info("创建技能成功: skillId={}, name={}", skill.getId(), skill.getName());
 
@@ -52,15 +58,8 @@ public class SkillServiceImpl implements SkillService {
         var page = new Page<Skill>(request.getPage(), request.getSize());
         var wrapper = new LambdaQueryWrapper<Skill>();
 
-        // 获取当前租户ID，用于同时返回内置技能(tenant_id=NULL)和租户级技能
-        var tenantId = SecurityUtil.getCurrentTenantId();
-
-        // 租户过滤：返回内置技能(tenant_id IS NULL)或当前租户创建的技能
-        if (tenantId != null) {
-            wrapper.and(w -> w.isNull(Skill::getTenantId).or().eq(Skill::getTenantId, tenantId));
-        } else {
-            // 未登录场景返回所有技能
-        }
+        var tenantId = requireTenant();
+        wrapper.and(w -> w.isNull(Skill::getTenantId).or().eq(Skill::getTenantId, tenantId));
 
         if (StringUtils.hasText(request.getCategory())) {
             wrapper.eq(Skill::getCategory, request.getCategory());
@@ -86,14 +85,14 @@ public class SkillServiceImpl implements SkillService {
 
     @Override
     public SkillVO getById(String id) {
-        var skill = entityValidator.requireExists(skillMapper, id, ResultCode.SKILL_NOT_FOUND);
+        var skill = requireAccessible(id, false);
         return skillConverter.toVO(skill);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public SkillVO update(String id, SkillUpdateRequest request) {
-        var skill = entityValidator.requireExists(skillMapper, id, ResultCode.SKILL_NOT_FOUND);
+        var skill = requireAccessible(id, true);
 
         if (StringUtils.hasText(request.getDisplayName())) {
             skill.setDisplayName(request.getDisplayName());
@@ -135,8 +134,27 @@ public class SkillServiceImpl implements SkillService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void delete(String id) {
-        entityValidator.requireExists(skillMapper, id, ResultCode.SKILL_NOT_FOUND);
+        requireAccessible(id, true);
         skillMapper.deleteById(id);
         log.info("删除技能成功: skillId={}", id);
+    }
+    private Skill requireAccessible(String id, boolean write) {
+        var tenantId = requireTenant();
+        var skill = entityValidator.requireExists(skillMapper, id, ResultCode.SKILL_NOT_FOUND);
+        if (skill.getTenantId() == null && write) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "系统技能不可修改");
+        }
+        if (skill.getTenantId() != null && !tenantId.equals(skill.getTenantId())) {
+            throw new BusinessException(ResultCode.SKILL_NOT_FOUND);
+        }
+        return skill;
+    }
+
+    private String requireTenant() {
+        var tenantId = SecurityUtil.getCurrentTenantId();
+        if (!StringUtils.hasText(tenantId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN);
+        }
+        return tenantId;
     }
 }

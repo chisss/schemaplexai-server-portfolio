@@ -22,6 +22,7 @@ import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.SecurityIncident;
 import com.schemaplexai.model.entity.SecurityIncidentAction;
 import com.schemaplexai.model.entity.WorkflowInstance;
+import com.schemaplexai.model.vo.security.SecurityAuditEventVO;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.model.vo.security.SecurityIncidentActionVO;
 import com.schemaplexai.model.vo.security.SecurityIncidentVO;
@@ -40,6 +41,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -178,6 +180,9 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
     @Transactional(rollbackFor = Exception.class)
     public SecurityIncidentVO resumeResource(String id, SecurityAuditContext auditContext) {
         var incident = requireIncident(id);
+        if (!requireTenantId().equals(incident.getTenantId())) {
+            throw new BusinessException(ResultCode.SECURITY_INCIDENT_NOT_FOUND);
+        }
         if (SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION.equals(incident.getSourceType())) {
             resumeAgentExecution(incident);
         } else if (SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_INSTANCE.equals(incident.getSourceType())) {
@@ -187,7 +192,7 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
         }
         incident.setStatus(SecurityComplianceConstant.INCIDENT_STATUS_INVESTIGATING);
         securityIncidentMapper.updateById(incident);
-        appendAction(incident, SecurityComplianceConstant.ACTION_RESUME_RESOURCE, "success", "已恢复关联业务流程", auditContext, Map.of());
+        appendAction(incident, SecurityComplianceConstant.ACTION_RESUME_RESOURCE, "success", "已提交关联业务的恢复请求", auditContext, Map.of());
         return toVO(incident, true);
     }
 
@@ -233,27 +238,69 @@ public class SecurityIncidentServiceImpl implements SecurityIncidentService {
 
     private void resumeAgentExecution(SecurityIncident incident) {
         AgentExecution execution = agentExecutionMapper.selectById(incident.getSourceId());
-        if (execution == null) {
+        if (execution == null || !incident.getTenantId().equals(execution.getTenantId())) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
         if (!AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "当前 Agent 执行记录不处于暂停状态");
         }
+        SecurityIncident activePause = securityIncidentMapper.findExecutionPause(execution);
+        if (activePause == null || !incident.getId().equals(activePause.getId())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "安全事件与当前暂停不匹配");
+        }
         Agent agent = agentMapper.selectById(execution.getAgentId());
         if (agent == null) {
             throw new BusinessException(ResultCode.AGENT_NOT_FOUND);
         }
-        var update = new AgentExecution();
-        update.setId(execution.getId());
-        update.setErrorMessage(null);
-        agentExecutionMapper.updateById(update);
         AgentExecutionInputDTO resumeInput = new AgentExecutionInputDTO();
-        resumeInput.setMessage("安全事件已由管理员恢复，请在遵守当前安全约束的前提下继续未完成的任务。");
+        resumeInput.setResumeBeforeFirstRound(execution.getStartedAt() == null);
+        String recovery = !resumeInput.isResumeBeforeFirstRound() && wasPausedBeforeDispatch(incident)
+                ? "该工具调用在派发前被安全规则暂停，尚未执行。任务仍需该操作时，可通过当前工具重新提交，仍受当前安全规则和审批约束。"
+                : "若被拦截的是已执行工具的结果，先核实当前状态，避免重复写入。";
+        resumeInput.setMessage("管理员已复核安全事件。请遵守当前安全规则，继续未完成的任务。" + recovery);
         resumeInput.setOptions(Map.of(
                 "incidentId", incident.getId(),
                 "traceId", incident.getTraceId()
         ));
-        agentRuntimeOrchestratorProvider.getObject().resume(execution.getId(), resumeInput);
+        String targetId = execution.getId();
+        if (StringUtils.hasText(execution.getParentExecutionId())) {
+            AgentExecution parent = agentExecutionMapper.selectById(execution.getParentExecutionId());
+            if (parent == null || !execution.getTenantId().equals(parent.getTenantId())
+                    || !execution.getAgentId().equals(parent.getAgentId())
+                    || !Objects.equals(execution.getCreatedBy(), parent.getCreatedBy())
+                    || !AgentExecutionStatusEnum.PAUSED.getCode().equals(parent.getStatus())) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "Team 父执行当前无法恢复");
+            }
+            targetId = parent.getId();
+            resumeInput.setSecurityPausedChildExecutionId(execution.getId());
+        }
+        agentRuntimeOrchestratorProvider.getObject().resume(targetId, resumeInput);
+    }
+
+    private boolean wasPausedBeforeDispatch(SecurityIncident incident) {
+        // 仅以当前事件的可信审计记录确认工具未派发。历史记录缺失或互相矛盾时保留保守提示。
+        if (!StringUtils.hasText(incident.getTraceId())) {
+            return false;
+        }
+        var scenes = securityAuditEventService.listByTraceId(incident.getTraceId()).stream()
+                .filter(event -> isPauseAudit(event, incident))
+                .map(event -> event.getMetadata().get("scene"))
+                .distinct()
+                .toList();
+        return scenes.equals(List.of(SecurityComplianceConstant.CHECK_SCENE_TOOL_PRE));
+    }
+
+    private boolean isPauseAudit(SecurityAuditEventVO event, SecurityIncident incident) {
+        Map<String, Object> metadata = event.getMetadata();
+        return SecurityComplianceConstant.EVENT_RUNTIME_CHECK.equals(event.getEventType())
+                && SecurityComplianceConstant.AUDIT_SOURCE_RUNTIME_ENGINE.equals(event.getEventSource())
+                && SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION.equals(event.getResourceType())
+                && incident.getTenantId().equals(event.getTenantId())
+                && incident.getTraceId().equals(event.getTraceId())
+                && incident.getSourceId().equals(event.getResourceId())
+                && metadata != null
+                && incident.getId().equals(metadata.get("incidentId"))
+                && SecurityComplianceConstant.DECISION_PAUSE.equals(metadata.get("decision"));
     }
 
     private SecurityIncident requireIncident(String id) {

@@ -17,6 +17,7 @@ import com.schemaplexai.service.agent.execution.AgentExecutionResult;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -37,6 +38,9 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class AgentRuntimeOrchestrator {
 
+    private static final String DESKTOP_VERIFICATION_CONFIG = "desktop_required_verification_command";
+    private static final String DESKTOP_VERIFICATION_SNAPSHOT = "desktopVerificationCommand";
+
     private final AgentMapper agentMapper;
     private final AgentExecutionMapper agentExecutionMapper;
     private final AgentRuntimeStrategyFactory strategyFactory;
@@ -48,13 +52,27 @@ public class AgentRuntimeOrchestrator {
         Agent agent = requireAgent(context.getAgentId());
         AgentRuntimeEngineEnum runtimeEngine = resolveRuntimeEngine(agent);
         context.setRuntimeEngine(runtimeEngine.getCode());
-        applyOutputFormatContext(agent.getId(), context);
+        context.setProjectId(execution.getMemoryProjectId());
+        if (execution.getTemporaryChat() != null) {
+            // 新执行优先使用创建时已保存的策略。
+            context.setTemporaryChat(Boolean.TRUE.equals(execution.getTemporaryChat()));
+            context.setMemoryWriteEnabled(execution.getMemoryWriteEnabled());
+        }
+        List<AgentConfig> configs = agentConfigHandler.loadConfigs(agent.getId());
+        applyOutputFormatContext(configs, context);
+        context.setDesktopVerificationCommand(DesktopExecutionTarget.from(context.getInputContext()) == null
+                ? null : configValue(configs, DESKTOP_VERIFICATION_CONFIG));
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
         context.setSandboxPolicy(sandboxPolicy);
 
         AgentExecution update = new AgentExecution();
         update.setId(execution.getId());
         update.setRuntimeEngine(runtimeEngine.getCode());
+        if (execution.getTemporaryChat() == null) {
+            // 内部首次执行入口可能先创建没有策略快照的 queued 记录。
+            update.setTemporaryChat(context.isTemporaryChat());
+            update.setMemoryWriteEnabled(context.getMemoryWriteEnabled());
+        }
         update.setSandboxPolicySnapshot(buildRuntimeSnapshot(context, sandboxPolicy));
         agentExecutionMapper.updateById(update);
 
@@ -65,11 +83,21 @@ public class AgentRuntimeOrchestrator {
         AgentExecution execution = requireExecution(executionId);
         Agent agent = requireAgent(execution.getAgentId());
         AgentRuntimeEngineEnum runtimeEngine = resolveRuntimeEngine(agent);
+        // 直接恢复子执行时也遵守父执行的限制。历史挂起记录沿用最严格的设置。
+        AgentExecution parent = StringUtils.hasText(execution.getParentExecutionId())
+                ? requireExecution(execution.getParentExecutionId()) : execution;
+        boolean legacyPolicy = execution.getTemporaryChat() == null || parent.getTemporaryChat() == null;
+        boolean temporaryChat = legacyPolicy || Boolean.TRUE.equals(execution.getTemporaryChat())
+                || Boolean.TRUE.equals(parent.getTemporaryChat()) || Boolean.TRUE.equals(input.getTemporaryChat());
+        boolean restrictWrite = legacyPolicy || Boolean.FALSE.equals(parent.getMemoryWriteEnabled())
+                || Boolean.FALSE.equals(input.getMemoryWriteEnabled());
+        Boolean memoryWriteEnabled = restrictWrite ? Boolean.FALSE : execution.getMemoryWriteEnabled();
         AgentExecutionContext context = AgentExecutionContext.builder()
                 .executionId(execution.getId())
                 .agentId(execution.getAgentId())
                 .tenantId(execution.getTenantId())
                 .userId(execution.getCreatedBy())
+                .projectId(parent.getMemoryProjectId())
                 .inputPrompt(execution.getInputPrompt())
                 .model(execution.getAiModel())
                 .agentModelType(agent.getAiModelType())
@@ -77,18 +105,32 @@ public class AgentRuntimeOrchestrator {
                 .inputContext(execution.getInputContext())
                 .conversationId(execution.getConversationId())
                 .runtimeEngine(runtimeEngine.getCode())
+                .stream(execution.getSandboxPolicySnapshot() != null
+                        && Boolean.TRUE.equals(execution.getSandboxPolicySnapshot().get("stream")))
                 .executionMode(execution.getExecutionMode() != null ? execution.getExecutionMode() : "auto")
                 .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
-                .temporaryChat(Boolean.TRUE.equals(input.getTemporaryChat()))
-                .memoryWriteEnabled(input.getMemoryWriteEnabled())
+                .temporaryChat(temporaryChat)
+                .memoryWriteEnabled(memoryWriteEnabled)
                 .build();
-        applyOutputFormatContext(agent.getId(), context);
+        applyOutputFormatContext(agentConfigHandler.loadConfigs(agent.getId()), context);
+        if (parent.getSandboxPolicySnapshot() != null
+                && parent.getSandboxPolicySnapshot().get(DESKTOP_VERIFICATION_SNAPSHOT) instanceof String command) {
+            context.setDesktopVerificationCommand(command);
+        }
+        context.setParentExecutionId(execution.getParentExecutionId());
         // 恢复路径同样解析沙箱策略并注入上下文，策略实现不得重建上下文（审计 H2）
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
         context.setSandboxPolicy(sandboxPolicy);
         AgentExecution update = new AgentExecution();
         update.setId(execution.getId());
         update.setRuntimeEngine(runtimeEngine.getCode());
+        // 恢复只提交更严格的值，较旧的恢复请求不能反向覆盖。
+        if (temporaryChat) {
+            update.setTemporaryChat(true);
+        }
+        if (Boolean.FALSE.equals(memoryWriteEnabled)) {
+            update.setMemoryWriteEnabled(false);
+        }
         update.setSandboxPolicySnapshot(buildRuntimeSnapshot(context, sandboxPolicy));
         agentExecutionMapper.updateById(update);
         return strategyFactory.getStrategy(agent.getAgentType()).resume(agent, execution, context, input);
@@ -96,8 +138,14 @@ public class AgentRuntimeOrchestrator {
 
     private Map<String, Object> buildRuntimeSnapshot(AgentExecutionContext context, SandboxPolicy sandboxPolicy) {
         Map<String, Object> snapshot = new LinkedHashMap<>(sandboxPolicyResolver.toSnapshot(sandboxPolicy));
+        if (context.isStream()) {
+            snapshot.put("stream", true);
+        }
         if (context.getBudgetAdmission() != null) {
             snapshot.put("budgetAdmission", context.getBudgetAdmission());
+        }
+        if (context.getDesktopVerificationCommand() != null) {
+            snapshot.put(DESKTOP_VERIFICATION_SNAPSHOT, context.getDesktopVerificationCommand());
         }
         return snapshot;
     }
@@ -114,6 +162,8 @@ public class AgentRuntimeOrchestrator {
         execution.setAgentId(agent.getId());
         execution.setInputPrompt(dto.getPrompt());
         execution.setInputContext(dto.getContext());
+        execution.setTemporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()));
+        execution.setMemoryWriteEnabled(dto.getMemoryWriteEnabled());
         execution.setAiModel(StringUtils.hasText(dto.getModel()) ? dto.getModel() : agent.getAiModel());
         execution.setConversationId(StringUtils.hasText(dto.getConversationId())
                 ? dto.getConversationId()
@@ -137,8 +187,8 @@ public class AgentRuntimeOrchestrator {
                 .skillCode(dto.getSkillCode())
                 .outputFormat(dto.getOutputFormat())
                 .stream(Boolean.TRUE.equals(dto.getStream()))
-                .temporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()))
-                .memoryWriteEnabled(dto.getMemoryWriteEnabled())
+                .temporaryChat(Boolean.TRUE.equals(execution.getTemporaryChat()))
+                .memoryWriteEnabled(execution.getMemoryWriteEnabled())
                 .build());
         try {
             return future.get(90, TimeUnit.SECONDS);
@@ -180,16 +230,20 @@ public class AgentRuntimeOrchestrator {
         return execution;
     }
 
-    private void applyOutputFormatContext(String agentId, AgentExecutionContext context) {
-        List<String> additionalContexts = new ArrayList<>(
-                context.getAdditionalSystemContexts() == null ? List.of() : context.getAdditionalSystemContexts()
-        );
-        String outputFormat = agentConfigHandler.loadConfigs(agentId).stream()
-                .filter(config -> "output_format".equals(config.getConfigKey()))
+    private String configValue(List<AgentConfig> configs, String key) {
+        return configs.stream()
+                .filter(config -> key.equals(config.getConfigKey()))
                 .map(AgentConfig::getConfigValue)
                 .filter(StringUtils::hasText)
                 .findFirst()
                 .orElse(null);
+    }
+
+    private void applyOutputFormatContext(List<AgentConfig> configs, AgentExecutionContext context) {
+        List<String> additionalContexts = new ArrayList<>(
+                context.getAdditionalSystemContexts() == null ? List.of() : context.getAdditionalSystemContexts()
+        );
+        String outputFormat = configValue(configs, "output_format");
         if (!StringUtils.hasText(outputFormat)) {
             context.setAdditionalSystemContexts(additionalContexts);
             return;

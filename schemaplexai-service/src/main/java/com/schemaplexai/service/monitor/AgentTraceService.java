@@ -3,6 +3,7 @@ package com.schemaplexai.service.monitor;
 import com.schemaplexai.model.vo.monitor.AgentTraceSpanVO;
 import com.schemaplexai.model.vo.monitor.AgentTraceFailureSummaryVO;
 import com.schemaplexai.model.vo.monitor.AgentTraceVO;
+import com.schemaplexai.model.vo.monitor.ModelAttemptMetadata;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -32,6 +33,10 @@ public interface AgentTraceService {
                          long outputTokens,
                          BigDecimal cost,
                          String status);
+
+    void recordModelAttempt(String traceId, String tenantId, String agentId, String attemptId, String modelName,
+                            LocalDateTime startedAt, long durationMs, long inputTokens, long outputTokens,
+                            BigDecimal cost, String status, ModelAttemptMetadata metadata);
 
     void recordToolSpan(String traceId,
                         String tenantId,

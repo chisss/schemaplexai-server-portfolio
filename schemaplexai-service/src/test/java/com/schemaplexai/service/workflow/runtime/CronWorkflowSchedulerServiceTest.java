@@ -1,6 +1,8 @@
 package com.schemaplexai.service.workflow.runtime;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.common.util.SystemTenantContext;
 import com.schemaplexai.dao.mapper.WorkflowInstanceMapper;
 import com.schemaplexai.dao.mapper.WorkflowTemplateMapper;
 import com.schemaplexai.model.dto.workflow.WorkflowInstanceCreateRequest;
@@ -32,8 +34,6 @@ class CronWorkflowSchedulerServiceTest {
         WorkflowInstanceService workflowInstanceService = mock(WorkflowInstanceService.class);
         ObjectProvider<WorkflowInstanceService> provider = mock(ObjectProvider.class);
         when(provider.getObject()).thenReturn(workflowInstanceService);
-        when(instanceMapper.selectList(any())).thenReturn(List.of());
-
         WorkflowInstanceVO created = new WorkflowInstanceVO();
         created.setId("wf-cron-1");
         when(workflowInstanceService.create(any())).thenReturn(created);
@@ -47,8 +47,19 @@ class CronWorkflowSchedulerServiceTest {
         WorkflowTemplate template = buildTemplate(
                 "{\"workspaceId\":\"workspace-1\",\"scanMode\":\"full\"}"
         );
+        when(templateMapper.selectList(any())).thenAnswer(invocation -> {
+            assertThat(SystemTenantContext.isSystemOperation()).isTrue();
+            return List.of(template);
+        });
+        when(instanceMapper.selectList(any())).thenAnswer(invocation -> {
+            assertThat(SystemTenantContext.isSystemOperation()).isFalse();
+            assertThat(SecurityUtil.getCurrentTenantId()).isEqualTo("tenant-1");
+            return List.of();
+        });
 
-        schedulerService.triggerTemplateIfDue(template);
+        schedulerService.scheduleCronWorkflows();
+        assertThat(SecurityUtil.getCurrentTenantId()).isNull();
+        assertThat(SystemTenantContext.isSystemOperation()).isFalse();
 
         @SuppressWarnings("unchecked")
         var captor = org.mockito.ArgumentCaptor.forClass(WorkflowInstanceCreateRequest.class);
@@ -122,6 +133,7 @@ class CronWorkflowSchedulerServiceTest {
                                 "label", "每分钟触发",
                                 "config", Map.of(
                                         "cronExpression", "* * * * *",
+                                        "enabled", true,
                                         "timezone", "UTC",
                                         "triggerInputs", triggerInputs
                                 )

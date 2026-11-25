@@ -7,10 +7,13 @@ import com.schemaplexai.model.converter.TenantRuntimePolicyConverter;
 import com.schemaplexai.model.dto.system.TenantRuntimePolicyUpdateRequest;
 import com.schemaplexai.model.entity.TenantRuntimePolicy;
 import com.schemaplexai.model.vo.system.TenantRuntimePolicyVO;
+import com.schemaplexai.service.agent.execution.SandboxPolicyResolver.SandboxPolicyChangedEvent;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.config.TenantRuntimePolicyService;
+import com.schemaplexai.service.workspace.WorkspacePathResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -26,7 +29,6 @@ import java.util.List;
 @RequiredArgsConstructor
 public class TenantRuntimePolicyServiceImpl implements TenantRuntimePolicyService {
 
-    private static final String DEFAULT_WORKSPACE_ROOT_PATH = "/data/workspaces";
     private static final int DEFAULT_MAX_WORKSPACE_GB = 50;
     private static final int DEFAULT_MAX_EXECUTION_MINUTES = 30;
     private static final String DEFAULT_SANDBOX_PROFILE = "standard";
@@ -38,6 +40,8 @@ public class TenantRuntimePolicyServiceImpl implements TenantRuntimePolicyServic
     private final TenantRuntimePolicyMapper tenantRuntimePolicyMapper;
     private final TenantRuntimePolicyConverter tenantRuntimePolicyConverter;
     private final EntityValidator entityValidator;
+    private final ApplicationEventPublisher events;
+    private final WorkspacePathResolver workspacePathResolver;
 
     @Override
     public TenantRuntimePolicyVO getByTenantId(String tenantId) {
@@ -64,6 +68,7 @@ public class TenantRuntimePolicyServiceImpl implements TenantRuntimePolicyServic
             tenantRuntimePolicyMapper.updateById(policy);
         }
 
+        events.publishEvent(new SandboxPolicyChangedEvent(tenantId));
         log.info("更新租户运行时策略成功: tenantId={}", tenantId);
         return tenantRuntimePolicyConverter.toVO(tenantRuntimePolicyMapper.selectById(tenantId));
     }
@@ -71,7 +76,7 @@ public class TenantRuntimePolicyServiceImpl implements TenantRuntimePolicyServic
     private TenantRuntimePolicy buildDefaultPolicy(String tenantId) {
         TenantRuntimePolicy policy = new TenantRuntimePolicy();
         policy.setTenantId(tenantId);
-        policy.setWorkspaceRootPath(DEFAULT_WORKSPACE_ROOT_PATH);
+        policy.setWorkspaceRootPath(workspacePathResolver.getWorkspaceRoot().toString());
         policy.setMaxWorkspaceGb(DEFAULT_MAX_WORKSPACE_GB);
         policy.setMaxExecutionMinutes(DEFAULT_MAX_EXECUTION_MINUTES);
         policy.setSandboxProfile(DEFAULT_SANDBOX_PROFILE);

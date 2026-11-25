@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
+import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.common.enums.AmendmentScopeEnum;
 import com.schemaplexai.common.enums.AgentStatusEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
@@ -66,6 +67,12 @@ import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
+import com.schemaplexai.service.desktop.DesktopAttachmentService;
+import com.schemaplexai.service.desktop.DesktopCapabilityService;
+import com.schemaplexai.service.desktop.DesktopExecutionTarget;
+import com.schemaplexai.service.desktop.DesktopConversationService;
+import com.schemaplexai.service.desktop.DesktopWorkspaceService;
+import com.schemaplexai.model.vo.agent.AgentPendingApprovalVO;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentConfig;
 import com.schemaplexai.model.entity.AgentContextBinding;
@@ -98,7 +105,10 @@ import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
 import com.schemaplexai.service.agent.AgentService;
+import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
+import com.schemaplexai.service.agent.runtime.team.TeamChildApprovalService;
+import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringApplicationService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.agent.validator.AgentValidator;
 import com.schemaplexai.service.common.EntityValidator;
@@ -110,6 +120,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
@@ -143,6 +155,8 @@ public class AgentServiceImpl implements AgentService {
     private static final int EXECUTION_LOG_SUMMARY_MAX_LENGTH = 240;
 
     public static final String QUEUED = AgentExecutionStatusEnum.QUEUED.getCode();
+    private static final List<String> STOPPABLE_EXECUTION_STATUSES = List.of(QUEUED,
+            AgentExecutionStatusEnum.RUNNING.getCode(), AgentExecutionStatusEnum.PAUSED.getCode());
     private static final int MAX_AGENT_TOOL_BINDINGS = 20;
     private final AgentConfigMapper agentConfigMapper;
     private final AgentMapper agentMapper;
@@ -175,12 +189,18 @@ public class AgentServiceImpl implements AgentService {
     private final ContextEntityMapper contextEntityMapper;
     private final ContextItemMapper contextItemMapper;
     private final AgentRuntimeOrchestrator agentRuntimeOrchestrator;
+    private final AgentLogService agentLogService;
     private final ExecutionEventStreamService executionEventStreamService;
+    private final ExecutionSteeringApplicationService executionSteeringApplicationService;
     private final SecurityRuntimeGuardService securityRuntimeGuardService;
     private final BudgetAdmissionService budgetAdmissionService;
     private final ToolApprovalAmendmentService toolApprovalAmendmentService;
     private final PendingToolApprovalService pendingToolApprovalService;
+    private final TeamChildApprovalService teamChildApprovalService;
     private final SystemAgentService systemAgentService;
+    private final DesktopWorkspaceService desktopWorkspaceService;
+    private final DesktopAttachmentService desktopAttachments;
+    private final DesktopCapabilityService desktopCapabilities;
 
     @Override
     public PageResult<AgentVO> listAgents(AgentQueryRequest request) {
@@ -1296,6 +1316,18 @@ public class AgentServiceImpl implements AgentService {
 
     @Override
     public AgentExecuteResultVO execute(String agentId, AgentExecuteDTO dto) {
+        requireDesktopConversationOwner(dto.getConversationId());
+        boolean workspace = DesktopExecutionTarget.workspaceConversation(dto.getConversationId());
+        desktopAttachments.validateObjectKeys(dto.getAttachmentIds(), workspace);
+        String memoryProjectId = null;
+        if (workspace) {
+            var conversation = desktopWorkspaceService.conversation(dto.getConversationId());
+            if (conversation.archived() || !agentId.equals(conversation.agentId())) {
+                throw new BusinessException(ResultCode.FORBIDDEN, "当前会话未绑定该专家");
+            }
+            desktopCapabilities.requireExpert(agentId, true);
+            memoryProjectId = conversation.projectId();
+        }
         var agent = entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
         if (!AgentStatusEnum.ACTIVE.getCode().equals(agent.getStatus())) {
             throw new BusinessException(ResultCode.AGENT_INACTIVE);
@@ -1306,8 +1338,11 @@ public class AgentServiceImpl implements AgentService {
 
         var execution = new AgentExecution();
         execution.setAgentId(agentId);
+        execution.setMemoryProjectId(memoryProjectId);
         execution.setInputPrompt(dto.getPrompt());
         execution.setInputContext(dto.getContext());
+        execution.setTemporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()));
+        execution.setMemoryWriteEnabled(dto.getMemoryWriteEnabled());
         execution.setAiModel(selectedModel);
         execution.setConversationId(StringUtils.hasText(dto.getConversationId())
                 ? dto.getConversationId()
@@ -1401,7 +1436,7 @@ public class AgentServiceImpl implements AgentService {
                 .timestamp(Instant.now())
                 .build());
 
-        agentRuntimeOrchestrator.execute(AgentExecutionContext.builder()
+        AgentExecutionContext context = AgentExecutionContext.builder()
                 .executionId(execution.getId())
                 .agentId(agentId)
                 .tenantId(SecurityUtil.getCurrentTenantId())
@@ -1419,10 +1454,26 @@ public class AgentServiceImpl implements AgentService {
                 .stream(Boolean.TRUE.equals(dto.getStream()))
                 .executionMode(execution.getExecutionMode())
                 .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
-                .temporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()))
-                .memoryWriteEnabled(dto.getMemoryWriteEnabled())
+                .temporaryChat(Boolean.TRUE.equals(execution.getTemporaryChat()))
+                .memoryWriteEnabled(execution.getMemoryWriteEnabled())
                 .budgetAdmission(budgetAdmission)
-                .build());
+                .build();
+        try {
+            agentRuntimeOrchestrator.execute(context);
+        } catch (RuntimeException exception) {
+            String message = markLaunchFailed(execution, exception);
+            if (message != null) {
+                return AgentExecuteResultVO.builder()
+                        .executionId(execution.getId())
+                        .conversationId(execution.getConversationId())
+                        .status(AgentExecutionStatusEnum.FAILED.getCode())
+                        .queuedAt(execution.getCreatedAt())
+                        .message(message)
+                        .securityDecision(securityDecision)
+                        .budgetAdmission(budgetAdmission)
+                        .build();
+            }
+        }
 
         log.info("Agent执行任务已入队: agentId={}, executionId={}", agentId, execution.getId());
         return AgentExecuteResultVO.builder()
@@ -1434,6 +1485,24 @@ public class AgentServiceImpl implements AgentService {
                 .securityDecision(securityDecision)
                 .budgetAdmission(budgetAdmission)
                 .build();
+    }
+
+    private String markLaunchFailed(AgentExecution execution, RuntimeException exception) {
+        String message = exception instanceof BusinessException business
+                && business.getCode() == ResultCode.WORKSPACE_PATH_CONFLICT.getCode()
+                ? business.getMessage() : "Agent 执行启动失败，请重试或联系管理员";
+        log.warn("Agent 执行启动异常: executionId={}", execution.getId(), exception);
+        if (!agentLogService.tryTransitionExecutionStatus(execution.getId(), QUEUED,
+                AgentExecutionStatusEnum.FAILED.getCode(), message, null, null, null)) {
+            return null;
+        }
+        executionEventStreamService.publish(AgentExecutionEvent.builder()
+                .eventType(AgentExecutionEventTypeEnum.FAILED.getCode())
+                .executionId(execution.getId())
+                .message(message)
+                .timestamp(Instant.now())
+                .build());
+        return message;
     }
 
     private String resolveQueuedMessage(SecurityCheckDecisionVO securityDecision,
@@ -1477,6 +1546,12 @@ public class AgentServiceImpl implements AgentService {
         var page = new Page<AgentExecution>(query.getPage(), query.getSize());
         var wrapper = new LambdaQueryWrapper<AgentExecution>()
                 .eq(AgentExecution::getAgentId, agentId);
+        wrapper.and(visibility -> visibility.nested(cloud -> cloud
+                        .apply("input_context -> 'desktopDeviceId' IS NULL")
+                        .apply("input_context -> 'desktopWorkspaceId' IS NULL")
+                        .apply("coalesce(conversation_id, '') NOT LIKE 'desktop-%'")
+                        .apply("coalesce(conversation_id, '') NOT LIKE '%:desktop-%'"))
+                .or().eq(AgentExecution::getCreatedBy, SecurityUtil.getCurrentUserId()));
         if (StringUtils.hasText(query.getExecutionId())) {
             wrapper.eq(AgentExecution::getId, query.getExecutionId());
         }
@@ -1494,7 +1569,7 @@ public class AgentServiceImpl implements AgentService {
 
     @Override
     public AgentExecutionVO getExecution(String agentId, String executionId) {
-        entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
+        var agent = entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
         var execution = agentExecutionMapper.selectOne(
                 new LambdaQueryWrapper<AgentExecution>()
                         .eq(AgentExecution::getId, executionId)
@@ -1502,7 +1577,17 @@ public class AgentServiceImpl implements AgentService {
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
+        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
         var vo = toExecutionVO(execution);
+        if (isTeamParent(agent, execution)) {
+            if (isExecutionOwner(execution) && AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())) {
+                teamChildApprovalService.findPending(execution).ifPresent(child ->
+                        vo.setPendingApproval(toPendingApprovalVO(child.approval(), TeamChildApprovalService.ALLOWED_DECISIONS)));
+            }
+        } else {
+            pendingToolApprovalService.findActivePending(executionId).ifPresent(approval ->
+                    vo.setPendingApproval(toPendingApprovalVO(approval, List.of("approve", "deny", "edit", "approve_always"))));
+        }
         if (StringUtils.hasText(execution.getTeamMemberId())) {
             vo.setTeamMemberRoleName(resolveMemberRoleName(execution.getTeamMemberId()));
         }
@@ -1510,6 +1595,11 @@ public class AgentServiceImpl implements AgentService {
         vo.setChildExecutions(buildChildExecutionVOs(execution));
         fillExecutionDiagnostics(vo, execution);
         return vo;
+    }
+
+    private AgentPendingApprovalVO toPendingApprovalVO(PendingToolApproval approval, List<String> decisions) {
+        return new AgentPendingApprovalVO(approval.getId(), approval.getToolCode(),
+                approval.getToolArguments(), approval.getIoType(), approval.getRiskLevel(), decisions);
     }
 
     @Override
@@ -1549,12 +1639,14 @@ public class AgentServiceImpl implements AgentService {
     private AgentExecution requireExecution(String agentId, String executionId) {
         entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
         AgentExecution execution = agentExecutionMapper.selectOne(new LambdaQueryWrapper<AgentExecution>()
-                .select(AgentExecution::getId, AgentExecution::getAgentId)
+                .select(AgentExecution::getId, AgentExecution::getAgentId,
+                        AgentExecution::getInputContext, AgentExecution::getCreatedBy, AgentExecution::getConversationId)
                 .eq(AgentExecution::getId, executionId)
                 .eq(AgentExecution::getAgentId, agentId));
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
+        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
         return execution;
     }
 
@@ -1567,7 +1659,42 @@ public class AgentServiceImpl implements AgentService {
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
+        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
+        if (DesktopExecutionTarget.from(execution.getInputContext()) != null
+                && (AgentExecutionStatusEnum.STOPPED.getCode().equals(execution.getStatus())
+                || AgentExecutionStatusEnum.COMPLETED.getCode().equals(execution.getStatus())
+                || AgentExecutionStatusEnum.FAILED.getCode().equals(execution.getStatus()))) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "本机任务已结束，不能通过旧审批恢复执行");
+        }
         var agent = entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
+
+        if (AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())
+                && hasSecurityPause(execution, isTeamParent(agent, execution))) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "执行已被企业风险策略暂停，请联系管理员处理安全事件");
+        }
+
+        if (AgentTypeEnum.TEAM == AgentTypeEnum.fromCode(agent.getAgentType())) {
+            if (StringUtils.hasText(execution.getParentExecutionId()) && StringUtils.hasText(dto.getApprovalDecision())) {
+                var parent = agentExecutionMapper.selectById(execution.getParentExecutionId());
+                if (parent == null || !agentId.equals(parent.getAgentId())
+                        || !AgentExecutionStatusEnum.PAUSED.getCode().equals(parent.getStatus())) {
+                    throw new BusinessException(ResultCode.BAD_REQUEST, "Team 父执行当前无法处理审批");
+                }
+                handleTeamApproval(agent, parent, dto, executionId);
+                return;
+            }
+            if (AgentExecutionStatusEnum.RUNNING.getCode().equals(execution.getStatus())
+                    && !StringUtils.hasText(dto.getApprovalDecision()) && StringUtils.hasText(dto.getMessage())) {
+                executionSteeringApplicationService.steer(executionId, SecurityUtil.getCurrentTenantId(), dto.getMessage());
+                return;
+            }
+            if (!AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "Team 执行当前无法接收该输入");
+            }
+            if (isTeamParent(agent, execution) && handleTeamApproval(agent, execution, dto, null)) {
+                return;
+            }
+        }
 
         // 处理审批决策
         if (StringUtils.hasText(dto.getApprovalDecision())) {
@@ -1575,8 +1702,7 @@ public class AgentServiceImpl implements AgentService {
             return;
         }
 
-        if (AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())
-                || AgentTypeEnum.TEAM == AgentTypeEnum.fromCode(agent.getAgentType())) {
+        if (AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())) {
             agentRuntimeOrchestrator.resume(executionId, dto);
             return;
         }
@@ -1590,10 +1716,58 @@ public class AgentServiceImpl implements AgentService {
     }
 
     private void handleApprovalDecision(Agent agent, AgentExecution execution, AgentExecutionInputDTO dto) {
+        handleApprovalDecision(agent, execution, dto, execution.getId());
+    }
+
+    private boolean isTeamParent(Agent agent, AgentExecution execution) {
+        return AgentTypeEnum.TEAM == AgentTypeEnum.fromCode(agent.getAgentType())
+                && !StringUtils.hasText(execution.getParentExecutionId());
+    }
+
+    private boolean hasSecurityPause(AgentExecution execution, boolean teamParent) {
+        if (securityIncidentMapper.findExecutionPause(execution) != null) {
+            return true;
+        }
+        return teamParent && agentExecutionMapper.selectList(new LambdaQueryWrapper<AgentExecution>()
+                        .eq(AgentExecution::getTenantId, execution.getTenantId())
+                        .eq(AgentExecution::getParentExecutionId, execution.getId())
+                        .eq(AgentExecution::getStatus, AgentExecutionStatusEnum.PAUSED.getCode()))
+                .stream().anyMatch(child -> securityIncidentMapper.findExecutionPause(child) != null);
+    }
+
+    private boolean isExecutionOwner(AgentExecution execution) {
+        return StringUtils.hasText(execution.getCreatedBy())
+                && execution.getCreatedBy().equals(SecurityUtil.getCurrentUserId());
+    }
+
+    private boolean handleTeamApproval(Agent agent, AgentExecution parent, AgentExecutionInputDTO input,
+                                       String expectedChildId) {
+        var pending = teamChildApprovalService.findPending(parent);
+        if (!StringUtils.hasText(input.getApprovalDecision())) {
+            if (pending.isPresent()) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "请先处理 Team 成员的待审批工具");
+            }
+            return false;
+        }
+        if (!isExecutionOwner(parent)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "仅任务所属用户可处理 Team 工具审批");
+        }
+        var child = pending.orElseThrow(() -> new BusinessException(ResultCode.BAD_REQUEST, "Team 执行没有待审批工具"));
+        if (!child.approval().getId().equals(input.getApprovalId())
+                || (expectedChildId != null && !expectedChildId.equals(child.execution().getId()))
+                || !TeamChildApprovalService.ALLOWED_DECISIONS.contains(input.getApprovalDecision())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "请选择当前待审批工具的有效审批操作");
+        }
+        handleApprovalDecision(agent, parent, input, child.execution().getId());
+        return true;
+    }
+
+    private void handleApprovalDecision(Agent agent, AgentExecution execution, AgentExecutionInputDTO dto,
+                                        String approvalExecutionId) {
         String decision = dto.getApprovalDecision();
         String executionId = execution.getId();
         String tenantId = agent.getTenantId();
-        PendingToolApproval approval = decidePendingApproval(executionId, dto);
+        PendingToolApproval approval = decidePendingApproval(approvalExecutionId, dto);
         String toolCode = resolveApprovalToolCode(dto, approval);
         String toolCommand = resolveApprovalToolCommand(dto, approval);
         if ("edit".equals(decision) && approval == null) {
@@ -1619,7 +1793,7 @@ public class AgentServiceImpl implements AgentService {
                 if (!StringUtils.hasText(dto.getMessage())) {
                     dto.setMessage("用户已批准执行工具: " + toolCode);
                 }
-                agentRuntimeOrchestrator.resume(executionId, dto);
+                resumeAfterApproval(executionId, dto, !executionId.equals(approvalExecutionId));
             }
             case "deny" -> {
                 executionEventStreamService.publish(AgentExecutionEvent.builder()
@@ -1632,11 +1806,40 @@ public class AgentServiceImpl implements AgentService {
                 if (!StringUtils.hasText(dto.getMessage())) {
                     dto.setMessage("用户已拒绝执行工具: " + toolCode + "，请调整方案继续。");
                 }
-                agentRuntimeOrchestrator.resume(executionId, dto);
+                resumeAfterApproval(executionId, dto, !executionId.equals(approvalExecutionId));
             }
             default -> throw new BusinessException(ResultCode.BAD_REQUEST,
                     "无效的审批决策: " + decision);
         }
+    }
+
+    private void resumeAfterApproval(String executionId, AgentExecutionInputDTO input, boolean teamParent) {
+        if (!teamParent || !TransactionSynchronizationManager.isActualTransactionActive()
+                || !TransactionSynchronizationManager.isSynchronizationActive()) {
+            agentRuntimeOrchestrator.resume(executionId, input);
+            return;
+        }
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        String userId = SecurityUtil.getCurrentUserId();
+        String username = SecurityUtil.getCurrentUsername();
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                // 审批中心事务提交后，在独立线程读取审批记录并恢复父图。
+                Thread.startVirtualThread(() -> {
+                    try {
+                        SecurityUtil.setCurrentTenantId(tenantId);
+                        SecurityUtil.setCurrentUserId(userId);
+                        SecurityUtil.setCurrentUsername(username);
+                        agentRuntimeOrchestrator.resume(executionId, input);
+                    } catch (RuntimeException exception) {
+                        log.error("恢复已审批的 Team 执行失败: executionId={}", executionId, exception);
+                    } finally {
+                        SecurityUtil.clear();
+                    }
+                });
+            }
+        });
     }
 
     private PendingToolApproval decidePendingApproval(String executionId, AgentExecutionInputDTO dto) {
@@ -1703,25 +1906,79 @@ public class AgentServiceImpl implements AgentService {
         var execution = agentExecutionMapper.selectOne(
                 new LambdaQueryWrapper<AgentExecution>()
                         .eq(AgentExecution::getId, executionId)
-                        .eq(AgentExecution::getAgentId, agentId));
+                        .eq(AgentExecution::getAgentId, agentId)
+                        .eq(AgentExecution::getTenantId, SecurityUtil.getCurrentTenantId()));
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
-        if (!QUEUED.equals(execution.getStatus()) && !AgentExecutionStatusEnum.RUNNING.getCode().equals(execution.getStatus())) {
+        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
+        if (execution.getStatus() == null || !STOPPABLE_EXECUTION_STATUSES.contains(execution.getStatus())) {
             throw new BusinessException(ResultCode.BAD_REQUEST);
         }
         var update = new AgentExecution();
-        update.setId(executionId);
         update.setStatus(AgentExecutionStatusEnum.STOPPED.getCode());
         update.setCompletedAt(LocalDateTime.now());
-        agentExecutionMapper.updateById(update);
-        executionEventStreamService.publish(AgentExecutionEvent.builder()
+        int affected = agentExecutionMapper.update(update, new LambdaUpdateWrapper<AgentExecution>()
+                .eq(AgentExecution::getId, executionId)
+                .eq(AgentExecution::getAgentId, agentId)
+                .eq(AgentExecution::getTenantId, execution.getTenantId())
+                .in(AgentExecution::getStatus, STOPPABLE_EXECUTION_STATUSES));
+        if (affected == 0) {
+            throw new BusinessException(ResultCode.BAD_REQUEST);
+        }
+        List<String> stoppedExecutions = new ArrayList<>();
+        stoppedExecutions.add(executionId);
+        if (!StringUtils.hasText(execution.getParentExecutionId())
+                && AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode().equals(execution.getRuntimeEngine())) {
+            stoppedExecutions.addAll(stopActiveTeamChildren(execution, update));
+        }
+        Runnable publishCancellation = () -> stoppedExecutions.forEach(this::publishExecutionCancelled);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    publishCancellation.run();
+                }
+            });
+        } else {
+            publishCancellation.run();
+        }
+        log.info("停止Agent执行: agentId={}, executionId={}, 停止成员数={}", agentId, executionId,
+                stoppedExecutions.size() - 1);
+    }
+
+    private List<String> stopActiveTeamChildren(AgentExecution parent, AgentExecution update) {
+        var children = agentExecutionMapper.selectList(new LambdaQueryWrapper<AgentExecution>()
+                .select(AgentExecution::getId)
+                .eq(AgentExecution::getTenantId, parent.getTenantId())
+                .eq(AgentExecution::getAgentId, parent.getAgentId())
+                .eq(AgentExecution::getParentExecutionId, parent.getId())
+                .eq(DesktopExecutionTarget.workspaceConversation(parent.getConversationId())
+                                || DesktopExecutionTarget.from(parent.getInputContext()) != null,
+                        AgentExecution::getCreatedBy, parent.getCreatedBy())
+                .in(AgentExecution::getStatus, STOPPABLE_EXECUTION_STATUSES)
+                .orderByAsc(AgentExecution::getId)
+                .last("FOR UPDATE"));
+        if (children.isEmpty()) {
+            return List.of();
+        }
+        List<String> childIds = children.stream().map(AgentExecution::getId).toList();
+        int updated = agentExecutionMapper.update(update, new LambdaUpdateWrapper<AgentExecution>()
+                .in(AgentExecution::getId, childIds));
+        if (updated != childIds.size()) {
+            throw new IllegalStateException("未能停止所有已锁定的 Team 子执行");
+        }
+        return childIds;
+    }
+
+    private void publishExecutionCancelled(String executionId) {
+        AgentExecutionEvent cancelled = AgentExecutionEvent.builder()
                 .eventType(AgentExecutionEventTypeEnum.CANCELLED.getCode())
                 .executionId(executionId)
                 .message("执行已取消")
                 .timestamp(Instant.now())
-                .build());
-        log.info("停止Agent执行: agentId={}, executionId={}", agentId, executionId);
+                .build();
+        executionEventStreamService.publish(cancelled);
     }
 
     @Override
@@ -1729,6 +1986,17 @@ public class AgentServiceImpl implements AgentService {
         if (!StringUtils.hasText(conversationId)) {
             return List.of();
         }
+        requireDesktopConversationOwner(conversationId);
+        for (String candidate : conversationIdCandidates(conversationId)) {
+            List<ConversationMessageVO> messages = loadConversationMessages(candidate);
+            if (!messages.isEmpty()) {
+                return messages;
+            }
+        }
+        return List.of();
+    }
+
+    private List<ConversationMessageVO> loadConversationMessages(String conversationId) {
         List<ChatMessageEntity> entities = chatMessageMapper.selectList(
                 new LambdaQueryWrapper<ChatMessageEntity>()
                         .eq(ChatMessageEntity::getConversationId, conversationId)
@@ -1736,6 +2004,34 @@ public class AgentServiceImpl implements AgentService {
         return entities.stream()
                 .map(this::toConversationMessageVO)
                 .toList();
+    }
+
+    private void requireDesktopConversationOwner(String conversationId) {
+        if (!StringUtils.hasText(conversationId)) {
+            return;
+        }
+        if (DesktopExecutionTarget.workspaceConversation(conversationId)) {
+            String tenantId = SecurityUtil.getCurrentTenantId();
+            String userId = SecurityUtil.getCurrentUserId();
+            if (!StringUtils.hasText(tenantId) || !StringUtils.hasText(userId)
+                    || !desktopWorkspaceService.conversation(conversationId).id().equals(conversationId)) {
+                throw new BusinessException(ResultCode.FORBIDDEN);
+            }
+        }
+        agentExecutionMapper.selectList(new LambdaQueryWrapper<AgentExecution>()
+                        .select(AgentExecution::getInputContext, AgentExecution::getCreatedBy, AgentExecution::getConversationId)
+                        .in(AgentExecution::getConversationId, conversationIdCandidates(conversationId)))
+                .forEach(execution -> DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId()));
+    }
+
+    private List<String> conversationIdCandidates(String conversationId) {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        if (StringUtils.hasText(tenantId) && !conversationId.startsWith("team:")
+                && !conversationId.startsWith(tenantId + ":")) {
+            // 执行归档使用租户前缀，旧会话记录可能仍保留原始 ID。
+            return List.of(tenantId + ":" + conversationId, conversationId);
+        }
+        return List.of(conversationId);
     }
 
     private ConversationMessageVO toConversationMessageVO(ChatMessageEntity entity) {

@@ -9,6 +9,7 @@ import com.schemaplexai.model.vo.monitor.AgentTraceFailureCategoryVO;
 import com.schemaplexai.model.vo.monitor.AgentTraceFailureSummaryVO;
 import com.schemaplexai.model.vo.monitor.AgentTraceSpanVO;
 import com.schemaplexai.model.vo.monitor.AgentTraceVO;
+import com.schemaplexai.model.vo.monitor.ModelAttemptMetadata;
 import com.schemaplexai.service.monitor.AgentTraceService;
 import com.schemaplexai.service.monitor.TraceFailureClassification;
 import com.schemaplexai.service.monitor.TraceFailureClassifier;
@@ -86,12 +87,26 @@ public class AgentTraceServiceImpl implements AgentTraceService {
                                 long outputTokens,
                                 BigDecimal cost,
                                 String status) {
+        recordModelAttempt(traceId, tenantId, agentId, null, modelName, startedAt, durationMs, inputTokens,
+                outputTokens, cost, status, null);
+    }
+
+    @Override
+    public void recordModelAttempt(String traceId, String tenantId, String agentId, String attemptId, String modelName,
+                                   LocalDateTime startedAt, long durationMs, long inputTokens, long outputTokens,
+                                   BigDecimal cost, String status, ModelAttemptMetadata metadata) {
         AgentTraceSpan span = buildChildSpan(traceId, tenantId, agentId, "LLM", modelName, startedAt, durationMs, status);
         span.setInputTokens(inputTokens);
         span.setOutputTokens(outputTokens);
         span.setCost(cost);
         applyFailureClassification(span, null);
-        agentTraceSpanMapper.insert(span);
+        if (metadata == null) {
+            agentTraceSpanMapper.insert(span);
+            return;
+        }
+        span.setSpanId(attemptId);
+        span.setModelAttempt(metadata);
+        agentTraceSpanMapper.insertModelAttempt(span);
     }
 
     @Override
@@ -159,6 +174,7 @@ public class AgentTraceServiceImpl implements AgentTraceService {
                     vo.setOutputTokens(item.getOutputTokens());
                     vo.setCost(item.getCost());
                     vo.setStatus(item.getStatus());
+                    vo.setModelAttempt(item.getModelAttempt());
                     TraceFailureClassification classification = traceFailureClassifier.inferExisting(
                             item.getSpanType(), item.getName(), item.getStatus(), item.getFailureCategory(),
                             item.getFailureReason(), item.getRecoverable());

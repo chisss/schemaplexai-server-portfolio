@@ -1,10 +1,13 @@
 package com.schemaplexai.service.memory;
 
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
 
@@ -25,8 +28,34 @@ public class CompositeChatMemoryStore implements ChatMemoryStore {
     private final PostgresChatMemoryStore postgresChatMemoryStore;
     private final RedisChatMemoryStore redisChatMemoryStore;
 
+    public List<ChatMessage> loadWindow(String conversationId, String executionId, int limit) {
+        return postgresChatMemoryStore.loadWindow(conversationId, executionId, limit);
+    }
+
+    public void appendMessages(String conversationId, String executionId,
+                               List<PostgresChatMemoryStore.ArchivedMessage> messages) {
+        postgresChatMemoryStore.appendMessages(conversationId, executionId, messages);
+    }
+
+    public void appendMissingToolResults(String conversationId, String executionId,
+                                         List<ToolExecutionResultMessage> results) {
+        postgresChatMemoryStore.appendMissingToolResults(conversationId, executionId, results);
+    }
+
+    public List<ChatMessage> loadExecutionForExtraction(String conversationId, String executionId) {
+        return postgresChatMemoryStore.loadExecutionForExtraction(conversationId, executionId);
+    }
+
+    public List<ChatMessage> loadAuthoredExecutionInputs(String conversationId, String executionId) {
+        return postgresChatMemoryStore.loadAuthoredExecutionInputs(conversationId, executionId);
+    }
+
     @Override
     public List<ChatMessage> getMessages(Object memoryId) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            // 事务内只读数据库，避免读取旧缓存或向缓存发布未提交的消息。
+            return postgresChatMemoryStore.getMessages(memoryId);
+        }
         // L1: 尝试从 Redis 读取
         List<ChatMessage> cached = redisChatMemoryStore.getMessages(memoryId);
         if (cached != null) {
@@ -46,24 +75,37 @@ public class CompositeChatMemoryStore implements ChatMemoryStore {
 
     @Override
     public void updateMessages(Object memoryId, List<ChatMessage> messages) {
-        // 先持久化到 PostgreSQL
-        postgresChatMemoryStore.updateMessages(memoryId, messages);
-
-        // 再更新 Redis 缓存
-        redisChatMemoryStore.updateMessages(memoryId, messages);
+        List<ChatMessage> snapshot = List.copyOf(messages);
+        postgresChatMemoryStore.updateMessages(memoryId, snapshot);
+        afterCommit(() -> redisChatMemoryStore.updateMessages(memoryId, snapshot));
     }
 
     @Override
     public void deleteMessages(Object memoryId) {
         postgresChatMemoryStore.deleteMessages(memoryId);
-        redisChatMemoryStore.deleteMessages(memoryId);
+        invalidateCache(memoryId);
     }
 
     /**
      * 失效指定会话的 Redis 缓存（回滚后调用，强制从 PG 重新加载）
      */
     public void invalidateCache(Object memoryId) {
-        redisChatMemoryStore.deleteMessages(memoryId);
-        log.debug("已失效会话缓存: memoryId={}", memoryId);
+        afterCommit(() -> {
+            redisChatMemoryStore.deleteMessages(memoryId);
+            log.debug("已失效会话缓存: memoryId={}", memoryId);
+        });
+    }
+
+    private void afterCommit(Runnable updateCache) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            updateCache.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                updateCache.run();
+            }
+        });
     }
 }

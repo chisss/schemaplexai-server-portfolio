@@ -1,13 +1,16 @@
 package com.schemaplexai.service.agent.execution;
 
+import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.model.entity.AgentToolBinding;
 import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
 import lombok.Builder;
 import lombok.Data;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Agent 执行上下文 POJO
@@ -59,11 +62,37 @@ public class AgentExecutionContext {
     /** Team 成员角色类型 */
     private String teamMemberRoleType;
 
+    /** 由 Team 编排器为新子会话生成，仅供模型请求去重。 */
+    private TeamTaskContextProjection teamTaskContextProjection;
+
+    public record TeamTaskContextProjection(String executionId, String tenantId, String teamAgentId, String parentExecutionId,
+                                            String memberId, String conversationId, String roleName,
+                                            String roleType, String memberPrompt) {
+        boolean matches(AgentExecutionContext context) {
+            return AgentRuntimeEngineEnum.TEAM_LANGGRAPH4J.getCode().equals(context.getRuntimeEngine())
+                    && StringUtils.hasText(context.getParentExecutionId()) && StringUtils.hasText(context.getTeamMemberId())
+                    && Objects.equals(teamAgentId, context.getAgentId()) && Objects.equals(teamAgentId, context.getTeamAgentId())
+                    && Objects.equals(executionId, context.getExecutionId()) && Objects.equals(tenantId, context.getTenantId())
+                    && Objects.equals(parentExecutionId, context.getParentExecutionId())
+                    && Objects.equals(memberId, context.getTeamMemberId()) && Objects.equals(conversationId, context.getConversationId())
+                    && Objects.equals(roleName, context.getTeamMemberRoleName()) && Objects.equals(roleType, context.getTeamMemberRoleType())
+                    && Objects.equals(memberPrompt, context.getInputPrompt());
+        }
+
+        @Override
+        public String toString() {
+            return "TeamTaskContextProjection";
+        }
+    }
+
     /** 运行时引擎编码 */
     private String runtimeEngine;
 
     /** 附加上下文变量（键值对） */
     private Map<String, Object> inputContext;
+
+    /** 引擎计算的本轮执行截止时间，仅服务端设置，不从客户端上下文读取。 */
+    private Long executionDeadlineEpochMillis;
 
     /** 运行时附加系统上下文 */
     private List<String> additionalSystemContexts;
@@ -74,13 +103,20 @@ public class AgentExecutionContext {
     /** 执行期沙箱策略 */
     private SandboxPolicy sandboxPolicy;
 
+    /** 服务端在执行开始时保存的桌面验证要求，子执行共享同一要求。 */
+    private String desktopVerificationCommand;
+    /** 最终验收提示由另一 Team 成员接收，本成员的操作仍使旧回执失效。 */
+    private boolean desktopVerificationDelegated;
+    /** 编排器选定由此成员完成 Team 最终桌面验收。 */
+    private boolean teamDesktopVerificationOwner;
+
     /** 执行前预算准入快照 */
     private BudgetAdmissionVO budgetAdmission;
 
     /** 会话标识（前端传入或自动生成，支持多轮对话） */
     private String conversationId;
 
-    /** 临时对话不读取也不写入用户记忆 */
+    /** 临时对话禁用用户与 Agent 长期记忆读写 */
     private boolean temporaryChat;
 
     /** 是否允许本次执行写入用户记忆，null 表示跟随用户设置 */
@@ -88,6 +124,9 @@ public class AgentExecutionContext {
 
     /** 附件对象 ID 列表 */
     private List<String> attachmentIds;
+    /** 已授权附件所归属的原始会话，Team 子执行由编排器设置。 */
+    private String attachmentSourceConversationId;
+
 
     /** 推理强度：low / medium / high */
     private String reasoningStrength;

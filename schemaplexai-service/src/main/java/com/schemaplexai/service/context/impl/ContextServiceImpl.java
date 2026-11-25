@@ -6,6 +6,8 @@ import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.dao.mapper.AgentContextBindingMapper;
+import com.schemaplexai.dao.mapper.AgentMapper;
 import com.schemaplexai.dao.mapper.ContextRelationMapper;
 import com.schemaplexai.dao.mapper.KnowledgeDocumentMapper;
 import com.schemaplexai.model.entity.ContextRelation;
@@ -17,6 +19,7 @@ import com.schemaplexai.dao.mapper.ContextSnapshotMapper;
 import com.schemaplexai.model.converter.ContextEntityConverter;
 import com.schemaplexai.model.converter.ContextItemConverter;
 import com.schemaplexai.model.dto.context.*;
+import com.schemaplexai.model.entity.AgentContextBinding;
 import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextItem;
 import com.schemaplexai.model.entity.ContextSnapshot;
@@ -63,6 +66,8 @@ public class ContextServiceImpl implements ContextService {
     private final EntityValidator entityValidator;
     private final ContextRelationMapper contextRelationMapper;
     private final KnowledgeDocumentMapper knowledgeDocumentMapper;
+    private final AgentMapper agentMapper;
+    private final AgentContextBindingMapper agentContextBindingMapper;
 
     /** Milvus 可选注入（Milvus 未启动时为 null） */
     @Lazy
@@ -454,7 +459,7 @@ public class ContextServiceImpl implements ContextService {
 
         // 第四层：Agent上下文（15%预算）
         int agentBudget = (int) (totalBudget * AGENT_RATIO);
-        var agentLayer = loadContextLayer("agent", request.getProjectId(), agentBudget);
+        var agentLayer = buildContextLayer("agent", loadBoundAgentContexts(request.getAgentId()), agentBudget);
         layers.add(agentLayer);
         totalUsed += agentLayer.getTokenCount();
 
@@ -476,15 +481,42 @@ public class ContextServiceImpl implements ContextService {
      * 加载指定层级的上下文
      */
     private ContextResolvedVO.ContextLayer loadContextLayer(String level, String projectId, int tokenBudget) {
-        var wrapper = new LambdaQueryWrapper<ContextEntity>()
+        boolean projectScoped = !"global".equals(level);
+        if (projectScoped && !StringUtils.hasText(projectId)) {
+            return buildContextLayer(level, List.of(), tokenBudget);
+        }
+        var query = activeContexts(level).eq(projectScoped, ContextEntity::getProjectId, projectId);
+        return buildContextLayer(level, contextEntityMapper.selectList(query), tokenBudget);
+    }
+
+    private List<ContextEntity> loadBoundAgentContexts(String agentId) {
+        // 绑定表通过父 Agent 实现租户隔离
+        if (!StringUtils.hasText(agentId) || agentMapper.selectById(agentId) == null) {
+            return List.of();
+        }
+        var contextIds = agentContextBindingMapper.selectList(new LambdaQueryWrapper<AgentContextBinding>()
+                        .eq(AgentContextBinding::getAgentId, agentId)
+                        .eq(AgentContextBinding::getStatus, CommonConstant.STATUS_ACTIVE)
+                        .isNotNull(AgentContextBinding::getContextId))
+                .stream()
+                .map(AgentContextBinding::getContextId)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
+        if (contextIds.isEmpty()) {
+            return List.of();
+        }
+        return contextEntityMapper.selectList(activeContexts("agent").in(ContextEntity::getId, contextIds));
+    }
+
+    private LambdaQueryWrapper<ContextEntity> activeContexts(String level) {
+        return new LambdaQueryWrapper<ContextEntity>()
                 .eq(ContextEntity::getContextLevel, level)
                 .eq(ContextEntity::getStatus, CommonConstant.STATUS_ACTIVE);
+    }
 
-        if (projectId != null && !"global".equals(level)) {
-            wrapper.eq(ContextEntity::getProjectId, projectId);
-        }
-
-        var contexts = contextEntityMapper.selectList(wrapper);
+    private ContextResolvedVO.ContextLayer buildContextLayer(
+            String level, List<ContextEntity> contexts, int tokenBudget) {
         var contentBuilder = new StringBuilder();
         int totalTokens = 0;
         int itemCount = 0;

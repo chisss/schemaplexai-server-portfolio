@@ -67,6 +67,19 @@ public class AgentAsyncConfig {
         return executor;
     }
 
+    @Bean("teamOrchestrationPool")
+    public Executor teamOrchestrationPool(TaskDecorator securityContextTaskDecorator) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(16);
+        executor.setQueueCapacity(32);
+        executor.setThreadNamePrefix("team-orchestrate-");
+        executor.setKeepAliveSeconds(60);
+        executor.setTaskDecorator(securityContextTaskDecorator);
+        executor.initialize();
+        return executor;
+    }
+
     @Bean("toolParallelPool")
     public Executor toolParallelPool(TaskDecorator securityContextTaskDecorator) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();

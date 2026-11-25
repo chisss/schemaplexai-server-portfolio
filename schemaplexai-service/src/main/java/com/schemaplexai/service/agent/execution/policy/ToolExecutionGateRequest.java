@@ -21,4 +21,5 @@ public class ToolExecutionGateRequest {
     private ToolExecutionRequest toolRequest;
     private ToolIoTypeEnum ioType;
     private boolean systemAgent;
+    private boolean desktopTool;
 }

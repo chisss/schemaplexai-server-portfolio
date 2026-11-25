@@ -14,6 +14,10 @@ public class AgentExecutionResult {
     /** 最终状态：completed / completed_with_fallback / failed / stopped */
     private String status;
 
+    /** 本次循环结束原因及是否通过本地证据生成降级结果。 */
+    private AgentLoopEndReason endReason;
+    private boolean degraded;
+
     /** 最终输出文本 */
     private String outputResult;
 

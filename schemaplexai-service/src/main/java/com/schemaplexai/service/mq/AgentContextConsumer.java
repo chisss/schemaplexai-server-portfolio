@@ -1,5 +1,6 @@
 package com.schemaplexai.service.mq;
 
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.TeamAgentOutputMapper;
 import com.schemaplexai.model.entity.TeamAgentOutput;
 import com.schemaplexai.service.context.ContextCacheService;
@@ -44,11 +45,16 @@ public class AgentContextConsumer {
 
     @RabbitListener(queues = "sf.agent.team.context")
     public void onAgentContextMessage(AgentContextMessage message) {
-        if (message == null) return;
+        if (message == null || !StringUtils.hasText(message.getTenantId())) {
+            log.warn("忽略缺少租户身份的 Agent 上下文消息");
+            return;
+        }
 
         log.info("收到 Agent 上下文消息: type={}, teamAgentId={}, nodeId={}",
                 message.getMessageType(), message.getTeamAgentId(), message.getNodeId());
 
+        String previousTenant = SecurityUtil.getCurrentTenantId();
+        SecurityUtil.setCurrentTenantId(message.getTenantId());
         try {
             switch (message.getMessageType() != null ? message.getMessageType() : "") {
                 case "agent_output" -> handleAgentOutput(message);
@@ -57,6 +63,8 @@ public class AgentContextConsumer {
             }
         } catch (Exception e) {
             log.error("消费 Agent 上下文消息异常: {}", e.getMessage(), e);
+        } finally {
+            SecurityUtil.setCurrentTenantId(previousTenant);
         }
     }
 

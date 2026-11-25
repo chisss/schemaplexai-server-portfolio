@@ -10,11 +10,13 @@ import com.schemaplexai.dao.mapper.UserMemoryMapper;
 import com.schemaplexai.dao.mapper.UserMemorySettingMapper;
 import com.schemaplexai.model.entity.UserMemory;
 import com.schemaplexai.model.entity.UserMemorySetting;
+import com.schemaplexai.service.ai.ChatMessageText;
+import com.schemaplexai.service.memory.MemoryExtractionWriter;
+import com.schemaplexai.service.memory.MemoryExtractionWriter.Extractor;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.UserMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -24,7 +26,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -38,54 +43,60 @@ public class UserMemoryExtractionService {
 
     private static final int MAX_EXPLICIT_MEMORIES = 3;
     private static final Pattern EXPLICIT_MEMORY_PATTERN = Pattern.compile(
-            "(?:请)?(?:记住|帮我记住|以后(?:都|默认)?|默认|我偏好|我喜欢|不要再)[:：,， ]*(.+)",
-            Pattern.CASE_INSENSITIVE);
+            "^\\h*(?:(?:请\\h*)?(?:帮我记住|记住|以后(?:都|默认)?|默认|我偏好|我喜欢|(不要再))"
+                    + "|(?:please\\h+)?remember\\b(?:\\h+(?:that|this)\\b)?|from now on\\b|my preference is\\b)"
+                    + "[:：,，\\h]*(.+)",
+            Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
 
     private final UserMemoryMapper userMemoryMapper;
     private final UserMemorySettingMapper userMemorySettingMapper;
+    private final MemoryExtractionWriter extractionWriter;
 
-    /**
-     * 异步提取用户记忆
-     */
-    @Async("agentExecutorPool")
-    public void extractMemoriesAsync(String tenantId, String userId, String agentId, String executionId,
-                                     String conversationId, List<ChatMessage> conversationHistory,
-                                     boolean temporaryChat) {
+    /** 在执行完成通知发出前保存规则提取的记忆，新会话可以立即读取。 */
+    public void saveAfterCompletion(String tenantId, String userId, String agentId, String projectId, String executionId,
+                                    String conversationId, boolean temporaryChat, Boolean memoryWriteEnabled,
+                                    Supplier<List<ChatMessage>> authoredHistory) {
+        if (temporaryChat || Boolean.FALSE.equals(memoryWriteEnabled) || !StringUtils.hasText(tenantId)
+                || !StringUtils.hasText(userId) || !StringUtils.hasText(conversationId)) {
+            return;
+        }
         try {
-            extractMemories(tenantId, userId, agentId, executionId, conversationId, conversationHistory, temporaryChat);
-        } catch (Exception e) {
-            log.warn("用户记忆提取失败: userId={}, agentId={}, executionId={}, error={}",
-                    userId, agentId, executionId, e.getMessage());
+            List<UserMemory> saved = extractMemories(tenantId, userId, agentId, projectId, executionId, conversationId,
+                    authoredHistory.get(), false);
+            log.info("用户显式记忆提取: executionId={}, agentId={}, savedCount={}", executionId, agentId, saved.size());
+        } catch (RuntimeException exception) {
+            log.warn("用户显式记忆提取失败: executionId={}, agentId={}, errorType={}",
+                    executionId, agentId, exception.getClass().getSimpleName());
         }
     }
 
-    public List<UserMemory> extractMemories(String tenantId, String userId, String agentId, String executionId,
+    public List<UserMemory> extractMemories(String tenantId, String userId, String agentId, String projectId, String executionId,
                                             String conversationId, List<ChatMessage> conversationHistory,
                                             boolean temporaryChat) {
         if (temporaryChat || !StringUtils.hasText(tenantId) || !StringUtils.hasText(userId)
-                || conversationHistory == null || conversationHistory.isEmpty() || !isWritable(tenantId, userId)) {
+                || conversationHistory == null || conversationHistory.isEmpty()) {
             return List.of();
         }
 
         List<UserMemory> memories = new ArrayList<>();
+        Set<String> collected = new LinkedHashSet<>();
         for (ChatMessage message : conversationHistory) {
             if (!(message instanceof UserMessage userMessage)) {
                 continue;
             }
-            String content = extractExplicitContent(userMessage.singleText());
-            if (!StringUtils.hasText(content)) {
+            String content = extractExplicitContent(ChatMessageText.textOf(userMessage));
+            if (!StringUtils.hasText(content) || !collected.add(content)) {
                 continue;
             }
-            memories.add(buildExplicitMemory(tenantId, userId, agentId, executionId, conversationId, content));
+            memories.add(buildExplicitMemory(tenantId, userId, agentId, projectId, executionId, conversationId, content));
             if (memories.size() >= MAX_EXPLICIT_MEMORIES) {
                 break;
             }
         }
-        memories.forEach(userMemoryMapper::insert);
-        if (!memories.isEmpty()) {
-            log.info("用户显式记忆提取完成: userId={}, agentId={}, count={}", userId, agentId, memories.size());
+        if (memories.isEmpty() || !isWritable(tenantId, userId)) {
+            return List.of();
         }
-        return memories;
+        return extractionWriter.writeOnce(executionId, Extractor.USER, memories, userMemoryMapper::insert);
     }
 
     private boolean isWritable(String tenantId, String userId) {
@@ -108,14 +119,18 @@ public class UserMemoryExtractionService {
         if (!matcher.find()) {
             return null;
         }
-        String content = matcher.group(1).trim();
+        String instruction = matcher.group(1);
+        String content = matcher.group(2).trim();
         if (!StringUtils.hasText(content) || content.length() < 4) {
             return null;
+        }
+        if (instruction != null) {
+            content = instruction + content;
         }
         return content.length() > 500 ? content.substring(0, 500) : content;
     }
 
-    private UserMemory buildExplicitMemory(String tenantId, String userId, String agentId,
+    private UserMemory buildExplicitMemory(String tenantId, String userId, String agentId, String projectId,
                                            String executionId, String conversationId, String content) {
         UserMemory memory = new UserMemory();
         memory.setTenantId(tenantId);
@@ -123,9 +138,14 @@ public class UserMemoryExtractionService {
         memory.setAgentId(StringUtils.hasText(agentId) ? agentId : null);
         memory.setExecutionId(executionId);
         memory.setConversationId(conversationId);
-        memory.setMemoryScope(StringUtils.hasText(agentId)
-                ? UserMemoryScopeEnum.USER_AGENT.getCode()
-                : UserMemoryScopeEnum.USER_GLOBAL.getCode());
+        if (StringUtils.hasText(projectId)) {
+            memory.setProjectId(projectId);
+            memory.setMemoryScope(UserMemoryScopeEnum.USER_PROJECT.getCode());
+        } else {
+            memory.setMemoryScope(StringUtils.hasText(agentId)
+                    ? UserMemoryScopeEnum.USER_AGENT.getCode()
+                    : UserMemoryScopeEnum.USER_GLOBAL.getCode());
+        }
         memory.setMemoryKind(classifyKind(content));
         memory.setSourceType(UserMemorySourceTypeEnum.EXPLICIT.getCode());
         memory.setStatus(UserMemoryStatusEnum.ACTIVE.getCode());

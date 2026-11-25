@@ -1,6 +1,9 @@
 package com.schemaplexai.model.entity;
 
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
+import com.schemaplexai.model.vo.monitor.ModelAttemptMetadata;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
@@ -12,7 +15,7 @@ import java.time.LocalDateTime;
  */
 @Data
 @EqualsAndHashCode(callSuper = true)
-@TableName("sf_agent_trace_span")
+@TableName(value = "sf_agent_trace_span", autoResultMap = true)
 public class AgentTraceSpan extends BaseEntity {
 
     /**
@@ -89,4 +92,8 @@ public class AgentTraceSpan extends BaseEntity {
      * 是否可恢复
      */
     private Boolean recoverable;
+
+    /** 预算内模型单次请求的计量明细。 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private ModelAttemptMetadata modelAttempt;
 }

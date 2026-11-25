@@ -7,6 +7,7 @@ import org.springframework.util.StringUtils;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -39,10 +40,14 @@ public class AgentLoopShadowReviewService {
                 || qualityReflectionCount >= params.getMaxQualityReflections()) {
             return null;
         }
-        return CompletableFuture.supplyAsync(
-                () -> qualityChecker.buildStructuralFeedback(ctx, content, qualityReflectionCount, params),
-                agentExecutor
-        );
+        try {
+            return CompletableFuture.supplyAsync(
+                    () -> qualityChecker.buildStructuralFeedback(ctx, content, qualityReflectionCount, params),
+                    agentExecutor
+            );
+        } catch (RejectedExecutionException exception) {
+            return null;
+        }
     }
 
     /**
@@ -55,18 +60,12 @@ public class AgentLoopShadowReviewService {
         long safeAwaitMillis = Math.max(awaitMillis, 0L);
         try {
             return future.get(safeAwaitMillis, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return null;
         } catch (Exception ignored) {
             return null;
         }
     }
 
-    /**
-     * 非阻塞消费已完成的审核结果。
-     */
-    public QualityReflectionFeedback consumeIfDone(CompletableFuture<QualityReflectionFeedback> future) {
-        if (future == null || !future.isDone()) {
-            return null;
-        }
-        return future.getNow(null);
-    }
 }

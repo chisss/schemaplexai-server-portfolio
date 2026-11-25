@@ -39,7 +39,7 @@
         <mapstruct.version>1.5.5.Final</mapstruct.version>
         <hutool.version>5.8.32</hutool.version>
         <java-jwt.version>4.4.0</java-jwt.version>
-        <milvus-sdk.version>2.4.3</milvus-sdk.version>
+        <milvus-sdk.version>2.6.27</milvus-sdk.version>
         <clickhouse-jdbc.version>0.6.3</clickhouse-jdbc.version>
         <minio.version>8.5.13</minio.version>
         <flowable.version>7.1.0</flowable.version>
@@ -47,9 +47,12 @@
         <retrofit.version>2.11.0</retrofit.version>
         <redisson.version>3.37.0</redisson.version>
         <jgit.version>6.10.0.202406032230-r</jgit.version>
-        <langchain4j.version>1.13.1</langchain4j.version>
-        <langchain4j.beta.version>1.13.1-beta23</langchain4j.beta.version>
-        <langgraph4j.version>1.8.13</langgraph4j.version>
+        <langchain4j.version>1.24.0</langchain4j.version>
+        <langchain4j.beta.version>1.24.0-beta34</langchain4j.beta.version>
+        <!-- Community 独立发布，版本不随核心 BOM 同步 -->
+        <langchain4j.community.version>1.23.0-beta33</langchain4j.community.version>
+        <!-- 1.9.10 尚未发布 Maven Central，使用最新可解析正式版 -->
+        <langgraph4j.version>1.9.9</langgraph4j.version>
         <quickjs4j.version>0.0.6</quickjs4j.version>
         <jena.version>6.2.0</jena.version>
     </properties>

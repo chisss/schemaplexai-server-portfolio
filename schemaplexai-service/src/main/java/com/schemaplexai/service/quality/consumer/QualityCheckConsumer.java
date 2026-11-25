@@ -1,5 +1,6 @@
 package com.schemaplexai.service.quality.consumer;
 
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,9 +29,16 @@ public class QualityCheckConsumer {
         String type = (String) message.get("type");
         String taskId = (String) message.get("taskId");
         String specId = (String) message.get("specId");
+        String tenantId = (String) message.get("tenantId");
 
         log.info("收到质量检测消息: type={}, taskId={}, specId={}", type, taskId, specId);
 
+        if (!StringUtils.hasText(tenantId)) {
+            log.warn("质量检测消息缺少租户: taskId={}, type={}", taskId, type);
+            return;
+        }
+        String previousTenantId = SecurityUtil.getCurrentTenantId();
+        SecurityUtil.setCurrentTenantId(tenantId);
         try {
             switch (type) {
                 case "deviation_detect" -> handleDeviationDetect(message);
@@ -40,6 +48,8 @@ public class QualityCheckConsumer {
             }
         } catch (Exception e) {
             log.error("处理质量检测消息失败: type={}, error={}", type, e.getMessage(), e);
+        } finally {
+            SecurityUtil.setCurrentTenantId(previousTenantId);
         }
     }
 
@@ -48,9 +58,10 @@ public class QualityCheckConsumer {
         String specId = (String) message.get("specId");
         String agentExecutionId = (String) message.get("agentExecutionId");
         String targetContent = (String) message.get("targetContent");
+        String originalTask = (String) message.get("originalTask");
 
         log.info("执行偏离检测: taskId={}, specId={}, agentExecutionId={}", taskId, specId, agentExecutionId);
-        builtinQualityAssuranceService.handleDeviationMessage(taskId, specId, agentExecutionId, targetContent);
+        builtinQualityAssuranceService.handleDeviationMessage(taskId, specId, agentExecutionId, targetContent, originalTask);
     }
 
     private void handleIntentDefectAnalyze(Map<String, Object> message) {

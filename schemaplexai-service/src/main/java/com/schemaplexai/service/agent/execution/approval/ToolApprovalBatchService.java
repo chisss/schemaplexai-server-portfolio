@@ -26,22 +26,33 @@ public class ToolApprovalBatchService {
     public static final String CALL_STATUS_PENDING_APPROVAL = "pending_approval";
     public static final String CALL_STATUS_CONSUMED = "consumed";
     public static final String CALL_STATUS_RESTORED_SKIPPED = "restored_skipped";
+    public static final String CALL_STATUS_DISPATCHING = "dispatching";
+    public static final String CALL_STATUS_RESULT = "result";
+    public static final String CALL_STATUS_REJECTED = "rejected";
+    public static final String CALL_STATUS_LIMITED = "limited";
+    public static final String CALL_STATUS_SUGGESTED = "suggested";
 
     private final ToolApprovalBatchMapper batchMapper;
 
     /**
-     * 创建批次快照：remainingRequests 为暂停点起该轮尚未处理的全部工具请求
+     * 按模型提供的顺序记录整轮请求，初始状态由执行策略和每轮配额决定。
      */
     public ToolApprovalBatch createBatch(String tenantId, String agentId, String executionId, String conversationId,
                                          int roundNum, List<ToolExecutionRequest> remainingRequests, String pausedCallId) {
+        return createBatch(tenantId, agentId, executionId, conversationId, roundNum, remainingRequests,
+                pausedCallId == null ? Map.of() : Map.of(pausedCallId, CALL_STATUS_PENDING_APPROVAL));
+    }
+
+    public ToolApprovalBatch createBatch(String tenantId, String agentId, String executionId, String conversationId,
+                                         int roundNum, List<ToolExecutionRequest> requests, Map<String, String> statuses) {
         List<Map<String, Object>> callStates = new ArrayList<>();
-        for (ToolExecutionRequest request : remainingRequests) {
+        for (ToolExecutionRequest request : requests) {
             Map<String, Object> state = new LinkedHashMap<>();
             state.put("callId", request.id());
             state.put("toolCode", request.name());
-            state.put("status", request.id() != null && request.id().equals(pausedCallId)
-                    ? CALL_STATUS_PENDING_APPROVAL
-                    : CALL_STATUS_PENDING);
+            state.put("arguments", request.arguments() != null ? request.arguments() : "{}");
+            state.put("status", request.id() == null ? CALL_STATUS_PENDING
+                    : statuses.getOrDefault(request.id(), CALL_STATUS_PENDING));
             callStates.add(state);
         }
         ToolApprovalBatch batch = new ToolApprovalBatch();
@@ -55,6 +66,56 @@ public class ToolApprovalBatchService {
         log.info("创建工具审批批次: batchId={}, executionId={}, round={}, callCount={}",
                 batch.getId(), executionId, roundNum, callStates.size());
         return batch;
+    }
+
+    public ToolApprovalBatch findForApproval(String batchId, String executionId, String tenantId) {
+        if (!StringUtils.hasText(batchId)) {
+            return null;
+        }
+        ToolApprovalBatch batch = batchMapper.selectById(batchId);
+        if (batch == null || !executionId.equals(batch.getExecutionId()) || !tenantId.equals(batch.getTenantId())) {
+            return null;
+        }
+        return batch;
+    }
+
+    public boolean isResumable(ToolApprovalBatch batch) {
+        return batch != null && batch.getCallStates() != null && !batch.getCallStates().isEmpty()
+                && batch.getCallStates().stream().allMatch(call -> call.containsKey("arguments"));
+    }
+
+    public ToolExecutionRequest request(Map<String, Object> call) {
+        return ToolExecutionRequest.builder()
+                .id((String) call.get("callId"))
+                .name((String) call.get("toolCode"))
+                .arguments((String) call.get("arguments"))
+                .build();
+    }
+
+    public void record(ToolApprovalBatch batch, Map<String, Object> call, String status) {
+        call.put("status", status);
+        save(batch);
+    }
+
+    public void linkApproval(ToolApprovalBatch batch, String callId, String approvalId) {
+        var call = batch.getCallStates().stream().filter(state -> callId.equals(state.get("callId")))
+                .findFirst().orElseThrow();
+        call.put("approvalId", approvalId);
+        record(batch, call, CALL_STATUS_PENDING_APPROVAL);
+    }
+
+    public void recordResult(ToolApprovalBatch batch, Map<String, Object> call, String text,
+                             boolean error, String controlAction) {
+        call.put("resultText", text);
+        call.put("error", error);
+        call.put("controlAction", controlAction);
+        record(batch, call, CALL_STATUS_RESULT);
+    }
+
+    private void save(ToolApprovalBatch batch) {
+        if (batchMapper.updateById(batch) != 1) {
+            throw new IllegalStateException("审批工具批次写入失败: " + batch.getId());
+        }
     }
 
     /**

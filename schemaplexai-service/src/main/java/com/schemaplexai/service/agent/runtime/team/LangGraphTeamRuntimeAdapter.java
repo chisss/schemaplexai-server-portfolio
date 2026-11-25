@@ -1,5 +1,6 @@
 package com.schemaplexai.service.agent.runtime.team;
 
+import com.schemaplexai.common.util.SecurityUtil;
 import org.bsc.langgraph4j.CompileConfig;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphInput;
@@ -19,6 +20,26 @@ public class LangGraphTeamRuntimeAdapter {
                 .checkpointSaver(saver)
                 .interruptBefore(TeamGraphConstants.NODE_AWAIT_INPUT)
                 .releaseThread(false)
+                .build();
+    }
+
+    public RunnableConfig buildRunnableConfig(String threadId) {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        String userId = SecurityUtil.getCurrentUserId();
+        String username = SecurityUtil.getCurrentUsername();
+        return RunnableConfig.builder()
+                .threadId(threadId)
+                // 父图会等待子图完成，各自使用独立虚拟线程执行节点与边
+                .emitterExecutor(command -> Thread.startVirtualThread(() -> {
+                    try {
+                        SecurityUtil.setCurrentTenantId(tenantId);
+                        SecurityUtil.setCurrentUserId(userId);
+                        SecurityUtil.setCurrentUsername(username);
+                        command.run();
+                    } finally {
+                        SecurityUtil.clear();
+                    }
+                }))
                 .build();
     }
 

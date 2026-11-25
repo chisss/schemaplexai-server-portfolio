@@ -1,5 +1,7 @@
 package com.schemaplexai.service.agent.execution;
 
+import com.schemaplexai.service.ai.ChatMessageText;
+import dev.langchain4j.data.message.TextContent;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
@@ -51,9 +53,17 @@ public class ToolOutputMaskingService {
         List<ChatMessage> messages = memory.messages();
         if (messages == null || messages.isEmpty()) return false;
         int totalChars = messages.stream()
-                .mapToInt(m -> m.toString().length())
+                .mapToInt(this::modelViewLength)
                 .sum();
         return totalChars > TOTAL_CHARS_THRESHOLD;
+    }
+
+    private int modelViewLength(ChatMessage message) {
+        if (message instanceof ToolExecutionResultMessage result) {
+            String projection = AgentModelRequestPlanner.desktopMavenProjection(result);
+            if (projection != null) return projection.length();
+        }
+        return ChatMessageText.textOf(message).length();
     }
 
     /**
@@ -77,17 +87,19 @@ public class ToolOutputMaskingService {
         for (int i = 0; i < messages.size(); i++) {
             if (!(messages.get(i) instanceof ToolExecutionResultMessage original)) continue;
             if (protectedIndices.contains(i)) continue;
+            if (!original.hasSingleText()) continue;
             String text = original.text();
             if (!StringUtils.hasText(text)) continue;
             if (text.contains(MASKED_MARKER)) continue;
             if (text.length() < MIN_CHARS_TO_MASK) continue;
+            // 请求规划器会保留 Maven 成功证据，通用截断会让测试汇总和退出码消失。
+            if (AgentModelRequestPlanner.desktopMavenProjection(original) != null) continue;
 
             String masked = buildMaskedText(text);
             int saved = text.length() - masked.length();
             if (saved <= 0) continue;
 
-            ToolExecutionResultMessage replacement = ToolExecutionResultMessage.from(
-                    original.id(), original.toolName(), masked);
+            ToolExecutionResultMessage replacement = original.toBuilder().contents(TextContent.from(masked)).build();
             messages.set(i, replacement);
             maskedCount++;
             savedChars += saved;

@@ -6,7 +6,7 @@ import java.util.List;
 
 @Data
 public class DeviationDetectRequest {
-    @NotBlank(message = "Spec ID不能为空")
+    /** 可选，独立的 Agent 执行可能没有关联 Spec。 */
     private String specId;
     @NotBlank(message = "Agent执行ID不能为空")
     private String agentExecutionId;

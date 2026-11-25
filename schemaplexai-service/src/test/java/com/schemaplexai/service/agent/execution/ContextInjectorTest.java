@@ -6,6 +6,7 @@ import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.model.entity.AgentContextBinding;
 import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextItem;
+import com.schemaplexai.service.agent.memory.AgentMemoryExtractionService;
 import com.schemaplexai.service.context.ContextCacheService;
 import com.schemaplexai.service.memory.rag.RagContentRetrieverFactory;
 import com.schemaplexai.service.user.UserMemoryInjectionService;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyCollection;
@@ -28,6 +30,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ContextInjectorTest {
@@ -107,14 +110,38 @@ class ContextInjectorTest {
         setField(injector, "ragContentRetrieverFactory", ragContentRetrieverFactory);
         setField(injector, "milvusVectorService", milvusVectorService);
 
-        String prompt = injector.buildSystemPrompt("agent-1", "请输出回归方案", "tenant-1", null);
+        var result = injector.buildSystemPromptDetail("agent-1", "请输出回归方案", "tenant-1", null,
+                List.of("本轮执行规则"), null);
+        String prompt = result.prompt();
 
         assertThat(prompt).contains("## 静态指令");
         assertThat(prompt).contains("## 相关背景知识（语义检索）");
         assertThat(prompt).contains("RAG 命中片段");
         assertThat(prompt).contains("## 当前任务上下文");
         assertThat(prompt).contains("请输出回归方案");
+        assertThat(result.taskContext()).isNotNull();
+        assertThat(prompt.substring(result.taskContext().start(), result.taskContext().end()))
+                .isEqualTo("\n\n---\n\n## 当前任务上下文\n请输出回归方案");
+        assertThat(result.taskContext().removeFrom(prompt))
+                .contains("## 静态指令", "本轮执行规则", "RAG 命中片段")
+                .doesNotContain("## 当前任务上下文");
+        assertThat(result.dynamicChars()).isEqualTo(
+                "## 相关背景知识（语义检索）\nRAG 命中片段\n\n---\n\n## 当前任务上下文\n请输出回归方案".length());
         verify(milvusVectorService, never()).searchSimilarContext(anyString(), anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    void shouldKeepCompressedTaskSectionInCanonicalPrompt() {
+        var cache = mock(ContextCacheService.class);
+        when(cache.getAgentPrompt("agent-1")).thenReturn("## 静态指令");
+        var injector = new ContextInjector(mock(AgentContextBindingMapper.class), mock(ContextEntityMapper.class),
+                mock(ContextItemMapper.class), cache);
+        String longTask = "长任务上下文".repeat(5000);
+
+        var result = injector.buildSystemPromptDetail("agent-1", longTask, null, null, List.of(), null);
+
+        assertThat(result.taskContext()).isNull();
+        assertThat(result.prompt()).contains("## 当前任务上下文", "上下文已压缩").doesNotContain(longTask);
     }
 
     @Test
@@ -180,6 +207,40 @@ class ContextInjectorTest {
         assertThat(result.prompt()).contains("## 用户画像与偏好");
         assertThat(result.prompt()).contains("用户偏好中文输出");
         assertThat(result.userMemoryStaticCount()).isEqualTo(1);
+    }
+
+    @Test
+    void shouldSkipLongTermMemoryAndGeneratedInstructionsInTemporaryMode() throws Exception {
+        AgentContextBindingMapper bindingMapper = mock(AgentContextBindingMapper.class);
+        ContextItemMapper itemMapper = mock(ContextItemMapper.class);
+        ContextCacheService cache = mock(ContextCacheService.class);
+        UserMemoryInjectionService userMemory = mock(UserMemoryInjectionService.class);
+        AgentMemoryExtractionService agentMemory = mock(AgentMemoryExtractionService.class);
+        AgentContextBinding automatic = new AgentContextBinding();
+        automatic.setContextId("auto");
+        AgentContextBinding manual = new AgentContextBinding();
+        manual.setContextId("manual");
+        ContextItem legacyAuto = new ContextItem();
+        legacyAuto.setTitle("Agent 专属指令（自动生成）");
+        legacyAuto.setContent("旧 Agent 记忆");
+        ContextItem newlyMarked = new ContextItem();
+        newlyMarked.setTitle("其他专属指令");
+        newlyMarked.setContent("新 Agent 记忆");
+        newlyMarked.setMetadata(Map.of("derivedFromAgentMemory", true));
+        ContextItem authored = new ContextItem();
+        authored.setContent("人工设置的执行指令");
+        when(bindingMapper.selectList(any())).thenReturn(List.of(automatic, manual, manual));
+        when(itemMapper.selectOne(any())).thenReturn(legacyAuto, newlyMarked, authored);
+        ContextInjector injector = new ContextInjector(bindingMapper, mock(ContextEntityMapper.class), itemMapper, cache);
+        setField(injector, "userMemoryInjectionService", userMemory);
+        setField(injector, "agentMemoryService", agentMemory);
+
+        ContextInjector.PromptBuildResult result = injector.buildSystemPromptDetail(
+                "agent", "当前运行任务", "tenant", null, null, null, "user", null, true);
+
+        assertThat(result.prompt()).contains("人工设置的执行指令", "当前运行任务")
+                .doesNotContain("旧 Agent 记忆", "新 Agent 记忆");
+        verifyNoInteractions(userMemory, agentMemory, cache);
     }
 
     private void setField(Object target, String fieldName, Object value) throws Exception {

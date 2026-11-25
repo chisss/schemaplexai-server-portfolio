@@ -48,10 +48,21 @@ public interface QualityEvaluationStrategy {
             boolean hasIssue,
             int score,
             String summary,
-            List<Finding> findings
+            List<Finding> findings,
+            ModelAssessment modelAssessment
     ) {
+        public EvaluationResult(boolean hasIssue, int score, String summary, List<Finding> findings) {
+            this(hasIssue, score, summary, findings, null);
+        }
+
+        public EvaluationResult withModelAssessment(String status, String reason) {
+            return new EvaluationResult(hasIssue, score, summary, findings, new ModelAssessment(status, reason));
+        }
+
         public static EvaluationResult empty() {
             return new EvaluationResult(false, 100, "未发现问题", List.of());
         }
     }
+
+    record ModelAssessment(String status, String reason) {}
 }

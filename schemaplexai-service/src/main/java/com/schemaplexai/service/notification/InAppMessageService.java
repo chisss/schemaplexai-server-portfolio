@@ -27,6 +27,10 @@ public interface InAppMessageService {
 
     long countUnread();
 
+    InAppMessageVO detail(String recipientId);
+
+    long markAllRead(java.time.OffsetDateTime readBefore);
+
     void markRead(String recipientId);
 
     void archive(String recipientId);

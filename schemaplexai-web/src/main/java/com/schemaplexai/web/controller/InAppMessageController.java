@@ -8,6 +8,10 @@ import com.schemaplexai.service.notification.InAppMessageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import org.springframework.web.bind.annotation.RequestBody;
+import java.time.OffsetDateTime;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -36,6 +40,19 @@ public class InAppMessageController {
     @Operation(summary = "获取未读站内信数量")
     public R<Long> unreadCount() {
         return R.ok(inAppMessageService.countUnread());
+    }
+
+    public record ReadAll(@NotNull OffsetDateTime readBefore) {}
+
+    @GetMapping("/{recipientId}")
+    public R<InAppMessageVO> detail(@PathVariable String recipientId) {
+        return R.ok(inAppMessageService.detail(recipientId));
+    }
+
+    @PostMapping("/read-all")
+    @PreAuthorize("@authorizationService.hasPermission('self:service')")
+    public R<Long> readAll(@Valid @RequestBody ReadAll request) {
+        return R.ok(inAppMessageService.markAllRead(request.readBefore()));
     }
 
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SELF_SERVICE.getCode())")

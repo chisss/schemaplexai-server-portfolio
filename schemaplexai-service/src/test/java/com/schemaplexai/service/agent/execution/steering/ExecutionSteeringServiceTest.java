@@ -2,21 +2,25 @@ package com.schemaplexai.service.agent.execution.steering;
 
 import com.schemaplexai.dao.mapper.ExecutionSteeringMapper;
 import com.schemaplexai.model.entity.ExecutionSteering;
+import com.schemaplexai.service.memory.CompositeChatMemoryStore;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ExecutionSteeringServiceTest {
 
     private final ExecutionSteeringMapper steeringMapper = mock(ExecutionSteeringMapper.class);
-    private final ExecutionSteeringService service = new ExecutionSteeringService(steeringMapper);
+    private final CompositeChatMemoryStore archive = mock(CompositeChatMemoryStore.class);
+    private final ExecutionSteeringService service = new ExecutionSteeringService(steeringMapper, archive);
 
     @Test
     void shouldDelegateSeqGenerationToAtomicInsert() {
@@ -49,6 +53,29 @@ class ExecutionSteeringServiceTest {
 
         assertThat(service.markApplied("steering-1")).isTrue();
         assertThat(service.markApplied("steering-1")).isFalse();
+    }
+
+    @Test
+    void shouldRejectMissingSteeringBeforeWriting() {
+        assertThatThrownBy(() -> service.applyAndArchive(null, "conversation"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.applyAndArchive(new ExecutionSteering(), "conversation"))
+                .isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(steeringMapper, archive);
+    }
+
+    @Test
+    void shouldSkipArchiveWhenPendingUpdateDidNotWin() {
+        ExecutionSteering steering = new ExecutionSteering();
+        steering.setId("steering-1");
+        steering.setTenantId("tenant-1");
+        steering.setExecutionId("exec-1");
+        steering.setContent("继续处理");
+
+        when(steeringMapper.update(any(ExecutionSteering.class), any())).thenReturn(0);
+
+        assertThat(service.applyAndArchive(steering, "conversation")).isEmpty();
+        verifyNoInteractions(archive);
     }
 
     @Test

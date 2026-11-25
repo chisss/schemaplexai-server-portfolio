@@ -29,6 +29,10 @@ public class InAppMessageVO {
 
     private String actionUrl;
 
+    private Target target;
+
+    public record Target(String kind, String id) {}
+
     private String status;
 
     private LocalDateTime readAt;

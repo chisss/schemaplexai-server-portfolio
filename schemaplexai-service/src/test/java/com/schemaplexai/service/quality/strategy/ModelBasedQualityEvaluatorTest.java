@@ -1,17 +1,23 @@
 package com.schemaplexai.service.quality.strategy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import com.schemaplexai.dao.mapper.AiModelMapper;
 import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.ai.LangChain4jModelFactory;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,7 +39,7 @@ class ModelBasedQualityEvaluatorTest {
         ChatModel chatModel = mock(ChatModel.class);
         when(aiModelMapper.selectById("model-1")).thenReturn(model);
         when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
-        when(chatModel.chat(any(), any())).thenThrow(new IllegalStateException("暂不支持"));
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenThrow(new IllegalStateException("暂不支持"));
 
         QualityEvaluationStrategy.EvaluationResult result = evaluator.evaluate("model-1", "sys", "user");
 
@@ -42,6 +48,8 @@ class ModelBasedQualityEvaluatorTest {
         assertThat(result.summary()).contains("模型调用失败");
         assertThat(result.findings()).hasSize(1);
         assertThat(result.findings().getFirst().ruleCode()).isEqualTo("qa.infrastructure.model_evaluation_failed");
+        assertThat(result.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("failed", "model_evaluation_failed"));
     }
 
     @Test
@@ -50,7 +58,7 @@ class ModelBasedQualityEvaluatorTest {
         ChatModel chatModel = mock(ChatModel.class);
         when(aiModelMapper.selectById("model-1")).thenReturn(model);
         when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
-        when(chatModel.chat(any(), any())).thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("plain-text-response")).build());
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("plain-text-response")).build());
 
         QualityEvaluationStrategy.EvaluationResult result = evaluator.evaluate("model-1", "sys", "user");
 
@@ -59,6 +67,8 @@ class ModelBasedQualityEvaluatorTest {
         assertThat(result.summary()).contains("解析失败");
         assertThat(result.findings()).hasSize(1);
         assertThat(result.findings().getFirst().ruleCode()).isEqualTo("qa.infrastructure.model_response_invalid");
+        assertThat(result.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("failed", "model_response_invalid"));
     }
 
     @Test
@@ -71,12 +81,13 @@ class ModelBasedQualityEvaluatorTest {
         ChatModel chatModel = mock(ChatModel.class);
         when(aiModelMapper.selectById("model-1")).thenReturn(model);
         when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
-        when(chatModel.chat(any(), any())).thenReturn(ChatResponse.builder()
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenReturn(ChatResponse.builder()
                 .aiMessage(AiMessage.from("{\"hasIssue\":false,\"score\":95,\"summary\":\"ok\",\"findings\":[]}"))
                 .build());
 
-        evaluator.evaluate("model-1", "sys", "user");
+        QualityEvaluationStrategy.EvaluationResult result = evaluator.evaluate("model-1", "sys", "user");
 
+        assertThat(result.modelAssessment()).isEqualTo(new QualityEvaluationStrategy.ModelAssessment("completed", null));
         ArgumentCaptor<AiModelConfig> configCaptor = ArgumentCaptor.forClass(AiModelConfig.class);
         verify(modelFactory).getOrCreate(configCaptor.capture());
         AiModelConfig captured = configCaptor.getValue();
@@ -91,7 +102,7 @@ class ModelBasedQualityEvaluatorTest {
         ChatModel chatModel = mock(ChatModel.class);
         when(aiModelMapper.selectById("model-1")).thenReturn(model);
         when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
-        when(chatModel.chat(any(), any())).thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("""
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("""
                 ```json
                 {
                   "hasIssue": true,
@@ -121,6 +132,8 @@ class ModelBasedQualityEvaluatorTest {
         assertThat(result.findings()).hasSize(1);
         assertThat(result.findings().getFirst().ruleCode()).isEqualTo("omission.rollback");
         assertThat(result.findings().getFirst().description()).contains("回滚失败时如何处理");
+        assertThat(result.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("unknown", "relaxed_response"));
     }
 
     @Test
@@ -129,7 +142,7 @@ class ModelBasedQualityEvaluatorTest {
         ChatModel chatModel = mock(ChatModel.class);
         when(aiModelMapper.selectById("model-1")).thenReturn(model);
         when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
-        when(chatModel.chat(any(), any())).thenReturn(
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenReturn(
                 ChatResponse.builder().aiMessage(AiMessage.from("""
                         {
                           "hasIssue": true,
@@ -164,6 +177,8 @@ class ModelBasedQualityEvaluatorTest {
         assertThat(result.hasIssue()).isTrue();
         assertThat(result.findings()).hasSize(1);
         assertThat(result.findings().getFirst().title()).isEqualTo("接口契约完全未定义");
+        assertThat(result.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("completed", "structured_repair"));
     }
 
     @Test
@@ -172,7 +187,7 @@ class ModelBasedQualityEvaluatorTest {
         ChatModel chatModel = mock(ChatModel.class);
         when(aiModelMapper.selectById("model-1")).thenReturn(model);
         when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
-        when(chatModel.chat(any(), any())).thenReturn(
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenReturn(
                 ChatResponse.builder().aiMessage(AiMessage.from("""
                         {
                           "hasIssue": true,
@@ -189,6 +204,82 @@ class ModelBasedQualityEvaluatorTest {
         assertThat(result.findings()).isNotEmpty();
         assertThat(result.findings()).extracting(QualityEvaluationStrategy.Finding::title)
                 .anyMatch(title -> title.contains("接口契约"));
+        assertThat(result.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("unknown", "locally_synthesized_findings"));
+    }
+
+    @Test
+    void shouldKeepRepairScoreWithoutConfirmingAChangedAssessment() {
+        AiModel model = buildModel("model-1", "质量评审模型", "test");
+        ChatModel chatModel = mock(ChatModel.class);
+        when(aiModelMapper.selectById("model-1")).thenReturn(model);
+        when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenReturn(
+                ChatResponse.builder().aiMessage(AiMessage.from("""
+                        {"hasIssue":true,"score":25,"summary":"缺少验收标准","findings":[]}
+                        """)).build(),
+                ChatResponse.builder().aiMessage(AiMessage.from("""
+                        {"hasIssue":true,"score":50,"summary":"缺少验收标准",
+                         "findings":[{"type":"omission","severity":"warning","title":"未给出验收标准"}]}
+                        """)).build());
+
+        QualityEvaluationStrategy.EvaluationResult result = evaluator.evaluate("model-1", "sys", "user");
+
+        assertThat(result.score()).isEqualTo(50);
+        assertThat(result.findings()).hasSize(1);
+        assertThat(result.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("unknown", "repair_changed_score"));
+    }
+
+    @Test
+    void shouldKeepDefaultScoreWithoutConfirmingAnIncompleteJsonResponse() {
+        AiModel model = buildModel("model-1", "质量评审模型", "test");
+        ChatModel chatModel = mock(ChatModel.class);
+        when(aiModelMapper.selectById("model-1")).thenReturn(model);
+        when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("{}")).build());
+
+        QualityEvaluationStrategy.EvaluationResult result = evaluator.evaluate("model-1", "sys", "user");
+
+        assertThat(result.score()).isEqualTo(100);
+        assertThat(result.findings()).isEmpty();
+        assertThat(result.modelAssessment()).isEqualTo(
+                new QualityEvaluationStrategy.ModelAssessment("unknown", "incomplete_response"));
+    }
+
+    @Test
+    void shouldRecordDecodedAssessmentFromCompatibleTransportFallback() throws Exception {
+        HttpServer callback = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        String assessment = "{\"hasIssue\":false,\"score\":95,\"summary\":\"通过\",\"findings\":[]}";
+        byte[] response = new ObjectMapper().writeValueAsString(
+                Map.of("choices", List.of(Map.of("message", Map.of("content", assessment)))))
+                .getBytes(StandardCharsets.UTF_8);
+        callback.createContext("/claude/v1/chat/completions", exchange -> {
+            try (exchange) {
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+            }
+        });
+        callback.start();
+        try {
+            AiModel model = buildModel("model-1", "质量评审模型", "test");
+            model.setBaseUrl("http://127.0.0.1:" + callback.getAddress().getPort() + "/claude");
+            model.setDefaultParams(Map.of("protocol", "openai"));
+            ChatModel chatModel = mock(ChatModel.class);
+            when(aiModelMapper.selectById("model-1")).thenReturn(model);
+            when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
+            when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class)))
+                    .thenThrow(new IllegalStateException("503"));
+
+            QualityEvaluationStrategy.EvaluationResult result = evaluator.evaluate("model-1", "sys", "user");
+
+            assertThat(result.score()).isEqualTo(95);
+            assertThat(result.modelAssessment()).isEqualTo(
+                    new QualityEvaluationStrategy.ModelAssessment("completed", "compatible_transport_fallback"));
+        } finally {
+            callback.stop(0);
+        }
     }
 
     @Test
@@ -197,7 +288,7 @@ class ModelBasedQualityEvaluatorTest {
         ChatModel chatModel = mock(ChatModel.class);
         when(aiModelMapper.selectById("model-1")).thenReturn(model);
         when(modelFactory.getOrCreate(any())).thenReturn(chatModel);
-        when(chatModel.chat(any(), any())).thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("""
+        when(chatModel.chat(any(SystemMessage.class), any(UserMessage.class))).thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("""
                 ```json
                 {
                   "hasIssue": true,

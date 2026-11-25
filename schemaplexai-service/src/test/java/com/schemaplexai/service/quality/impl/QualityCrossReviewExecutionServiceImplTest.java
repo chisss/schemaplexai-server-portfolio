@@ -7,6 +7,7 @@ import com.schemaplexai.dao.mapper.SpecDocumentMapper;
 import com.schemaplexai.model.entity.CrossReview;
 import com.schemaplexai.model.entity.QualityProfile;
 import com.schemaplexai.model.entity.Spec;
+import com.schemaplexai.model.entity.SpecDocument;
 import com.schemaplexai.service.quality.strategy.ModelBasedQualityEvaluator;
 import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategy;
 import com.schemaplexai.service.quality.strategy.QualityReviewPolicy;
@@ -23,6 +24,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class QualityCrossReviewExecutionServiceImplTest {
@@ -37,6 +39,29 @@ class QualityCrossReviewExecutionServiceImplTest {
     private final QualityCrossReviewExecutionServiceImpl service = new QualityCrossReviewExecutionServiceImpl(
             crossReviewMapper, specDocumentMapper, qualityProfileMapper, specMapper, modelEvaluator, reviewPolicyService
     );
+
+    @Test
+    void shouldKeepSpecDocumentsAndOriginalTaskInCrossReview() {
+        var document = new SpecDocument();
+        document.setDocType("requirements");
+        document.setContent("以人民币结算");
+        when(specDocumentMapper.selectList(any())).thenReturn(List.of(document));
+        when(reviewPolicyService.applyPolicy(any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+        var prompts = new AtomicReference<List<String>>();
+        when(modelEvaluator.evaluate(eq("model-a"), anyString(), anyString())).thenAnswer(invocation -> {
+            prompts.set(List.of(invocation.getArgument(1), invocation.getArgument(2)));
+            return QualityEvaluationStrategy.EvaluationResult.empty();
+        });
+
+        service.createAndExecute("spec-1", "task-1", null, "deviation", List.of("model-a"), "manual", null,
+                "报价为 59.97", null, "tenant-1", "计算 19.99 × 3");
+
+        assertThat(prompts.get()).hasSize(2);
+        assertThat(prompts.get().getFirst()).contains("以原始任务中明确的要求评估任务符合度", "请严格按照以下 JSON 格式");
+        assertThat(prompts.get().getLast()).contains("【参考规范 / 上下文】", "以人民币结算",
+                "【原始 Agent 任务】\n计算 19.99 × 3", "【待审查内容】\n报价为 59.97");
+        verify(specDocumentMapper).selectList(any());
+    }
 
     @Test
     void shouldMergeConsensusAndUniqueFindingsFromMultipleModels() {

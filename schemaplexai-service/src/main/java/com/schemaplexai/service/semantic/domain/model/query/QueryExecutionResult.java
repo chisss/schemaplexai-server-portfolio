@@ -1,5 +1,7 @@
 package com.schemaplexai.service.semantic.domain.model.query;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -16,7 +18,7 @@ public record QueryExecutionResult(
         List<String> warnings) {
 
     public QueryExecutionResult {
-        rows = rows == null ? List.of() : rows.stream().map(Map::copyOf).toList();
+        rows = rows == null ? List.of() : rows.stream().map(row -> Collections.unmodifiableMap(new LinkedHashMap<>(row))).toList();
         columns = columns == null ? List.of() : List.copyOf(columns);
         lineage = lineage == null ? List.of() : List.copyOf(lineage);
         warnings = warnings == null ? List.of() : List.copyOf(warnings);

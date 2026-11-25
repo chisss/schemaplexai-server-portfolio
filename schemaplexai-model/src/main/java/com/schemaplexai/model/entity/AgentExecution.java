@@ -37,6 +37,9 @@ public class AgentExecution implements Serializable {
     /** 会话标识，支持多轮对话 */
     private String conversationId;
 
+    /** 启动时验证过的记忆所属项目，恢复沿用该值。 */
+    private String memoryProjectId;
+
     /** 会话消息版本号（PG ChatMemoryStore 乐观锁） */
     private Integer chatVersion;
 
@@ -85,11 +88,20 @@ public class AgentExecution implements Serializable {
     /** 输出 Token 数 */
     private Long tokenOutput;
 
+    /** 暂停前已消耗的有效执行时间（毫秒） */
+    private Long runtimeElapsedMillis;
+
     /** 错误信息 */
     private String errorMessage;
 
     /** 执行模式: auto/plan/suggest */
     private String executionMode;
+
+    /** 跨会话记忆的临时会话限制，历史执行没有此快照。 */
+    private Boolean temporaryChat;
+
+    /** 用户长期记忆写入许可，空值沿用用户设置。 */
+    private Boolean memoryWriteEnabled;
 
     /** 开始时间 */
     private LocalDateTime startedAt;

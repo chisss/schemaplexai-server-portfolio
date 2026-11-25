@@ -72,6 +72,24 @@ class ToolExecutionGateTest {
     }
 
     @Test
+    void shouldLetDesktopHandleAutoWriteWhileCloudWriteStillRequiresApproval() {
+        var auto = ExecutionModePolicy.builder().mode(ExecutionModeEnum.AUTO)
+                .allowWriteTools(true).requireApprovalForWrite(true).allowProgressiveTrust(true).build();
+        var request = baseRequest(auto, ToolIoTypeEnum.WRITE);
+        request.setDesktopTool(true);
+
+        assertThat(gate.evaluate(request).getDecision()).isEqualTo(ToolExecutionDecisionEnum.EXECUTE);
+        verify(amendmentService, never()).isAutoApproved("tenant-1", "agent-1", "sys.write", "{\"path\":\"README.md\"}");
+
+        request.setDesktopTool(false);
+        assertThat(gate.evaluate(request).getDecision()).isEqualTo(ToolExecutionDecisionEnum.PAUSE_APPROVAL);
+
+        request.setDesktopTool(true);
+        auto.setAllowWriteTools(false);
+        assertThat(gate.evaluate(request).getDecision()).isEqualTo(ToolExecutionDecisionEnum.DENY);
+    }
+
+    @Test
     void shouldExecuteWriteToolWhenAutoModeMatchesProgressiveTrust() {
         when(amendmentService.isAutoApproved("tenant-1", "agent-1", "sys.write", "{\"path\":\"README.md\"}"))
                 .thenReturn(true);

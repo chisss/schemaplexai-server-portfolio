@@ -1,12 +1,12 @@
 package com.schemaplexai.service.quality.pipeline;
 
+import com.schemaplexai.common.constant.CommonConstant;
 import com.schemaplexai.common.enums.DeviationSeverityEnum;
 import com.schemaplexai.common.enums.ExecutionStrategyEnum;
 import com.schemaplexai.common.enums.GateDecisionEnum;
 import com.schemaplexai.common.enums.QualityIssueTypeEnum;
 import com.schemaplexai.common.enums.TaskStatusEnum;
 import com.schemaplexai.common.enums.TriggerModeEnum;
-import com.schemaplexai.model.entity.CrossReview;
 import com.schemaplexai.model.entity.QualityProfile;
 import com.schemaplexai.model.entity.QualityRule;
 import com.schemaplexai.service.quality.QualityCrossReviewExecutionService;
@@ -45,6 +45,11 @@ public class QualityExecutionPipeline {
 
     /** SHORT_WAIT 模式下模型评估的最大等待时间（秒） */
     private static final int SHORT_WAIT_TIMEOUT_SECONDS = 15;
+    private static final String MODEL_INFRASTRUCTURE_PREFIX = "qa.infrastructure.";
+    private static final Set<String> MODEL_INFRASTRUCTURE_REASONS = Set.of(
+            "model_not_configured", "model_not_found", "model_evaluation_failed",
+            "model_empty_response", "model_response_invalid"
+    );
 
     private final DetectorRegistry detectorRegistry;
     private final QualityEvaluationStrategyRegistry strategyRegistry;
@@ -58,31 +63,33 @@ public class QualityExecutionPipeline {
      * 执行质量检查管线
      */
     public QualityCheckResult execute(QualityCheckRequest request) {
+        return execute(request, null);
+    }
+
+    public QualityCheckResult execute(QualityCheckRequest request, String requestedTaskId) {
         long startTime = System.currentTimeMillis();
         String strategy = request.executionStrategy();
 
         // 创建质量任务
-        String taskId = createQualityTask(request);
+        String taskId = createQualityTask(request, requestedTaskId);
 
         try {
             qualityTaskManager.markRunning(taskId);
 
             // Layer 1: 同步规则检查（始终执行）
             List<QualityEvaluationStrategy.Finding> allFindings = new ArrayList<>();
-            List<QualityDetector.DetectionResult> ruleResults = executeRuleChecks(request);
-            allFindings.addAll(convertDetectionFindings(ruleResults));
+            RuleChecks ruleChecks = executeRuleChecks(request);
+            allFindings.addAll(convertDetectionFindings(ruleChecks.findings));
 
             int score = 100;
             String summary = "未发现问题";
 
             // Layer 2: 模型评估（SHORT_WAIT 和 ASYNC 策略执行）
-            if (!ExecutionStrategyEnum.SYNC.getCode().equalsIgnoreCase(strategy)) {
-                ModelEvalResult modelResult = executeModelEvaluation(request, taskId, strategy);
-                if (modelResult != null) {
-                    allFindings.addAll(modelResult.findings());
-                    score = modelResult.score();
-                    summary = modelResult.summary();
-                }
+            ModelEvalResult model = executeModelEvaluation(request, taskId, strategy);
+            if (model.result() != null) {
+                allFindings.addAll(model.result().findings());
+                score = model.result().score();
+                summary = model.result().summary();
             }
 
             // 去重合并 findings
@@ -98,7 +105,13 @@ public class QualityExecutionPipeline {
             resultSummary.put("deviationCount", allFindings.size());
             resultSummary.put("warningCount", warningCount);
             resultSummary.put("score", score);
-            qualityTaskManager.markSucceeded(taskId, allFindings.size(), allFindings.size(), 0, resultSummary);
+            resultSummary.put("coverage", Map.of("rules", ruleChecks.coverage(), "model", model.coverage()));
+            if (QualityIssueTypeEnum.DEVIATION.getCode().equals(request.issueType())
+                    && TriggerModeEnum.MANUAL.getCode().equals(resolveTriggerMode(request))) {
+                qualityTaskManager.completeManualDeviationTask(taskId, request, allFindings, resultSummary);
+            } else {
+                qualityTaskManager.markSucceeded(taskId, allFindings.size(), allFindings.size(), 0, resultSummary);
+            }
 
             long durationMs = System.currentTimeMillis() - startTime;
             return new QualityCheckResult(
@@ -123,30 +136,30 @@ public class QualityExecutionPipeline {
      * 异步触发质量检查（发送 MQ 消息，立即返回 taskId）
      */
     public String triggerAsync(QualityCheckRequest request) {
-        String taskId = createQualityTask(request);
+        String taskId = createQualityTask(request, null);
         log.info("异步质量检查已提交: taskId={}, specId={}", taskId, request.specId());
         return taskId;
     }
 
     // ==================== Layer 1: 同步规则检查 ====================
 
-    private List<QualityDetector.DetectionResult> executeRuleChecks(QualityCheckRequest request) {
-        List<QualityDetector.DetectionResult> results = new ArrayList<>();
+    private RuleChecks executeRuleChecks(QualityCheckRequest request) {
         if (!StringUtils.hasText(request.targetContent())) {
-            return results;
+            return new RuleChecks("no_content", List.of());
         }
 
-        // 加载 Profile 关联的启用规则（按触发模式过滤）
+        // 沿用按触发模式加载配置的方式，启用数量另按规则状态统计。
         String triggerMode = resolveTriggerMode(request);
-        List<QualityRule> activeRules = ruleConfigService.list(null, triggerMode);
+        List<QualityRule> configuredRules = ruleConfigService.list(null, triggerMode);
 
         // 若无规则配置，降级为执行所有检测器
-        if (activeRules.isEmpty()) {
+        if (configuredRules.isEmpty()) {
             return executeAllDetectors(request);
         }
 
+        RuleChecks checks = new RuleChecks("configured", configuredRules);
         // 按 dimensionCode 分组，每个维度取第一条匹配规则的 ruleConfig
-        Map<String, QualityRule> dimensionRuleMap = activeRules.stream()
+        Map<String, QualityRule> dimensionRuleMap = configuredRules.stream()
                 .collect(Collectors.toMap(
                         QualityRule::getDimensionCode,
                         r -> r,
@@ -173,40 +186,20 @@ public class QualityExecutionPipeline {
                     .filter(detector::supports)
                     .findFirst()
                     .orElse(detector.getType());
-            try {
-                QualityDetector.DetectionContext ctx = new QualityDetector.DetectionContext(
-                        request.specId(), null, dimensionCode, null,
-                        ruleConfig, request.targetContent()
-                );
-                QualityDetector.DetectionResult result = detector.detect(ctx);
-                if (result != null && result.hasIssue()) {
-                    results.add(result);
-                }
-            } catch (Exception e) {
-                log.warn("规则检测器执行失败: type={}, dimensionCode={}, error={}", detector.getType(), dimensionCode, e.getMessage());
-            }
+            checks.run(detector, new QualityDetector.DetectionContext(
+                    request.specId(), null, dimensionCode, null, ruleConfig, request.targetContent()));
         }
-        return results;
+        return checks;
     }
 
     /** 降级：执行所有注册检测器（无 Profile 规则时使用） */
-    private List<QualityDetector.DetectionResult> executeAllDetectors(QualityCheckRequest request) {
-        List<QualityDetector.DetectionResult> results = new ArrayList<>();
+    private RuleChecks executeAllDetectors(QualityCheckRequest request) {
+        RuleChecks checks = new RuleChecks("all_detectors", List.of());
         for (QualityDetector detector : detectorRegistry.allDetectors().values()) {
-            try {
-                QualityDetector.DetectionContext ctx = new QualityDetector.DetectionContext(
-                        request.specId(), null, detector.getType(), null,
-                        Map.of(), request.targetContent()
-                );
-                QualityDetector.DetectionResult result = detector.detect(ctx);
-                if (result != null && result.hasIssue()) {
-                    results.add(result);
-                }
-            } catch (Exception e) {
-                log.warn("规则检测器执行失败: type={}, error={}", detector.getType(), e.getMessage());
-            }
+            checks.run(detector, new QualityDetector.DetectionContext(
+                    request.specId(), null, detector.getType(), null, Map.of(), request.targetContent()));
         }
-        return results;
+        return checks;
     }
 
     private List<QualityEvaluationStrategy.Finding> convertDetectionFindings(List<QualityDetector.DetectionResult> results) {
@@ -225,14 +218,23 @@ public class QualityExecutionPipeline {
     // ==================== Layer 2: 模型评估 ====================
 
     private ModelEvalResult executeModelEvaluation(QualityCheckRequest request, String taskId, String strategy) {
+        if (ExecutionStrategyEnum.SYNC.getCode().equalsIgnoreCase(strategy)) {
+            return ModelEvalResult.skipped("strategy_disabled", null, null);
+        }
         QualityProfile profile = resolveProfile(request);
-        List<String> modelIds = profile == null ? List.of() : profileResolverService.listModelIds(profile.getId());
+        if (profile == null) {
+            return ModelEvalResult.skipped("no_profile", null, null);
+        }
+        String profileId = profile.getId();
+        List<String> modelIds = profileResolverService.listModelIds(profileId);
         String primaryModelId = modelIds.isEmpty() ? null : modelIds.getFirst();
+        if (!StringUtils.hasText(primaryModelId)) {
+            return ModelEvalResult.skipped("no_model", profileId, null);
+        }
 
         QualityEvaluationStrategy evalStrategy = strategyRegistry.getStrategy(request.issueType());
-        if (evalStrategy == null || !StringUtils.hasText(primaryModelId)) {
-            log.info("未配置可用质量评估模型，跳过模型评估: specId={}", request.specId());
-            return null;
+        if (evalStrategy == null) {
+            return ModelEvalResult.skipped("unsupported_issue_type", profileId, primaryModelId);
         }
 
         QualityReviewPolicy reviewPolicy = reviewPolicyService.resolvePolicy(
@@ -240,6 +242,10 @@ public class QualityExecutionPipeline {
         );
 
         // 构建评估上下文
+        boolean hasOriginalTask = StringUtils.hasText(request.originalTask());
+        Map<String, Object> extraParams = hasOriginalTask
+                ? Map.of("sourceType", request.sourceType(), "originalTask", request.originalTask())
+                : Map.of("sourceType", request.sourceType());
         QualityEvaluationStrategy.EvaluationContext evalContext = new QualityEvaluationStrategy.EvaluationContext(
                 request.specId(),
                 request.issueType(),
@@ -250,62 +256,45 @@ public class QualityExecutionPipeline {
                 request.referenceContent(),
                 primaryModelId,
                 null,
-                Map.of("sourceType", request.sourceType()),
+                extraParams,
                 reviewPolicy
         );
 
-        QualityEvaluationStrategy.EvaluationResult evalResult;
+        ModelEvalResult assessment = ExecutionStrategyEnum.SHORT_WAIT.getCode().equalsIgnoreCase(strategy)
+                ? executeWithTimeout(evalStrategy, evalContext, profileId)
+                : ModelEvalResult.fromStrategy(evalStrategy.evaluate(evalContext), profileId, primaryModelId);
 
-        if (ExecutionStrategyEnum.SHORT_WAIT.getCode().equalsIgnoreCase(strategy)) {
-            // 带超时的同步等待
-            evalResult = executeWithTimeout(evalStrategy, evalContext);
-        } else {
-            // 直接同步执行（ASYNC 模式由 MQ Consumer 调用，此处不做异步）
-            evalResult = evalStrategy.evaluate(evalContext);
-        }
-
-        if (evalResult == null) {
-            return null;
-        }
-
-        // Layer 3: 交叉审查（多模型时异步触发）
-        String crossReviewId = null;
-        List<QualityEvaluationStrategy.Finding> crossFindings = List.of();
-        if (profile != null && modelIds.size() > 1) {
+        // 模型有结果时，按原配置触发交叉审查。
+        if (assessment.result() != null && modelIds.size() > 1) {
             try {
-                CrossReview crossReview = crossReviewExecutionService.createAndExecute(
-                        request.specId(), taskId, profile.getId(), request.issueType(),
+                crossReviewExecutionService.createAndExecute(
+                        request.specId(), taskId, profileId, request.issueType(),
                         modelIds, request.sourceType(), null, request.targetContent(),
-                        request.referenceContent(), request.tenantId()
+                        request.referenceContent(), request.tenantId(), request.originalTask()
                 );
-                if (crossReview != null) {
-                    crossReviewId = crossReview.getId();
-                }
             } catch (Exception e) {
                 log.warn("交叉审查触发失败: specId={}, error={}", request.specId(), e.getMessage());
             }
         }
 
-        // 合并结果
-        List<QualityEvaluationStrategy.Finding> mergedFindings = new ArrayList<>(evalResult.findings());
-        mergedFindings.addAll(crossFindings);
-
-        return new ModelEvalResult(mergedFindings, evalResult.score(), evalResult.summary(), crossReviewId);
+        return assessment;
     }
 
-    private QualityEvaluationStrategy.EvaluationResult executeWithTimeout(
+    private ModelEvalResult executeWithTimeout(
             QualityEvaluationStrategy strategy,
-            QualityEvaluationStrategy.EvaluationContext context) {
+            QualityEvaluationStrategy.EvaluationContext context,
+            String profileId) {
         try {
             CompletableFuture<QualityEvaluationStrategy.EvaluationResult> future =
                     CompletableFuture.supplyAsync(() -> strategy.evaluate(context));
-            return future.get(SHORT_WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            return ModelEvalResult.fromStrategy(
+                    future.get(SHORT_WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS), profileId, context.modelId());
         } catch (java.util.concurrent.TimeoutException e) {
             log.warn("模型评估超时({}s)，降级为 pass: specId={}", SHORT_WAIT_TIMEOUT_SECONDS, context.specId());
-            return QualityEvaluationStrategy.EvaluationResult.empty();
+            return ModelEvalResult.failed("timeout", profileId, context.modelId());
         } catch (Exception e) {
             log.error("模型评估异常: specId={}", context.specId(), e);
-            return QualityEvaluationStrategy.EvaluationResult.empty();
+            return ModelEvalResult.failed("evaluation_error", profileId, context.modelId());
         }
     }
 
@@ -321,10 +310,10 @@ public class QualityExecutionPipeline {
         );
     }
 
-    private String createQualityTask(QualityCheckRequest request) {
+    private String createQualityTask(QualityCheckRequest request, String taskId) {
         String triggerMode = resolveTriggerMode(request);
         return qualityTaskManager.createTask(
-                null, request.issueType(), triggerMode, request.sourceType(),
+                taskId, request.issueType(), triggerMode, request.sourceType(),
                 null, request.tenantId(), request.specId(),
                 request.workflowTemplateId(), request.agentExecutionId(),
                 request.profileId(), null,
@@ -379,11 +368,90 @@ public class QualityExecutionPipeline {
         return StringUtils.hasText(current.getMessage()) ? current.getMessage() : current.getClass().getSimpleName();
     }
 
-    /** 模型评估内部结果 */
+    private static class RuleChecks {
+        private final String mode;
+        private final int configured;
+        private final long enabled;
+        private final List<QualityDetector.DetectionResult> findings = new ArrayList<>();
+        private int attempted;
+        private int completed;
+
+        private RuleChecks(String mode, List<QualityRule> rules) {
+            this.mode = mode;
+            configured = rules.size();
+            enabled = rules.stream()
+                    .filter(rule -> CommonConstant.STATUS_ACTIVE.equalsIgnoreCase(rule.getStatus()))
+                    .count();
+        }
+
+        private void run(QualityDetector detector, QualityDetector.DetectionContext context) {
+            attempted++;
+            try {
+                QualityDetector.DetectionResult result = detector.detect(context);
+                completed++;
+                if (result != null && result.hasIssue()) {
+                    findings.add(result);
+                }
+            } catch (Exception e) {
+                log.warn("规则检测器执行失败: dimensionCode={}, error={}", context.dimensionCode(), e.getMessage());
+            }
+        }
+
+        private Map<String, Object> coverage() {
+            return Map.of("mode", mode, "configuredRuleCount", configured, "enabledRuleCount", enabled,
+                    "detectorsAttempted", attempted, "detectorsCompleted", completed,
+                    "detectorsFailed", attempted - completed);
+        }
+    }
+
+    /** 策略结果可能来自降级路径，模型调用的完成状态需要可验证的来源。 */
     private record ModelEvalResult(
-            List<QualityEvaluationStrategy.Finding> findings,
-            int score,
-            String summary,
-            String crossReviewId
-    ) {}
+            QualityEvaluationStrategy.EvaluationResult result,
+            String status,
+            String reason,
+            String profileId,
+            String modelId
+    ) {
+        private static ModelEvalResult skipped(String reason, String profileId, String modelId) {
+            return new ModelEvalResult(null, "skipped", reason, profileId, modelId);
+        }
+
+        private static ModelEvalResult failed(String reason, String profileId, String modelId) {
+            return new ModelEvalResult(QualityEvaluationStrategy.EvaluationResult.empty(),
+                    "failed", reason, profileId, modelId);
+        }
+
+        private static ModelEvalResult fromStrategy(
+                QualityEvaluationStrategy.EvaluationResult result, String profileId, String modelId) {
+            if (result == null) {
+                return new ModelEvalResult(null, "unknown", "no_result", profileId, modelId);
+            }
+            var assessment = result.modelAssessment();
+            if (assessment != null) {
+                return new ModelEvalResult(result, assessment.status(), assessment.reason(), profileId, modelId);
+            }
+            String reason = result.findings().stream()
+                    .map(QualityEvaluationStrategy.Finding::ruleCode)
+                    .filter(code -> code != null && code.startsWith(MODEL_INFRASTRUCTURE_PREFIX))
+                    .map(code -> code.substring(MODEL_INFRASTRUCTURE_PREFIX.length()))
+                    .filter(MODEL_INFRASTRUCTURE_REASONS::contains)
+                    .findFirst()
+                    .orElse("unverified_result");
+            return new ModelEvalResult(result, "unknown", reason, profileId, modelId);
+        }
+
+        private Map<String, Object> coverage() {
+            Map<String, Object> data = new LinkedHashMap<>(Map.of("status", status));
+            if (reason != null) {
+                data.put("reason", reason);
+            }
+            if (profileId != null) {
+                data.put("resolvedProfileId", profileId);
+            }
+            if (modelId != null) {
+                data.put("resolvedModelId", modelId);
+            }
+            return data;
+        }
+    }
 }

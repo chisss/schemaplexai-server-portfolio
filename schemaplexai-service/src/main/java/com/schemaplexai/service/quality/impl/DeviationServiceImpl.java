@@ -4,9 +4,11 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.schemaplexai.common.enums.DeviationSeverityEnum;
 import com.schemaplexai.common.enums.DeviationStatusEnum;
+import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.QualityDeviationMapper;
 import com.schemaplexai.dao.mapper.SpecMapper;
 import com.schemaplexai.dao.mapper.UserMapper;
@@ -57,20 +59,40 @@ public class DeviationServiceImpl implements DeviationService {
     private final DeviationValidator deviationValidator;
     private final EntityValidator entityValidator;
     private final RabbitTemplate rabbitTemplate;
+    private final AgentExecutionMapper agentExecutionMapper;
     private final SpecMapper specMapper;
     private final WorkspaceMapper workspaceMapper;
     private final UserMapper userMapper;
 
     @Override
     public DetectTaskVO detect(DeviationDetectRequest request) {
+        String tenantId = SecurityUtil.getCurrentTenantId();
+        var execution = entityValidator.requireExists(agentExecutionMapper,
+                request.getAgentExecutionId(), ResultCode.AGENT_EXECUTION_NOT_FOUND);
+        if (!StringUtils.hasText(tenantId) || !tenantId.equals(execution.getTenantId())) {
+            throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
+        }
+        String specId = StringUtils.hasText(request.getSpecId()) ? request.getSpecId() : execution.getSpecId();
+        if (StringUtils.hasText(specId)) {
+            entityValidator.requireExists(specMapper, specId, ResultCode.SPEC_NOT_FOUND);
+        }
+        if (StringUtils.hasText(execution.getSpecId()) && !Objects.equals(specId, execution.getSpecId())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "Spec 与 Agent 执行记录不匹配");
+        }
+        if (!StringUtils.hasText(execution.getOutputResult())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "Agent 执行记录没有可检测的输出");
+        }
         String taskId = UUID.randomUUID().toString();
         log.info("提交偏离检测任务: taskId={}, specId={}, agentExecutionId={}",
-                taskId, request.getSpecId(), request.getAgentExecutionId());
+                taskId, specId, request.getAgentExecutionId());
 
         Map<String, Object> message = new HashMap<>();
         message.put("taskId", taskId);
-        message.put("specId", request.getSpecId());
+        message.put("tenantId", tenantId);
+        message.put("specId", specId);
         message.put("agentExecutionId", request.getAgentExecutionId());
+        message.put("targetContent", execution.getOutputResult());
+        message.put("originalTask", execution.getInputPrompt());
         message.put("type", "deviation_detect");
 
         rabbitTemplate.convertAndSend("sf.quality.check", message);
@@ -83,6 +105,13 @@ public class DeviationServiceImpl implements DeviationService {
     public PageResult<DeviationVO> page(DeviationQueryRequest request) {
         var page = new Page<QualityDeviation>(request.getPage(), request.getSize());
         var wrapper = buildWrapper(request);
+        if (StringUtils.hasText(request.getWorkspaceId())) {
+            var specIds = findWorkspaceSpecIds(request.getWorkspaceId());
+            if (specIds.isEmpty()) {
+                return new PageResult<>(List.of(), 0, page.getCurrent(), page.getSize());
+            }
+            wrapper.in(QualityDeviation::getSpecId, specIds);
+        }
         var result = qualityDeviationMapper.selectPage(page, wrapper);
         List<DeviationVO> voList = enrich(result.getRecords());
         return new PageResult<>(voList, result.getTotal(), result.getCurrent(), result.getSize());
@@ -147,23 +176,6 @@ public class DeviationServiceImpl implements DeviationService {
         if (StringUtils.hasText(request.getSpecId())) {
             wrapper.eq(QualityDeviation::getSpecId, request.getSpecId());
         }
-        if (StringUtils.hasText(request.getWorkspaceId())) {
-            // 通过 workspaceIds（JSON 数组字段）模糊匹配，兼容旧数据 projectId
-            List<String> specIds = specMapper.selectList(new LambdaQueryWrapper<Spec>()
-                            .apply("workspace_ids::text like {0}", "%" + request.getWorkspaceId() + "%")
-                            .or()
-                            .eq(Spec::getProjectId, request.getWorkspaceId()))
-                    .stream()
-                    .map(Spec::getId)
-                    .filter(StringUtils::hasText)
-                    .distinct()
-                    .toList();
-            if (specIds.isEmpty()) {
-                wrapper.eq(QualityDeviation::getId, "__none__");
-            } else {
-                wrapper.in(QualityDeviation::getSpecId, specIds);
-            }
-        }
         if (StringUtils.hasText(request.getDeviationType())) {
             wrapper.eq(QualityDeviation::getDeviationType, request.getDeviationType());
         }
@@ -179,6 +191,19 @@ public class DeviationServiceImpl implements DeviationService {
         }
         wrapper.orderByDesc(QualityDeviation::getCreatedAt);
         return wrapper;
+    }
+
+    private List<String> findWorkspaceSpecIds(String workspaceId) {
+        // 匹配多工作区字段，并兼容旧记录的 projectId。
+        return specMapper.selectList(new LambdaQueryWrapper<Spec>()
+                        .apply("workspace_ids::text like {0}", "%" + workspaceId + "%")
+                        .or()
+                        .eq(Spec::getProjectId, workspaceId))
+                .stream()
+                .map(Spec::getId)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
     }
 
     private List<DeviationVO> enrich(List<QualityDeviation> entities) {

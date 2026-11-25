@@ -39,6 +39,8 @@ public class AgentTraceSpanVO {
 
     private Boolean recoverable;
 
+    private ModelAttemptMetadata modelAttempt;
+
     private LocalDateTime startedAt;
 
     private LocalDateTime createdAt;

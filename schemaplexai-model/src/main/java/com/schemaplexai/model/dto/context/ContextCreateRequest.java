@@ -23,7 +23,7 @@ public class ContextCreateRequest {
     @Pattern(regexp = "global|project|task|agent", message = "层级必须为 global/project/task/agent")
     private String contextLevel;
 
-    /** project/task/agent层级必填 */
+    /** 项目和任务层级必填 */
     private String projectId;
 
     private String description;

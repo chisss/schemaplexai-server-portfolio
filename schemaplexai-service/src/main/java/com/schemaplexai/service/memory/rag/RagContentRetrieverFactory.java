@@ -41,6 +41,7 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class RagContentRetrieverFactory {
 
+    @Nullable
     private final RagMilvusStoreFactory ragMilvusStoreFactory;
     private final EmbeddingModelProvider embeddingModelProvider;
     private final RagConfigService ragConfigService;
@@ -75,6 +76,10 @@ public class RagContentRetrieverFactory {
     }
 
     private ContentRetriever createRetriever(String tenantId, Collection<String> contextIds, int maxResults, double minScore) {
+        if (ragMilvusStoreFactory == null) {
+            log.debug("Milvus 未启用，跳过 RAG 检索: tenantId={}", tenantId);
+            return null;
+        }
         RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
         if (!settings.isEnabled()) {
             log.debug("RAG 未启用，跳过检索: tenantId={}", tenantId);
