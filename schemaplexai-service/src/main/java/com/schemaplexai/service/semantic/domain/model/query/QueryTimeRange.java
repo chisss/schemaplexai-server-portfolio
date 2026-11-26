@@ -10,10 +10,16 @@ public record QueryTimeRange(
         LocalDate from,
         LocalDate to,
         String physicalObject,
-        String physicalField) {
+        String physicalField,
+        QueryCalendar calendar) {
+
+    public QueryTimeRange(String fieldIri, Integer relativeDays, LocalDate from, LocalDate to,
+                          String physicalObject, String physicalField) {
+        this(fieldIri, relativeDays, from, to, physicalObject, physicalField, null);
+    }
 
     public QueryTimeRange(String fieldIri, Integer relativeDays, LocalDate from, LocalDate to) {
-        this(fieldIri, relativeDays, from, to, null, null);
+        this(fieldIri, relativeDays, from, to, null, null, null);
     }
 
     public QueryTimeRange {

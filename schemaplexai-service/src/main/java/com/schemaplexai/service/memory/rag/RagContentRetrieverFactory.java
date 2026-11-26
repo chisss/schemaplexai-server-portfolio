@@ -1,96 +1,73 @@
 package com.schemaplexai.service.memory.rag;
 
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
-import dev.langchain4j.store.embedding.EmbeddingSearchResult;
-import dev.langchain4j.store.embedding.EmbeddingStore;
-import dev.langchain4j.store.embedding.EmbeddingMatch;
-import dev.langchain4j.store.embedding.filter.Filter;
-import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.rag.content.retriever.ContentRetriever;
-import com.schemaplexai.model.entity.RagOperationLog;
-import com.schemaplexai.service.rag.EmbeddingQuotaGuard;
 import com.schemaplexai.service.rag.RagConfigService;
 import com.schemaplexai.service.rag.RagRuntimeSettings;
-import com.schemaplexai.service.vector.EmbeddingTokenEstimator;
-import com.schemaplexai.service.vector.ScoringService;
+import com.schemaplexai.service.rag.retrieve.RetrievalCandidate;
+import com.schemaplexai.service.rag.retrieve.RetrievalOrchestrator;
+import com.schemaplexai.service.rag.retrieve.RetrievalOutcome;
+import com.schemaplexai.service.rag.retrieve.RetrievalQuery;
+import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.rag.content.Content;
-import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
-import dev.langchain4j.store.embedding.filter.logical.And;
+import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.lang.Nullable;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
-import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
- * RAG ContentRetriever 工厂
+ * RAG ContentRetriever 工厂（v2）。
  *
- * <p>为每次 Agent 执行构建带租户隔离的 ContentRetriever。
+ * <p>v1 里这个类自己拼 Milvus 查询 + 可选精排；v2 把它降级为<b>薄适配层</b>：
+ * 所有召回策略（双路、RRF、门禁、过滤、预算）都在 {@link RetrievalOrchestrator} 内，
+ * 这里只负责「LangChain4j ContentRetriever → 编排器」的协议转换。
+ *
+ * <p>这样做的原因：Agent 执行链路只认识 {@link ContentRetriever}，
+ * 而检索策略会持续演进。保持适配层极薄，改策略时不用碰 Agent 代码。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class RagContentRetrieverFactory {
 
-    @Nullable
-    private final RagMilvusStoreFactory ragMilvusStoreFactory;
-    private final EmbeddingModelProvider embeddingModelProvider;
     private final RagConfigService ragConfigService;
-    private final EmbeddingQuotaGuard embeddingQuotaGuard;
-    @Nullable
-    private final ScoringService scoringService;
+    private final ObjectProvider<RetrievalOrchestrator> orchestratorProvider;
 
-    /**
-     * 为指定租户构建 ContentRetriever
-     *
-     * @param tenantId 租户 ID（用于数据隔离过滤）
-     * @return ContentRetriever 实例，如果 EmbeddingModel 不可用则返回 null
-     */
     public ContentRetriever createRetriever(String tenantId) {
-        RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
-        return createRetriever(tenantId, List.of(), settings.getRetrievalTopK(), settings.getRetrievalMinScore());
+        return createRetriever(tenantId, List.of(), null);
     }
 
-    /**
-     * 为指定租户与上下文范围构建 ContentRetriever。
-     */
     public ContentRetriever createRetriever(String tenantId, Collection<String> contextIds) {
-        RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
-        return createRetriever(tenantId, contextIds, settings.getRetrievalTopK(), settings.getRetrievalMinScore());
+        return createRetriever(tenantId, contextIds, null);
+    }
+
+    public ContentRetriever createRetriever(String tenantId, int maxResults, double minScore) {
+        return createRetriever(tenantId, List.of(), maxResults);
     }
 
     /**
-     * 为指定租户构建 ContentRetriever（自定义参数）
+     * @param tenantId   租户
+     * @param contextIds 绑定的上下文（项目）范围
+     * @param maxResults 覆盖最终 TopK；为 null 时用租户配置
+     * @return 检索不可用时返回 null，调用方按"无 RAG"处理
      */
-    public ContentRetriever createRetriever(String tenantId, int maxResults, double minScore) {
-        return createRetriever(tenantId, List.of(), maxResults, minScore);
-    }
-
-    private ContentRetriever createRetriever(String tenantId, Collection<String> contextIds, int maxResults, double minScore) {
-        if (ragMilvusStoreFactory == null) {
-            log.debug("Milvus 未启用，跳过 RAG 检索: tenantId={}", tenantId);
+    public ContentRetriever createRetriever(String tenantId, Collection<String> contextIds, Integer maxResults) {
+        if (!StringUtils.hasText(tenantId)) {
+            return null;
+        }
+        RetrievalOrchestrator orchestrator = orchestratorProvider.getIfAvailable();
+        if (orchestrator == null) {
+            log.debug("检索编排器不可用，跳过 RAG 检索: tenantId={}", tenantId);
             return null;
         }
         RagRuntimeSettings settings = ragConfigService.resolveSettings(tenantId);
-        if (!settings.isEnabled()) {
+        if (settings == null || !settings.isEnabled()) {
             log.debug("RAG 未启用，跳过检索: tenantId={}", tenantId);
-            return null;
-        }
-        EmbeddingStore<TextSegment> embeddingStore = ragMilvusStoreFactory != null
-                ? ragMilvusStoreFactory.getStore(tenantId)
-                : null;
-        EmbeddingModel embeddingModel = embeddingModelProvider.getEmbeddingModel(tenantId);
-        if (embeddingModel == null || embeddingStore == null) {
-            log.debug("EmbeddingModel 不可用，跳过 RAG 检索");
             return null;
         }
 
@@ -98,100 +75,36 @@ public class RagContentRetrieverFactory {
                 ? List.of()
                 : contextIds.stream().filter(StringUtils::hasText).distinct().toList();
 
-        // Reranker 启用时，扩大一阶段召回量
-        boolean rerankerEnabled = settings.isRerankerEnabled() && scoringService != null && scoringService.isAvailable();
-        int actualMaxResults = rerankerEnabled ? Math.max(maxResults * 3, 20) : maxResults;
-        int rerankerTopN = rerankerEnabled ? settings.getRerankerTopN() : maxResults;
-
         return query -> {
-            long startMs = System.currentTimeMillis();
-            RagOperationLog operationLog = new RagOperationLog();
-            operationLog.setTenantId(tenantId);
-            operationLog.setOperationType("query");
-            operationLog.setSourceType("agent_query");
-            if (scopedContextIds.size() == 1) {
-                operationLog.setContextId(scopedContextIds.get(0));
-            }
-            operationLog.setCollectionName(settings.getCollectionName());
-            operationLog.setModelConfigId(settings.getVectorModelConfigId());
-            operationLog.setModelName(settings.getVectorModelName());
-            operationLog.setProvider(settings.getProvider());
-            operationLog.setVectorDimension(settings.getEmbeddingDimension());
-            operationLog.setRequestChars(query.text() != null ? query.text().length() : 0);
-            operationLog.setRequestTokens(EmbeddingTokenEstimator.estimate(query.text()));
-            Map<String, Object> metadata = new LinkedHashMap<>();
-            metadata.put("maxResults", actualMaxResults);
-            metadata.put("minScore", minScore);
-            metadata.put("rerankerEnabled", rerankerEnabled);
-            if (rerankerEnabled) {
-                metadata.put("rerankerTopN", rerankerTopN);
-            }
-            if (!scopedContextIds.isEmpty()) {
-                metadata.put("contextIds", scopedContextIds);
-            }
-            operationLog.setMetadata(metadata);
-
-            try {
-                embeddingQuotaGuard.ensureWithinQuota(tenantId, settings, operationLog.getRequestTokens());
-                Filter filter = MetadataFilterBuilder.metadataKey("tenant_id").isEqualTo(tenantId);
-                if (!CollectionUtils.isEmpty(scopedContextIds)) {
-                    filter = new And(filter, MetadataFilterBuilder.metadataKey("context_id").isIn(scopedContextIds));
-                }
-                EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(EmbeddingSearchRequest.builder()
-                        .queryEmbedding(embeddingModel.embed(query.text()).content())
-                        .maxResults(actualMaxResults)
-                        .minScore(minScore)
-                        .filter(filter)
-                        .build());
-                Set<String> matchedContextIds = new LinkedHashSet<>();
-                searchResult.matches().stream()
-                        .map(EmbeddingMatch::embedded)
-                        .map(TextSegment::metadata)
-                        .map(item -> item.getString("context_id"))
-                        .filter(StringUtils::hasText)
-                        .forEach(matchedContextIds::add);
-                if (!matchedContextIds.isEmpty()) {
-                    operationLog.getMetadata().put("matchedContextIds", matchedContextIds.stream().toList());
-                    if (!StringUtils.hasText(operationLog.getContextId()) && matchedContextIds.size() == 1) {
-                        operationLog.setContextId(matchedContextIds.iterator().next());
-                    }
-                }
-
-                List<Content> contents;
-                if (rerankerEnabled && !searchResult.matches().isEmpty()) {
-                    // 二阶段精排：Reranker 对召回结果重新评分排序
-                    List<String> passages = searchResult.matches().stream()
-                            .map(EmbeddingMatch::embedded)
-                            .map(TextSegment::text)
-                            .toList();
-                    List<ScoringService.ScoredPassage> reranked = scoringService.rerank(
-                            query.text(), passages, rerankerTopN);
-                    contents = reranked.stream()
-                            .map(sp -> Content.from(sp.text()))
-                            .toList();
-                    operationLog.getMetadata().put("rerankedCount", reranked.size());
-                    log.debug("Reranker 精排: 输入 {} 条 → 输出 {} 条", passages.size(), reranked.size());
-                } else {
-                    contents = searchResult.matches().stream()
-                            .map(EmbeddingMatch::embedded)
-                            .map(Content::from)
-                            .toList();
-                }
-
-                operationLog.setStatus("success");
-                operationLog.setRetrievedCount(contents.size());
-                operationLog.setDurationMs(System.currentTimeMillis() - startMs);
-                ragConfigService.recordOperation(operationLog);
-                return contents;
-            } catch (Exception e) {
-                operationLog.setStatus("failed");
-                operationLog.setRetrievedCount(0);
-                operationLog.setDurationMs(System.currentTimeMillis() - startMs);
-                operationLog.setErrorMessage(e.getMessage());
-                ragConfigService.recordOperation(operationLog);
-                log.warn("RAG 检索失败: tenantId={}, error={}", tenantId, e.getMessage());
+            if (query == null || !StringUtils.hasText(query.text())) {
                 return List.of();
             }
+            RetrievalOutcome outcome = orchestrator.retrieve(
+                    new RetrievalQuery(tenantId, scopedContextIds, query.text(), maxResults, null, false));
+            if (outcome.isEmpty()) {
+                return List.of();
+            }
+            return outcome.chunks().stream()
+                    .map(RagContentRetrieverFactory::toContent)
+                    .toList();
         };
+    }
+
+    /** chunk → Content，保留来源元数据，供 Agent 侧做引用渲染与审计 */
+    private static Content toContent(RetrievalCandidate candidate) {
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("chunkId", candidate.chunkId());
+        metadata.put("documentId", candidate.docId());
+        metadata.put("fileName", candidate.fileName());
+        metadata.put("section", candidate.section());
+        metadata.put("docCategory", candidate.category());
+        metadata.put("matchedBy", candidate.matchedBy());
+        metadata.put("rrfScore", candidate.rrfScore());
+        if (candidate.rerankScore() != null) {
+            metadata.put("rerankScore", candidate.rerankScore());
+        }
+        TextSegment segment = TextSegment.from(candidate.text(),
+                dev.langchain4j.data.document.Metadata.from(metadata));
+        return Content.from(segment);
     }
 }

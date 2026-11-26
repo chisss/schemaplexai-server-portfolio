@@ -52,6 +52,14 @@ public record SchemaObject(
         return namespaceOrder == 0 ? name.compareTo(other.name) : namespaceOrder;
     }
 
+    public String key() {
+        return namespace == null ? keySegment(name) : keySegment(namespace) + "." + keySegment(name);
+    }
+
+    private String keySegment(String value) {
+        return value.replace("%", "%25").replace(".", "%2E");
+    }
+
     private static <T extends Comparable<? super T>> List<T> sorted(List<T> values) {
         return values == null ? List.of() : values.stream().sorted().toList();
     }

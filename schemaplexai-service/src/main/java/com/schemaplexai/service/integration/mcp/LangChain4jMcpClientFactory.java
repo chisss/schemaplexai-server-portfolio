@@ -1,11 +1,13 @@
 package com.schemaplexai.service.integration.mcp;
 
+import com.schemaplexai.common.enums.McpServerTypeEnum;
 import com.schemaplexai.common.enums.McpTransportTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.service.database.credential.DatabaseCredentialMaterializer;
 import dev.langchain4j.mcp.client.DefaultMcpClient;
+import dev.langchain4j.mcp.client.DefaultMcpToolResultConverter;
 import dev.langchain4j.mcp.client.McpClient;
 import dev.langchain4j.mcp.client.McpHeadersSupplier;
 import dev.langchain4j.mcp.client.transport.McpTransport;
@@ -23,6 +25,8 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * LangChain4j MCP Client 工厂
@@ -35,18 +39,23 @@ public class LangChain4jMcpClientFactory {
     private static final Duration DEFAULT_INITIALIZATION_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration DEFAULT_TOOL_TIMEOUT = Duration.ofSeconds(60);
     private static final Duration DEFAULT_RESOURCE_TIMEOUT = Duration.ofSeconds(30);
+    private static final Pattern MYSQL_QUERY_TIMING = Pattern.compile("Query execution time: [0-9]+\\.[0-9]{2} ms");
 
     private final DatabaseMcpPresetResolver databaseMcpPresetResolver;
     private final DatabaseCredentialMaterializer databaseCredentialMaterializer;
 
     public McpClient create(McpServer server) {
+        return create(server, DEFAULT_TOOL_TIMEOUT);
+    }
+
+    public McpClient create(McpServer server, Duration toolTimeout) {
         if (server == null) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "MCP Server 配置不能为空");
         }
         McpServer runtimeServer = databaseCredentialMaterializer.materialize(server);
-        McpTransport transport = buildTransport(runtimeServer);
+        McpTransport transport = buildTransport(runtimeServer, toolTimeout);
         try {
-            return buildClient(server, transport);
+            return buildClient(server, transport, toolTimeout);
         } catch (RuntimeException failure) {
             try {
                 transport.close();
@@ -57,23 +66,44 @@ public class LangChain4jMcpClientFactory {
         }
     }
 
-    private McpClient buildClient(McpServer server, McpTransport transport) {
-        return DefaultMcpClient.builder()
+    private McpClient buildClient(McpServer server, McpTransport transport, Duration toolTimeout) {
+        var builder = DefaultMcpClient.builder()
                 .key(server.getId())
                 .clientName("SchemaPlexAI")
                 .clientVersion("1.0.0")
                 .protocolVersion("2024-11-05")
                 .transport(transport)
                 .initializationTimeout(DEFAULT_INITIALIZATION_TIMEOUT)
-                .toolExecutionTimeout(DEFAULT_TOOL_TIMEOUT)
+                .toolExecutionTimeout(toolTimeout)
                 .resourcesTimeout(DEFAULT_RESOURCE_TIMEOUT)
                 .promptsTimeout(DEFAULT_RESOURCE_TIMEOUT)
                 .cacheToolList(true)
-                .autoHealthCheck(false)
-                .build();
+                .autoHealthCheck(false);
+        if (McpServerTypeEnum.DATABASE.getCode().equals(server.getServerType())
+                && server.getConnectionConfig() != null
+                && "mysql".equalsIgnoreCase(Objects.toString(server.getConnectionConfig().get("databaseType"), ""))) {
+            var converter = new DefaultMcpToolResultConverter();
+            builder.toolResultConverter((content, isError) -> converter.convert(mysqlQueryContent(content, isError), isError));
+        }
+        return builder.build();
     }
 
-    private McpTransport buildTransport(McpServer server) {
+    static List<Map<String, Object>> mysqlQueryContent(List<Map<String, Object>> content, boolean isError) {
+        // MySQL MCP 的数据块与计时块分开，保留完整 JSON 数据块供查询结果校验。
+        if (isError || content.size() != 2) {
+            return content;
+        }
+        var rows = content.getFirst();
+        var timing = content.getLast();
+        if ("text".equals(rows.get("type")) && rows.get("text") instanceof String text
+                && text.stripLeading().startsWith("[") && "text".equals(timing.get("type"))
+                && timing.get("text") instanceof String duration && MYSQL_QUERY_TIMING.matcher(duration).matches()) {
+            return List.of(rows);
+        }
+        return content;
+    }
+
+    private McpTransport buildTransport(McpServer server, Duration toolTimeout) {
         McpTransportTypeEnum transportType = McpTransportTypeEnum.fromCode(server.getTransportType());
         if (transportType == null) {
             transportType = McpTransportTypeEnum.STREAMABLE_HTTP;
@@ -82,12 +112,12 @@ public class LangChain4jMcpClientFactory {
             case STREAMABLE_HTTP -> StreamableHttpMcpTransport.builder()
                     .url(requireUrl(server))
                     .customHeaders(resolveHeadersSupplier(server))
-                    .timeout(DEFAULT_TOOL_TIMEOUT)
+                    .timeout(toolTimeout)
                     .build();
             case SSE -> StreamableHttpMcpTransport.builder()
                     .url(requireUrl(server))
                     .customHeaders(resolveHeadersSupplier(server))
-                    .timeout(DEFAULT_TOOL_TIMEOUT)
+                    .timeout(toolTimeout)
                     .subsidiaryChannel(true)
                     .build();
             case LEGACY_SSE -> new LegacySseMcpTransport(requireUrl(server), resolveHeadersSupplier(server),

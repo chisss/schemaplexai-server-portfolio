@@ -7,9 +7,11 @@ import com.schemaplexai.model.dto.semantic.SemanticModelUpdateRequest;
 import com.schemaplexai.model.dto.semantic.SemanticVersionCreateRequest;
 import com.schemaplexai.model.vo.semantic.SemanticModelVO;
 import com.schemaplexai.model.vo.semantic.SemanticVersionVO;
+import com.schemaplexai.model.vo.semantic.SemanticPublishVO;
 import com.schemaplexai.service.semantic.application.command.CreateSemanticModelCommand;
 import com.schemaplexai.service.semantic.application.command.UpdateSemanticModelCommand;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticModelApplicationService;
+import com.schemaplexai.service.semantic.application.orchestration.SemanticPublishApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticVersionApplicationService;
 import com.schemaplexai.service.semantic.common.SemanticModelStatus;
 import com.schemaplexai.service.semantic.domain.model.SemanticModel;
@@ -45,6 +47,7 @@ public class SemanticModelController {
     private final SemanticModelApplicationService modelService;
     private final SemanticVersionApplicationService versionService;
     private final SemanticWebMapper mapper;
+    private final SemanticPublishApplicationService publishService;
 
     @GetMapping("/models")
     @PreAuthorize("@authorizationService.hasPermission('semantic:model:view')")
@@ -53,9 +56,10 @@ public class SemanticModelController {
             @RequestParam(defaultValue = "20") @Min(1) @Max(200) int size,
             @RequestParam(required = false) String keyword,
             @RequestParam(required = false) String domain,
-            @RequestParam(required = false) String status) {
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String scopeId) {
         PageResult<SemanticModel> result = modelService.page(
-                page, size, keyword, domain, parseStatus(status));
+                page, size, keyword, domain, parseStatus(status), scopeId);
         List<SemanticModelVO> records = result.getRecords().stream().map(this::toModel).toList();
         return R.ok(new PageResult<>(records, result.getTotal(), result.getCurrent(), result.getSize()));
     }
@@ -70,7 +74,7 @@ public class SemanticModelController {
     @PreAuthorize("@authorizationService.hasPermission('semantic:model:manage')")
     public R<SemanticModelVO> create(@Valid @RequestBody SemanticModelCreateRequest request) {
         SemanticModel model = modelService.create(new CreateSemanticModelCommand(
-                request.name(), request.domain(), request.description()));
+                request.name(), request.domain(), request.description(), request.scopeId()));
         return R.ok(toModel(model));
     }
 
@@ -83,7 +87,8 @@ public class SemanticModelController {
                 request.name(),
                 request.domain(),
                 request.description(),
-                request.expectedRevision()));
+                request.expectedRevision(),
+                request.scopeId()));
         return R.ok(toModel(model));
     }
 
@@ -98,7 +103,7 @@ public class SemanticModelController {
     @GetMapping("/models/{id}/versions")
     @PreAuthorize("@authorizationService.hasPermission('semantic:model:view')")
     public R<List<SemanticVersionVO>> versions(@PathVariable @NotBlank String id) {
-        return R.ok(versionService.list(id).stream().map(mapper::toVersion).toList());
+        return R.ok(versionService.list(id).stream().map(this::toVersion).toList());
     }
 
     @PostMapping("/models/{id}/versions")
@@ -107,13 +112,22 @@ public class SemanticModelController {
             @PathVariable @NotBlank String id,
             @Valid @RequestBody(required = false) SemanticVersionCreateRequest request) {
         String sourceSnapshotId = request == null ? null : request.sourceSnapshotId();
-        return R.ok(mapper.toVersion(versionService.createDraft(id, sourceSnapshotId)));
+        SemanticVersion version = request != null && Boolean.TRUE.equals(request.structured())
+                ? versionService.createConfigurationDraft(id, sourceSnapshotId)
+                : versionService.createDraft(id, sourceSnapshotId);
+        return R.ok(mapper.toVersion(version));
     }
 
     @GetMapping("/versions/{id}")
     @PreAuthorize("@authorizationService.hasPermission('semantic:model:view')")
     public R<SemanticVersionVO> getVersion(@PathVariable @NotBlank String id) {
-        return R.ok(mapper.toVersion(versionService.get(id)));
+        return R.ok(toVersion(versionService.get(id)));
+    }
+
+    private SemanticVersionVO toVersion(SemanticVersion version) {
+        var readiness = publishService.releaseReadiness(version);
+        return mapper.toVersion(version, readiness == null ? null : new SemanticPublishVO.Readiness(
+                readiness.contextReady(), readiness.validationReady(), readiness.queryReady()));
     }
 
     private SemanticModelVO toModel(SemanticModel model) {

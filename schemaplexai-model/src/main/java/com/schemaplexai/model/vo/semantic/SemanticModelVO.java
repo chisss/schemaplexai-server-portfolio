@@ -15,5 +15,6 @@ public record SemanticModelVO(
         String validationStatus,
         long revision,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt) {
+        LocalDateTime updatedAt,
+        String scopeId) {
 }

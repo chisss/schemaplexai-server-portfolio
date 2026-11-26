@@ -10,6 +10,7 @@ import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.model.dto.agent.AgentExecuteDTO;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.service.agent.AgentService;
+import com.schemaplexai.service.agent.ontology.AgentOntologyRuntimeContext;
 import com.schemaplexai.service.desktop.DesktopEmployeeAccess.Employee;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -48,6 +49,7 @@ public class DesktopConversationService {
     private final DesktopToolBroker deviceBroker;
     private final AgentService agents;
     private final AgentExecutionMapper executions;
+    private final AgentOntologyRuntimeContext ontologyContext;
 
     public record DeviceRef(@NotBlank @Size(max = 100) String desktopDeviceId,
                             @NotBlank @Size(max = 200) String desktopWorkspaceId) {}
@@ -145,9 +147,11 @@ public class DesktopConversationService {
     private Turn toTurn(String id, StoredTurn previous) {
         StoredTurn row = reconcile(id, previous);
         AgentExecution execution = execution(id, row);
+        boolean showOutput = execution != null && (!Boolean.TRUE.equals(execution.getOntologyPrivate())
+                || ontologyContext.mayReadCurrentUser());
         return new Turn(row.id(), row.prompt(), row.executionId(), execution == null ? row.state() : execution.getStatus(),
-                row.sequence(), row.createdAt(), execution == null ? null : execution.getOutputResult(),
-                execution == null ? null : execution.getErrorMessage());
+                row.sequence(), row.createdAt(), showOutput ? execution.getOutputResult() : null,
+                showOutput ? execution.getErrorMessage() : null);
     }
 
     private StoredTurn reconcile(String id, StoredTurn row) {

@@ -1,6 +1,7 @@
 package com.schemaplexai.service.semantic.infrastructure.database;
 
 import com.schemaplexai.dao.mapper.semantic.SemanticVersionMapper;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.entity.semantic.SemanticVersionEntity;
 import com.schemaplexai.service.semantic.common.SemanticVersionStatus;
 import com.schemaplexai.service.semantic.domain.model.SemanticVersion;
@@ -21,7 +22,10 @@ public class MybatisSemanticVersionRepository implements SemanticVersionReposito
 
     @Override
     public void insert(SemanticVersion version) {
-        mapper.insert(toEntity(version));
+        SemanticVersionEntity entity = toEntity(version);
+        entity.setCreatedBy(SecurityUtil.getCurrentUserId());
+        entity.setUpdatedBy(entity.getCreatedBy());
+        mapper.insertOwned(entity);
     }
 
     @Override
@@ -40,6 +44,11 @@ public class MybatisSemanticVersionRepository implements SemanticVersionReposito
     @Override
     public Optional<SemanticVersion> findByTenantAndId(String tenantId, String versionId) {
         return Optional.ofNullable(mapper.selectOwnedById(tenantId, versionId)).map(this::toDomain);
+    }
+
+    @Override
+    public Optional<SemanticVersion> lockByTenantAndId(String tenantId, String versionId) {
+        return Optional.ofNullable(mapper.selectOwnedByIdForUpdate(tenantId, versionId)).map(this::toDomain);
     }
 
     @Override

@@ -71,7 +71,22 @@ public class PermissionLoader {
      * SUPER_ADMIN 返回包含 "*" 的集合，表示拥有全部权限
      */
     public Set<String> loadPermissionCodeSet(String userId) {
-        var roles = loadRoles(userId);
+        return permissionCodeSet(loadRoles(userId));
+    }
+
+    /** 按执行所属租户重新读取有效角色，供暂停恢复等后台运行时使用。 */
+    public Set<String> loadActivePermissionCodeSet(String tenantId, String userId) {
+        var roleIds = loadRoleIds(userId);
+        if (roleIds.isEmpty()) {
+            return Collections.emptySet();
+        }
+        return permissionCodeSet(roleMapper.selectList(new LambdaQueryWrapper<Role>()
+                .in(Role::getId, roleIds)
+                .eq(Role::getTenantId, tenantId)
+                .eq(Role::getStatus, CommonConstant.STATUS_ACTIVE)));
+    }
+
+    private Set<String> permissionCodeSet(List<Role> roles) {
         boolean isSuperAdmin = roles.stream().anyMatch(r -> CommonConstant.ROLE_SUPER_ADMIN.equals(r.getCode()));
         if (isSuperAdmin) {
             return Set.of(CommonConstant.PERMISSION_ALL);

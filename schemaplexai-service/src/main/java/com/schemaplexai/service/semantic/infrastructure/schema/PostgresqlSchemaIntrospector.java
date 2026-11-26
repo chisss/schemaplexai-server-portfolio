@@ -2,6 +2,8 @@ package com.schemaplexai.service.semantic.infrastructure.schema;
 
 import org.springframework.stereotype.Component;
 
+import java.util.Set;
+
 /** PostgreSQL information_schema 扫描适配器。 */
 @Component
 public class PostgresqlSchemaIntrospector extends AbstractRelationalSchemaIntrospector {
@@ -67,11 +69,11 @@ public class PostgresqlSchemaIntrospector extends AbstractRelationalSchemaIntros
     }
 
     @Override
-    protected String columnsQuery() { return COLUMNS; }
+    protected String columnsQuery(String schema, Set<String> objects) { return COLUMNS; }
 
     @Override
-    protected String constraintsQuery() { return CONSTRAINTS; }
+    protected String constraintsQuery(String schema, Set<String> objects) { return CONSTRAINTS; }
 
     @Override
-    protected String indexesQuery() { return INDEXES; }
+    protected String indexesQuery(String schema, Set<String> objects) { return INDEXES; }
 }

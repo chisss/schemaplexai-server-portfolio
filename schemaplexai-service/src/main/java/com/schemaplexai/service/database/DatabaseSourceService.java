@@ -52,4 +52,9 @@ public interface DatabaseSourceService {
      * 执行查询
      */
     DatabaseQueryResultVO executeQuery(String id, DatabaseQueryExecuteRequest request);
+
+    DatabaseQueryResultVO executeSemanticQuery(String id, DatabaseQueryExecuteRequest request, int timeoutSeconds);
+
+    DatabaseQueryResultVO executeSemanticQuery(String id, DatabaseQueryExecuteRequest request, int timeoutSeconds,
+                                               String expectedSourceRevision);
 }

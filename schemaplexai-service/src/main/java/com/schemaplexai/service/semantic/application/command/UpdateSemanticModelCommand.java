@@ -5,5 +5,9 @@ public record UpdateSemanticModelCommand(
         String name,
         String domain,
         String description,
-        long expectedRevision) {
+        long expectedRevision,
+        String scopeId) {
+    public UpdateSemanticModelCommand(String name, String domain, String description, long expectedRevision) {
+        this(name, domain, description, expectedRevision, null);
+    }
 }

@@ -1,6 +1,8 @@
 package com.schemaplexai.web.mapper;
 
+import com.schemaplexai.model.vo.semantic.SchemaSnapshotDetailVO;
 import com.schemaplexai.model.vo.semantic.SchemaSnapshotVO;
+import com.schemaplexai.model.vo.semantic.SemanticPublishVO;
 import com.schemaplexai.model.vo.semantic.SemanticGraphVO;
 import com.schemaplexai.model.vo.semantic.SemanticModelVO;
 import com.schemaplexai.model.vo.semantic.SemanticValidationVO;
@@ -13,6 +15,7 @@ import com.schemaplexai.service.semantic.domain.model.ontology.OntologyEdge;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologySubgraph;
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyTerm;
 import com.schemaplexai.service.semantic.domain.model.ontology.SemanticValidation;
+import com.schemaplexai.service.semantic.domain.model.schema.SchemaObject;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -27,6 +30,7 @@ import static com.schemaplexai.service.semantic.common.SemanticVocabulary.MAPPIN
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.MAPPING_SOURCE;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.NAME;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.OWL_DATATYPE_PROPERTY;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.OWL_OBJECT_PROPERTY;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.PHYSICAL_FIELD;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.PHYSICAL_OBJECT;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.RDF_PROPERTY;
@@ -67,10 +71,15 @@ public class SemanticWebMapper {
                 activeVersion == null ? null : lower(activeVersion.getStatus().name()),
                 model.getRevision(),
                 null,
-                null);
+                null,
+                model.getScopeId());
     }
 
     public SemanticVersionVO toVersion(SemanticVersion version) {
+        return toVersion(version, null);
+    }
+
+    public SemanticVersionVO toVersion(SemanticVersion version, SemanticPublishVO.Readiness readiness) {
         return new SemanticVersionVO(
                 version.getId(),
                 version.getModelId(),
@@ -83,7 +92,8 @@ public class SemanticWebMapper {
                 version.getRevision(),
                 version.getPublishedAt(),
                 null,
-                null);
+                null,
+                readiness);
     }
 
     public SemanticGraphVO toGraph(OntologySubgraph graph, String focusNodeId) {
@@ -99,8 +109,9 @@ public class SemanticWebMapper {
         Set<String> nodeIds = nodes.stream().map(SemanticGraphVO.Node::id).collect(java.util.stream.Collectors.toSet());
         List<SemanticGraphVO.Edge> edges = graph.edges().stream()
                 .filter(edge -> edge.object().kind() == OntologyTerm.Kind.IRI)
-                .filter(edge -> !NON_RELATION_PREDICATES.contains(edge.predicateIri()))
                 .filter(edge -> nodeIds.contains(edge.subjectIri()) && nodeIds.contains(edge.object().value()))
+                .filter(edge -> !NON_RELATION_PREDICATES.contains(edge.predicateIri())
+                        || (RDFS_RANGE.equals(edge.predicateIri()) && attributes.get(edge.subjectIri()).objectProperty))
                 .map(this::toEdge)
                 .toList();
         return new SemanticGraphVO(nodes, edges, nodes.size(), graph.hasMore(), focusNodeId);
@@ -123,16 +134,13 @@ public class SemanticWebMapper {
         int fieldCount = snapshot.getSchema().objects().stream()
                 .mapToInt(object -> object.fields().size())
                 .sum();
-        String status = snapshot.getStatus() == SchemaSnapshotStatus.READY
-                ? "completed"
-                : lower(snapshot.getStatus().name());
         return new SchemaSnapshotVO(
                 snapshot.getId(),
                 snapshot.getSourceId(),
                 null,
                 snapshot.getSchema().databaseType(),
                 snapshot.getFingerprint(),
-                status,
+                snapshotStatus(snapshot),
                 objectCount,
                 fieldCount,
                 driftDetected,
@@ -140,6 +148,29 @@ public class SemanticWebMapper {
                 null,
                 snapshot.getScannedAt(),
                 snapshot.getScannedAt());
+    }
+
+    public SchemaSnapshotDetailVO toSnapshotDetail(SchemaSnapshot snapshot) {
+        var schema = snapshot.getSchema();
+        return new SchemaSnapshotDetailVO(snapshot.getId(), snapshot.getSourceId(), snapshotStatus(snapshot), schema.databaseType(),
+                new SchemaSnapshotDetailVO.Schema(schema.catalog(), schema.schema(),
+                        schema.objects().stream().map(this::toSchemaObject).toList()));
+    }
+
+    private SchemaSnapshotDetailVO.ObjectSchema toSchemaObject(SchemaObject object) {
+        var fields = object.fields().stream()
+                .map(field -> new SchemaSnapshotDetailVO.Field(field.name(), field.dataType(), field.nullable()))
+                .toList();
+        var foreignKeys = object.foreignKeys().stream()
+                .map(key -> new SchemaSnapshotDetailVO.ForeignKey(key.name(), key.columns(), key.referencedSchema(),
+                        key.referencedObject(), key.referencedColumns()))
+                .toList();
+        return new SchemaSnapshotDetailVO.ObjectSchema(object.key(), object.namespace(), object.name(),
+                object.type().name(), fields, object.primaryKey(), foreignKeys);
+    }
+
+    private String snapshotStatus(SchemaSnapshot snapshot) {
+        return snapshot.getStatus() == SchemaSnapshotStatus.READY ? "completed" : lower(snapshot.getStatus().name());
     }
 
     private void applyMetadata(NodeAttributes attributes, OntologyEdge edge) {
@@ -158,8 +189,11 @@ public class SemanticWebMapper {
             case PHYSICAL_OBJECT -> attributes.mapping.put("physicalObject", value);
             case PHYSICAL_FIELD -> attributes.mapping.put("physicalField", value);
             case MAPPING_KIND -> attributes.mapping.put("mappingKind", value);
-            case RDF_TYPE -> attributes.property = RDF_PROPERTY.equals(value)
-                    || OWL_DATATYPE_PROPERTY.equals(value);
+            case RDF_TYPE -> {
+                attributes.objectProperty |= OWL_OBJECT_PROPERTY.equals(value);
+                attributes.property |= RDF_PROPERTY.equals(value) || OWL_DATATYPE_PROPERTY.equals(value)
+                        || attributes.objectProperty;
+            }
             default -> {
             }
         }
@@ -186,7 +220,7 @@ public class SemanticWebMapper {
                 attributes.description,
                 attributes.property ? "property" : "concept",
                 List.copyOf(attributes.synonyms),
-                attributes.dataType,
+                attributes.objectProperty ? null : attributes.dataType,
                 attributes.required,
                 mapping);
     }
@@ -259,6 +293,7 @@ public class SemanticWebMapper {
         private String dataType;
         private Boolean required;
         private boolean property;
+        private boolean objectProperty;
         private final Map<String, String> mapping = new HashMap<>();
 
         private NodeAttributes(String iri, String label) {

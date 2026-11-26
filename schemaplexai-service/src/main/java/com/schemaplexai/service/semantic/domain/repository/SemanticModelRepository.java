@@ -16,6 +16,8 @@ public interface SemanticModelRepository {
 
     Optional<SemanticModel> findByTenantAndId(String tenantId, String modelId);
 
+    Optional<SemanticModel> lockByTenantAndId(String tenantId, String modelId);
+
     List<SemanticModel> findAllByTenant(String tenantId);
 
     boolean existsActiveName(String tenantId, String name, String excludedModelId);

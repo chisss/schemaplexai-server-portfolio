@@ -4,5 +4,9 @@ package com.schemaplexai.model.vo.semantic;
 public record SemanticPublishVO(
         String modelId,
         SemanticVersionVO version,
-        boolean activated) {
+        boolean activated,
+        Readiness readiness) {
+
+    public record Readiness(boolean contextReady, boolean validationReady, boolean queryReady) {
+    }
 }

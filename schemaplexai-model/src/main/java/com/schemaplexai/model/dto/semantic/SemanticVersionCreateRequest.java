@@ -7,5 +7,8 @@ public record SemanticVersionCreateRequest(
         @Pattern(
                 regexp = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
                 message = "Schema快照ID格式不正确")
-        String sourceSnapshotId) {
+        String sourceSnapshotId, Boolean structured) {
+    public SemanticVersionCreateRequest(String sourceSnapshotId) {
+        this(sourceSnapshotId, null);
+    }
 }

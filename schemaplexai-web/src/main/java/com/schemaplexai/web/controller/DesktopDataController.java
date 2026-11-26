@@ -2,6 +2,7 @@ package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.service.desktop.DesktopDataService;
+import com.schemaplexai.service.semantic.application.orchestration.CompositeQueryPlanner;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -11,18 +12,32 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
+/**
+ * 员工侧桌面自助入口。
+ *
+ * <p>入口只声明「登录 + 个人自助权限」；真正的资源级授权在 service：
+ * 所有查询按 {@code Employee.current()} 的租户与用户过滤，跨用户资源一律不可见。
+ * 把细粒度判定留在服务层，是因为同一条端点常按业务类型对应不同权限码（如审批决策），
+ * 注解无法表达，硬写只会与 service 口径漂移。
+ */
 @Validated
+@PreAuthorize("@authorizationService.hasPermission('self:service')")
 @RestController
 @RequestMapping("/desktop/data")
 @RequiredArgsConstructor
 public class DesktopDataController {
     private final DesktopDataService data;
+    private final CompositeQueryPlanner planner;
+    private final QueryProgressStream streams;
 
     public record Create(@NotBlank @Size(max = 128) String clientRequestId) {}
     public record Execute(@NotBlank @Size(max = 128) String planHash) {}
@@ -71,6 +86,23 @@ public class DesktopDataController {
     public R<?> history(@PathVariable String id, @RequestParam(defaultValue = "1") @Min(1) int page,
                         @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
         return R.ok(data.history(id, page, size));
+    }
+
+    @GetMapping("/conversations/{id}/queries/turns")
+    public R<?> turns(@PathVariable String id, @RequestParam(defaultValue = "1") @Min(1) int page,
+                      @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
+        return R.ok(data.turns(id, page, size));
+    }
+
+    @PostMapping(value = "/conversations/{id}/queries/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @PreAuthorize("@authorizationService.hasPermission('self:service') and @authorizationService.hasPermission('semantic:query:interpret')")
+    public SseEmitter askStream(@PathVariable String id, @Valid @RequestBody DesktopDataService.Ask request) {
+        return streams.start(send -> {
+            var turn = data.askTurn(id, request, planner, message -> send.accept(
+                    Map.of("type", "progress", "message", message)));
+            turn.queries().forEach(query -> send.accept(Map.of("type", "query", "query", query)));
+            send.accept(Map.of("type", "complete", "turn", turn, "presentation", turn.presentation()));
+        });
     }
 
     @PostMapping("/conversations/{id}/queries")

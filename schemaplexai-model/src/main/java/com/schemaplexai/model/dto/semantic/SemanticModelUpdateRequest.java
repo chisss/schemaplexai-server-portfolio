@@ -15,5 +15,9 @@ public record SemanticModelUpdateRequest(
         @Size(max = 2000, message = "描述不能超过2000个字符")
         String description,
         @Min(value = 0, message = "revision不能小于0")
-        long expectedRevision) {
+        long expectedRevision,
+        @Size(max = 36) String scopeId) {
+    public SemanticModelUpdateRequest(String name, String domain, String description, long expectedRevision) {
+        this(name, domain, description, expectedRevision, null);
+    }
 }

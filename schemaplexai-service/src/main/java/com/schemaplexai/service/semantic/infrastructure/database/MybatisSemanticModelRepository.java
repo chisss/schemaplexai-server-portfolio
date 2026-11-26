@@ -21,7 +21,7 @@ public class MybatisSemanticModelRepository implements SemanticModelRepository {
 
     @Override
     public void insert(SemanticModel model) {
-        mapper.insert(toEntity(model));
+        mapper.insertOwned(toEntity(model));
     }
 
     @Override
@@ -40,6 +40,11 @@ public class MybatisSemanticModelRepository implements SemanticModelRepository {
     }
 
     @Override
+    public Optional<SemanticModel> lockByTenantAndId(String tenantId, String modelId) {
+        return Optional.ofNullable(mapper.lockOwned(tenantId, modelId)).map(this::toDomain);
+    }
+
+    @Override
     public List<SemanticModel> findAllByTenant(String tenantId) {
         return mapper.selectAllOwned(tenantId).stream().map(this::toDomain).toList();
     }
@@ -55,6 +60,7 @@ public class MybatisSemanticModelRepository implements SemanticModelRepository {
         entity.setTenantId(model.getTenantId());
         entity.setName(model.getName());
         entity.setDomain(model.getDomain());
+        entity.setScopeId(model.getScopeId());
         entity.setDescription(model.getDescription());
         entity.setActiveVersionId(model.getActiveVersionId());
         entity.setStatus(model.getStatus().name().toLowerCase(Locale.ROOT));
@@ -72,6 +78,7 @@ public class MybatisSemanticModelRepository implements SemanticModelRepository {
                 entity.getDescription(),
                 entity.getActiveVersionId(),
                 SemanticModelStatus.valueOf(entity.getStatus().toUpperCase(Locale.ROOT)),
-                entity.getRevision());
+                entity.getRevision(),
+                entity.getScopeId());
     }
 }

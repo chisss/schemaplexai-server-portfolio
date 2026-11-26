@@ -85,6 +85,11 @@ public class AgentAsyncConfig {
         return evalPool(decorator, "eval-coordinator-", 2, 64);
     }
 
+    @Bean("queryPlanningPool")
+    public Executor queryPlanningPool(TaskDecorator decorator) {
+        return evalPool(decorator, "query-plan-", 6, 12);
+    }
+
     @Bean("evalItemPool")
     public Executor evalItemPool(TaskDecorator decorator) {
         return evalPool(decorator, "eval-item-", 8, 16);

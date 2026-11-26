@@ -118,13 +118,19 @@ final class AgentChatMemoryCompactor {
     ArchivedChatMemory createChatMemory(String conversationId, String executionId,
                                          AgentEngineParams params, AiModelConfig modelConfig,
                                          CompositeChatMemoryStore chatMemoryStore) {
+        return createChatMemory(conversationId, executionId, params, modelConfig, chatMemoryStore, false);
+    }
+
+    ArchivedChatMemory createChatMemory(String conversationId, String executionId,
+                                         AgentEngineParams params, AiModelConfig modelConfig,
+                                         CompositeChatMemoryStore chatMemoryStore, boolean currentExecutionOnly) {
         int memoryBudgetTokens = resolveMemoryBudgetTokens(params, modelConfig);
         ChatMemory window = TokenWindowChatMemory.builder()
                 .id(conversationId)
                 .maxTokens(memoryBudgetTokens, tokenEstimatorSupport.resolveEstimator(modelConfig))
                 .build();
         return new ArchivedChatMemory(conversationId, executionId, chatMemoryStore, window,
-                Math.clamp(params.getMaxMessages(), 8, 2_000));
+                Math.clamp(params.getMaxMessages(), 8, 2_000), currentExecutionOnly);
     }
 
     CompactionResult compactIfNeeded(ChatMemory chatMemory, AgentEngineParams params, AiModelConfig modelConfig) {

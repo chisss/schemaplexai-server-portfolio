@@ -15,7 +15,14 @@ public record QueryExecutionResult(
         boolean truncated,
         long elapsedMs,
         String auditId,
-        List<String> warnings) {
+        List<String> warnings,
+        QueryResultValidation validation) {
+
+    public QueryExecutionResult(String planHash, List<Map<String, Object>> rows, List<QueryColumn> columns,
+                                List<QueryLineage> lineage, int rowCount, boolean truncated, long elapsedMs,
+                                String auditId, List<String> warnings) {
+        this(planHash, rows, columns, lineage, rowCount, truncated, elapsedMs, auditId, warnings, null);
+    }
 
     public QueryExecutionResult {
         rows = rows == null ? List.of() : rows.stream().map(row -> Collections.unmodifiableMap(new LinkedHashMap<>(row))).toList();

@@ -8,7 +8,12 @@ public record QueryDimension(
         String alias,
         String timeGrain,
         String physicalObject,
-        String physicalField) {
+        String physicalField,
+        QueryCalendar calendar) {
+
+    public QueryDimension(String iri, String alias, String timeGrain, String physicalObject, String physicalField) {
+        this(iri, alias, timeGrain, physicalObject, physicalField, null);
+    }
 
     public QueryDimension {
         iri = requireText(iri, "iri");

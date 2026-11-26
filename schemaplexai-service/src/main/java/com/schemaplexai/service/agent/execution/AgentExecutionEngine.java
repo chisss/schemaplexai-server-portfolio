@@ -382,7 +382,7 @@ public class AgentExecutionEngine {
         String conversationId = resolveConversationId(ctx);
         persistConversationId(executionId, conversationId);
         ArchivedChatMemory chatMemory = chatMemoryCompactor.createChatMemory(
-                conversationId, executionId, params, first.config(), compositeChatMemoryStore);
+                conversationId, executionId, params, first.config(), compositeChatMemoryStore, ctx.isOntologyPrivate());
 
         // 添加用户消息（首次执行或恢复执行）
         TaskContextInput projectableInput = null;

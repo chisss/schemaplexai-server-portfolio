@@ -18,6 +18,20 @@ import static org.mockito.Mockito.when;
 class ArchivedChatMemoryTest {
 
     @Test
+    void privateExecutionReplaysOnlyItsOwnMessages() {
+        CompositeChatMemoryStore store = mock(CompositeChatMemoryStore.class);
+        AiMessage ownMessage = AiMessage.from("私有执行的本次摘要");
+        when(store.loadExecutionWindow("conversation", "current", 50)).thenReturn(List.of(ownMessage));
+
+        ArchivedChatMemory memory = new ArchivedChatMemory("conversation", "current", store,
+                MessageWindowChatMemory.withMaxMessages(8), 50, true);
+
+        assertThat(memory.messages()).containsExactly(ownMessage);
+        verify(store).loadExecutionWindow("conversation", "current", 50);
+        verifyNoMoreInteractions(store);
+    }
+
+    @Test
     void shouldLoadOnceKeepRawInputAndBatchOriginalMessagesWithoutWritingProjection() {
         CompositeChatMemoryStore store = mock(CompositeChatMemoryStore.class);
         UserMessage previous = UserMessage.from("上一轮");

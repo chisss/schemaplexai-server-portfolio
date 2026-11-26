@@ -7,6 +7,7 @@ import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.service.semantic.application.command.CreateSemanticModelCommand;
 import com.schemaplexai.service.semantic.application.command.UpdateSemanticModelCommand;
 import com.schemaplexai.service.semantic.domain.model.SemanticModel;
+import com.schemaplexai.service.semantic.domain.model.scope.OntologyScope;
 import com.schemaplexai.service.semantic.domain.repository.SemanticModelRepository;
 import com.schemaplexai.service.semantic.common.SemanticModelStatus;
 import lombok.RequiredArgsConstructor;
@@ -24,16 +25,19 @@ import java.util.Locale;
 public class SemanticModelApplicationService {
 
     private final SemanticModelRepository modelRepository;
+    private final OntologyScopeApplicationService scopeService;
 
     @Transactional(rollbackFor = Exception.class)
     public SemanticModel create(CreateSemanticModelCommand command) {
         String tenantId = requireTenantId();
+        OntologyScope scope = command.scopeId() == null ? null : scopeService.require(command.scopeId());
         SemanticModel model = SemanticModel.create(
                 UUID.randomUUID().toString(),
                 tenantId,
                 command.name(),
-                command.domain(),
-                command.description());
+                scope == null ? command.domain() : scope.domainName(),
+                command.description(),
+                scope == null ? null : scope.id());
         requireUniqueName(tenantId, model.getName(), null);
         try {
             modelRepository.insert(model);
@@ -53,11 +57,17 @@ public class SemanticModelApplicationService {
             String keyword,
             String domain,
             SemanticModelStatus status) {
+        return page(page, size, keyword, domain, status, null);
+    }
+
+    public PageResult<SemanticModel> page(int page, int size, String keyword, String domain,
+                                         SemanticModelStatus status, String scopeId) {
         if (page < 1 || size < 1 || size > 200) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "分页参数不合法");
         }
         String normalizedKeyword = normalize(keyword);
         String normalizedDomain = normalize(domain);
+        String ownedScope = scopeId == null ? null : scopeService.require(scopeId).id();
         List<SemanticModel> filtered = modelRepository.findAllByTenant(requireTenantId()).stream()
                 .filter(model -> normalizedKeyword == null
                         || model.getName().toLowerCase(Locale.ROOT).contains(normalizedKeyword)
@@ -65,9 +75,10 @@ public class SemanticModelApplicationService {
                         && model.getDescription().toLowerCase(Locale.ROOT).contains(normalizedKeyword)))
                 .filter(model -> normalizedDomain == null
                         || model.getDomain().equalsIgnoreCase(normalizedDomain))
+                .filter(model -> ownedScope == null || ownedScope.equals(model.getScopeId()))
                 .filter(model -> status == null || model.getStatus() == status)
                 .toList();
-        int fromIndex = Math.min((page - 1) * size, filtered.size());
+        int fromIndex = (int) Math.min((long) (page - 1) * size, filtered.size());
         int toIndex = Math.min(fromIndex + size, filtered.size());
         return new PageResult<>(filtered.subList(fromIndex, toIndex), filtered.size(), page, size);
     }
@@ -80,12 +91,15 @@ public class SemanticModelApplicationService {
     public SemanticModel update(String modelId, UpdateSemanticModelCommand command) {
         String tenantId = requireTenantId();
         SemanticModel model = requireModel(tenantId, modelId);
+        String scopeId = command.scopeId() == null ? model.getScopeId() : command.scopeId();
+        OntologyScope scope = scopeId == null ? null : scopeService.require(scopeId);
         try {
             model.updateProfile(
                     command.name(),
-                    command.domain(),
+                    scope == null ? command.domain() : scope.domainName(),
                     command.description(),
-                    command.expectedRevision());
+                    command.expectedRevision(),
+                    scope == null ? null : scope.id());
         } catch (IllegalStateException exception) {
             throw translateStateException(exception);
         }

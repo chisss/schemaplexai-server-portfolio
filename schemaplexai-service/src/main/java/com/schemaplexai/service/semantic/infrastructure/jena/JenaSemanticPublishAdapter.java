@@ -120,6 +120,12 @@ public class JenaSemanticPublishAdapter implements SemanticPublishPort {
 
         Graph assertedGraph = GraphView.createNamedGraph(dataset, temporary.asserted());
         Graph shapesGraph = GraphView.createNamedGraph(dataset, temporary.shapes());
+        if (assertedGraph.isEmpty()) {
+            return new PublishPreparation(ref, operationId, false, "至少配置一个业务概念后再检查或发布", null, 0);
+        }
+        if (shapesGraph.size() > properties.getMaxAssertedTriples()) {
+            throw new IllegalArgumentException("SHACL shapes exceed configured triple quota");
+        }
         ValidationReport report = ShaclValidator.get().validate(shapesGraph, assertedGraph);
         if (!report.conforms()) {
             return new PublishPreparation(ref, operationId, false, reportText(report), null, 0);
@@ -221,7 +227,7 @@ public class JenaSemanticPublishAdapter implements SemanticPublishPort {
                 + NodeFmtLib.strNT(triple.getObject());
     }
 
-    private String reportText(ValidationReport report) {
+    static String reportText(ValidationReport report) {
         List<String> messages = report.getEntries().stream()
                 .map(entry -> formatReportNode(entry.focusNode()) + ": "
                         + (entry.message() == null ? "constraint violation" : entry.message()))
@@ -244,7 +250,7 @@ public class JenaSemanticPublishAdapter implements SemanticPublishPort {
         return result.toString();
     }
 
-    private String formatReportNode(Node node) {
+    private static String formatReportNode(Node node) {
         return node == null ? "unknown focus node" : NodeFmtLib.strNT(node);
     }
 

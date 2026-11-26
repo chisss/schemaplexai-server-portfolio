@@ -6,6 +6,7 @@ import com.schemaplexai.service.semantic.domain.port.SemanticQueryAuditPort;
 import com.schemaplexai.service.semantic.domain.port.SemanticQueryExecutorPort;
 import com.schemaplexai.service.semantic.domain.port.SemanticQuerySourcePort;
 import com.schemaplexai.service.semantic.domain.service.QueryPlanPolicy;
+import com.schemaplexai.service.semantic.domain.service.PublishedQueryInterpretationService;
 import com.schemaplexai.service.semantic.domain.service.QueryPlanSignatureService;
 import com.schemaplexai.service.semantic.domain.service.SemanticQueryExecutionService;
 import com.schemaplexai.service.semantic.infrastructure.database.DatabaseSemanticQueryExecutorAdapter;
@@ -21,6 +22,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
+import java.time.Clock;
+
 /** 将无框架领域服务以 Bean 暴露给 application 编排层。 */
 @Configuration
 public class SemanticQueryDomainServiceConfig {
@@ -28,6 +31,11 @@ public class SemanticQueryDomainServiceConfig {
     @Bean
     public SemanticQueryInterpretationService semanticQueryInterpretationService() {
         return new SemanticQueryInterpretationService();
+    }
+
+    @Bean
+    public PublishedQueryInterpretationService publishedQueryInterpretationService() {
+        return new PublishedQueryInterpretationService(Clock.systemUTC());
     }
 
     @Bean

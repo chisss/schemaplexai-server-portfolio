@@ -106,6 +106,9 @@ public class AgentExecution implements Serializable {
     /** 用户长期记忆写入许可，空值沿用用户设置。 */
     private Boolean memoryWriteEnabled;
 
+    /** 使用本体上下文的输出仅供获授权的执行发起人查看。 */
+    private Boolean ontologyPrivate;
+
     /** 开始时间 */
     private LocalDateTime startedAt;
 

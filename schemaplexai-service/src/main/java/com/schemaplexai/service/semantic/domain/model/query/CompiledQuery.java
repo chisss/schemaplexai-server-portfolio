@@ -9,7 +9,14 @@ public record CompiledQuery(
         String statement,
         List<QueryParameter> parameters,
         List<QueryColumn> columns,
-        List<QueryLineage> lineage) {
+        List<QueryLineage> lineage,
+        List<QueryDimension> dimensions,
+        QueryTimeRange timeRange) {
+
+    public CompiledQuery(String language, String statement, List<QueryParameter> parameters,
+                         List<QueryColumn> columns, List<QueryLineage> lineage) {
+        this(language, statement, parameters, columns, lineage, List.of(), null);
+    }
 
     public CompiledQuery {
         language = requireText(language, "language");
@@ -17,6 +24,7 @@ public record CompiledQuery(
         parameters = parameters == null ? List.of() : List.copyOf(parameters);
         columns = columns == null ? List.of() : List.copyOf(columns);
         lineage = lineage == null ? List.of() : List.copyOf(lineage);
+        dimensions = dimensions == null ? List.of() : List.copyOf(dimensions);
     }
 
     private static String requireText(String value, String field) {

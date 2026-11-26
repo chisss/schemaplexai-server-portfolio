@@ -3,7 +3,11 @@ package com.schemaplexai.service.semantic.domain.model.query;
 import java.util.Objects;
 
 /** 参数化查询的单个绑定值。值不会被拼接进查询文本。 */
-public record QueryParameter(String name, String value) {
+public record QueryParameter(String name, String value, boolean textValue) {
+
+    public QueryParameter(String name, String value) {
+        this(name, value, false);
+    }
 
     public QueryParameter {
         name = requireText(name, "name");

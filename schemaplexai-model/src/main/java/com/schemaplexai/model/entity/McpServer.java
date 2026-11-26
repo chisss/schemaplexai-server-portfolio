@@ -25,6 +25,7 @@ public class McpServer implements Serializable {
     private String id;
 
     /** 租户ID */
+    @TableField(fill = FieldFill.INSERT)
     private String tenantId;
 
     /** 名称 */

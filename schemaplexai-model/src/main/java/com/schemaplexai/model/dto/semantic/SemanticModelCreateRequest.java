@@ -12,5 +12,9 @@ public record SemanticModelCreateRequest(
         @Size(max = 100, message = "业务域不能超过100个字符")
         String domain,
         @Size(max = 2000, message = "描述不能超过2000个字符")
-        String description) {
+        String description,
+        @Size(max = 36) String scopeId) {
+    public SemanticModelCreateRequest(String name, String domain, String description) {
+        this(name, domain, description, null);
+    }
 }

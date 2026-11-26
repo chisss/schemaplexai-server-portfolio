@@ -1,7 +1,8 @@
 package com.schemaplexai.service.semantic.infrastructure.database;
 
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.semantic.SchemaSnapshotMapper;
 import com.schemaplexai.model.entity.semantic.SchemaSnapshotEntity;
 import com.schemaplexai.service.semantic.common.SchemaSnapshotStatus;
@@ -13,7 +14,6 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
 
 /** MyBatis Schema 快照仓储适配器。 */
@@ -26,7 +26,11 @@ public class MybatisSchemaSnapshotRepository implements SchemaSnapshotRepository
 
     @Override
     public void insert(SchemaSnapshot snapshot) {
-        mapper.insert(toEntity(snapshot));
+        try {
+            mapper.insertOwned(toEntity(snapshot), objectMapper.writeValueAsString(snapshot.getSchema()));
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("无法序列化 Schema 快照", exception);
+        }
     }
 
     @Override
@@ -54,9 +58,10 @@ public class MybatisSchemaSnapshotRepository implements SchemaSnapshotRepository
         entity.setTenantId(snapshot.getTenantId());
         entity.setSourceId(snapshot.getSourceId());
         entity.setFingerprint(snapshot.getFingerprint());
-        entity.setSchemaJson(objectMapper.convertValue(snapshot.getSchema(), new TypeReference<Map<String, Object>>() { }));
         entity.setStatus(snapshot.getStatus().name().toLowerCase(Locale.ROOT));
         entity.setScannedAt(snapshot.getScannedAt());
+        entity.setCreatedBy(SecurityUtil.getCurrentUserId());
+        entity.setUpdatedBy(entity.getCreatedBy());
         entity.setDeleted(0);
         return entity;
     }

@@ -13,6 +13,7 @@ public final class SemanticModel {
     private final String tenantId;
     private String name;
     private String domain;
+    private String scopeId;
     private String description;
     private String activeVersionId;
     private SemanticModelStatus status;
@@ -26,7 +27,8 @@ public final class SemanticModel {
             String description,
             String activeVersionId,
             SemanticModelStatus status,
-            long revision) {
+            long revision, String scopeId) {
+        this.scopeId = normalizeOptional(scopeId);
         this.id = requireText(id, "id");
         this.tenantId = requireText(tenantId, "tenantId");
         this.name = requireText(name, "name");
@@ -46,15 +48,13 @@ public final class SemanticModel {
             String name,
             String domain,
             String description) {
-        return new SemanticModel(
-                id,
-                tenantId,
-                name,
-                domain,
-                description,
-                null,
-                SemanticModelStatus.ACTIVE,
-                0);
+        return create(id, tenantId, name, domain, description, null);
+    }
+
+    public static SemanticModel create(String id, String tenantId, String name, String domain,
+                                       String description, String scopeId) {
+        return new SemanticModel(id, tenantId, name, domain, description, null,
+                SemanticModelStatus.ACTIVE, 0, scopeId);
     }
 
     public static SemanticModel restore(
@@ -66,23 +66,26 @@ public final class SemanticModel {
             String activeVersionId,
             SemanticModelStatus status,
             long revision) {
-        return new SemanticModel(
-                id,
-                tenantId,
-                name,
-                domain,
-                description,
-                activeVersionId,
-                status,
-                revision);
+        return restore(id, tenantId, name, domain, description, activeVersionId, status, revision, null);
+    }
+
+    public static SemanticModel restore(String id, String tenantId, String name, String domain,
+                                        String description, String activeVersionId, SemanticModelStatus status,
+                                        long revision, String scopeId) {
+        return new SemanticModel(id, tenantId, name, domain, description, activeVersionId, status, revision, scopeId);
     }
 
     public void updateProfile(String name, String domain, String description, long expectedRevision) {
+        updateProfile(name, domain, description, expectedRevision, scopeId);
+    }
+
+    public void updateProfile(String name, String domain, String description, long expectedRevision, String scopeId) {
         requireActive();
         requireRevision(expectedRevision);
         this.name = requireText(name, "name");
         this.domain = requireText(domain, "domain");
         this.description = normalizeOptional(description);
+        this.scopeId = normalizeOptional(scopeId);
         revision++;
     }
 

@@ -6,17 +6,27 @@ import com.schemaplexai.model.dto.system.AiModelRouteCreateRequest;
 import com.schemaplexai.model.dto.system.AiModelRouteUpdateRequest;
 import com.schemaplexai.model.dto.system.AiModelUpdateRequest;
 import com.schemaplexai.model.dto.system.RagConfigUpdateRequest;
+import com.schemaplexai.model.dto.system.RagGroundingCheckRequest;
+import com.schemaplexai.model.dto.system.RagRetrievalEvalRequest;
 import com.schemaplexai.model.entity.AiModel;
 import com.schemaplexai.model.entity.TeamTemplate;
 import com.schemaplexai.model.vo.system.AiModelRouteVO;
 import com.schemaplexai.model.vo.system.AiModelRealHealthCheckVO;
 import com.schemaplexai.model.vo.system.ConnectivityTestResultVO;
 import com.schemaplexai.model.vo.system.RagConfigVO;
+import com.schemaplexai.model.vo.system.RagDiagnosticsVO;
 import com.schemaplexai.model.vo.system.RagOperationLogVO;
+import com.schemaplexai.model.vo.system.RagRerankAbVO;
+import com.schemaplexai.model.vo.system.RagRetrievalEvalVO;
 import com.schemaplexai.model.vo.system.RouteAnalysisVO;
 import com.schemaplexai.service.config.SystemConfigService;
 import com.schemaplexai.service.ai.AiModelRealHealthCheckService;
 import com.schemaplexai.service.rag.RagConfigService;
+import com.schemaplexai.service.rag.eval.GroundingGuardService;
+import com.schemaplexai.service.rag.eval.RagDiagnosticsService;
+import com.schemaplexai.service.rag.eval.RagReindexService;
+import com.schemaplexai.service.rag.eval.RagRetrievalEvaluationService;
+import com.schemaplexai.common.util.SecurityUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -29,6 +39,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -45,6 +56,10 @@ public class SystemController {
 
     private final SystemConfigService systemConfigService;
     private final RagConfigService ragConfigService;
+    private final RagDiagnosticsService ragDiagnosticsService;
+    private final GroundingGuardService groundingGuardService;
+    private final RagReindexService ragReindexService;
+    private final RagRetrievalEvaluationService ragRetrievalEvaluationService;
     private final AiModelRealHealthCheckService aiModelRealHealthCheckService;
 
     // ==================== AI模型管理 ====================
@@ -168,6 +183,45 @@ public class SystemController {
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
     public R<RagConfigVO> updateRagConfig(@Valid @RequestBody RagConfigUpdateRequest request) {
         return R.ok(ragConfigService.updateCurrentTenantConfig(request));
+    }
+
+    @GetMapping("/rag/diagnostics")
+    @Operation(summary = "获取当前租户 RAG 运行诊断（配置是否生效、索引状态、缓存）")
+    public R<RagDiagnosticsVO> getRagDiagnostics() {
+        return R.ok(ragDiagnosticsService.diagnose(SecurityUtil.getCurrentTenantId()));
+    }
+
+    @PostMapping("/rag/evaluation/retrieval")
+    @Operation(summary = "运行检索层评测（Recall@K / MRR / 上下文成本）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
+    public R<RagRetrievalEvalVO> evaluateRetrieval(@Valid @RequestBody RagRetrievalEvalRequest request) {
+        return R.ok(ragRetrievalEvaluationService.evaluate(SecurityUtil.getCurrentTenantId(), request));
+    }
+
+    @PostMapping("/rag/reindex")
+    @Operation(summary = "重建存量文档索引（先 dry-run 看数量，再正式提交）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
+    public R<RagReindexService.ReindexReport> reindex(@RequestParam(required = false) String contextId,
+                                                      @RequestParam(defaultValue = "true") boolean dryRun,
+                                                      @RequestParam(required = false) Integer limit) {
+        return R.ok(ragReindexService.reindex(SecurityUtil.getCurrentTenantId(), contextId, dryRun, limit));
+    }
+
+    @PostMapping("/rag/grounding/check")
+    @Operation(summary = "回答接地校验（引用编号/数字出处，判定是否需要人工复核）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
+    public R<GroundingGuardService.GroundingVerdict> checkGrounding(
+            @Valid @RequestBody RagGroundingCheckRequest request) {
+        List<String> chunks = request.getContextChunks() == null ? List.of() : request.getContextChunks();
+        return R.ok(groundingGuardService.check(request.getAnswer(), chunks,
+                ragConfigService.resolveSettings(SecurityUtil.getCurrentTenantId())));
+    }
+
+    @PostMapping("/rag/evaluation/rerank-ab")
+    @Operation(summary = "精排 A/B 对比（仅RRF vs RRF+Cross-Encoder，含质量与成本增量）")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).SYSTEM_CONFIG_MANAGE.getCode())")
+    public R<RagRerankAbVO> evaluateRerankAb(@Valid @RequestBody RagRetrievalEvalRequest request) {
+        return R.ok(ragRetrievalEvaluationService.evaluateRerankAb(SecurityUtil.getCurrentTenantId(), request));
     }
 
     @GetMapping("/rag/operations")

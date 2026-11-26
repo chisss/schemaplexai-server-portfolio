@@ -34,6 +34,7 @@ import static com.schemaplexai.service.semantic.common.SemanticVocabulary.MAPPIN
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.NAME;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.PHYSICAL_FIELD;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.PHYSICAL_OBJECT;
+import static com.schemaplexai.service.semantic.common.SemanticVocabulary.RDF_TYPE;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.REQUIRED;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.RDFS_COMMENT;
 import static com.schemaplexai.service.semantic.common.SemanticVocabulary.RDFS_RANGE;
@@ -163,13 +164,18 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
         List<OntologyStatement> statements = new ArrayList<>();
         Iterator<Quad> quads = view.asDatasetGraph().find(asserted, Node.ANY, Node.ANY, Node.ANY);
         quads.forEachRemaining(quad -> statements.add(statementMapper.fromQuad(quad)));
+        return queryStatements(ref, query, statements);
+    }
+
+    OntologySubgraph queryStatements(OntologyGraphRef ref, GraphQuery query, List<OntologyStatement> statements) {
         statements.sort(Comparator.comparing(this::statementKey));
 
         Map<String, String> labels = collectLabels(statements);
         Set<String> resources = collectResources(statements);
         Set<String> selected = selectResources(resources, statements, labels, query);
         List<String> sortedResources = selected.stream().sorted().toList();
-        int offset = (query.page() - 1) * query.size();
+        long requestedOffset = ((long) query.page() - 1) * query.size();
+        int offset = (int) Math.min(requestedOffset, sortedResources.size());
         int end = Math.min(offset + query.size(), sortedResources.size());
         List<String> pageResources = offset >= sortedResources.size()
                 ? List.of()
@@ -181,6 +187,8 @@ public class JenaOntologyStoreAdapter implements OntologyStorePort {
         List<OntologyEdge> edges = statements.stream()
                 .filter(statement -> pageSet.contains(statement.subjectIri()))
                 .filter(statement -> statement.object().kind() != OntologyTerm.Kind.IRI
+                        || RDF_TYPE.equals(statement.predicateIri())
+                        || RDFS_RANGE.equals(statement.predicateIri())
                         || pageSet.contains(statement.object().value()))
                 .map(statement -> new OntologyEdge(
                         statement.subjectIri(), statement.predicateIri(), statement.object()))

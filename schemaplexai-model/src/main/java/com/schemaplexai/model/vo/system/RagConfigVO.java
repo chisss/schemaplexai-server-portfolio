@@ -41,5 +41,49 @@ public class RagConfigVO {
     private Integer rerankerTopN;
     private Double rerankerMinScore;
 
+    // ===== v2：摄入与解析 =====
+    private Integer maxFileSizeMb;
+    private Boolean ingestCodeEnabled;
+    private Boolean ingestExcelEnabled;
+    private String ocrMode;
+    private String ocrModelId;
+    private String ocrModelName;
+    private Integer ocrMaxConcurrency;
+    private Integer ocrMinTextChars;
+
+    // ===== v2：切分策略 =====
+    private Boolean sectionSplitEnabled;
+    private Boolean codeAstSplitEnabled;
+    private Boolean tableBlockSplitEnabled;
+    private Boolean chunkAnchorEnabled;
+
+    // ===== v2：索引与召回 =====
+    private Boolean bm25Enabled;
+    private Integer bm25TopK;
+    private Integer vectorTopK;
+    private Boolean prefilterRequired;
+
+    // ===== v2：融合与重排 =====
+    private Integer rrfK;
+    private Integer fusionTopN;
+    private String rerankPolicy;
+    private Integer rerankTimeoutMs;
+    private Integer maxFilesPerContext;
+    private Boolean entityOverlapFilterEnabled;
+    private Integer contextTokenBudget;
+    private Boolean keywordFastPathEnabled;
+
+    // ===== v2：检索缓存 =====
+    private Boolean retrievalCacheEnabled;
+    private Integer retrievalCacheTtlSeconds;
+
+    // ===== v2：生成与合规 =====
+    private Boolean citationRequired;
+    private Boolean hitlOnLowFaithfulness;
+    private Double faithfulnessThreshold;
+
+    // ===== v2：评测 =====
+    private Integer evalRecallK;
+
     private LocalDateTime updatedAt;
 }

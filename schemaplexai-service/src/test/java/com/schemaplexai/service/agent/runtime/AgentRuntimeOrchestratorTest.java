@@ -15,6 +15,7 @@ import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
+import com.schemaplexai.service.agent.ontology.AgentOntologyRuntimeContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -38,6 +39,29 @@ import static org.mockito.Mockito.when;
  * executionMode 恢复值与解析后的 sandboxPolicy，并原样传给策略。
  */
 class AgentRuntimeOrchestratorTest {
+
+    @Test
+    void shouldPassTrustedOntologyContextToSoloOnStartAndResume() {
+        Fixture fixture = new Fixture("solo");
+        fixture.execution.setOntologyPrivate(true);
+        var ontologyCard = List.of("已发布业务定义 Publisher v1");
+        when(fixture.ontology.start(fixture.agent, fixture.execution)).thenReturn(ontologyCard);
+        when(fixture.ontology.resume(fixture.agent, fixture.execution)).thenReturn(ontologyCard);
+        when(fixture.executions.updateById(any(AgentExecution.class))).thenReturn(1);
+        var context = AgentExecutionContext.builder().executionId("exec").agentId("agent")
+                .ontologyContextAllowed(true)
+                .inputContext(Map.of("ontologyBindings", "用户假冒绑定"))
+                .additionalSystemContexts(List.of("其他运行时上下文")).build();
+
+        fixture.runtime.execute(context);
+
+        assertThat(context.getAdditionalSystemContexts()).containsExactly("已发布业务定义 Publisher v1", "其他运行时上下文");
+        assertThat(context.isOntologyPrivate()).isTrue();
+        assertThat(context.isTemporaryChat()).isTrue();
+        assertThat(context.getMemoryWriteEnabled()).isFalse();
+        assertThat(fixture.resume(new AgentExecutionInputDTO()).getAdditionalSystemContexts())
+                .containsExactly("已发布业务定义 Publisher v1");
+    }
 
     @Test
     void shouldFreezeDesktopVerificationCommandOnStartAndReuseItAfterAnAdminEdit() {
@@ -74,7 +98,7 @@ class AgentRuntimeOrchestratorTest {
         AgentRuntimeStrategy strategy = mock(AgentRuntimeStrategy.class);
         AgentRuntimeOrchestrator orchestrator = new AgentRuntimeOrchestrator(
                 agentMapper, agentExecutionMapper, strategyFactory, sandboxPolicyResolver, agentConfigHandler,
-                mock(AgentLogService.class));
+                mock(AgentLogService.class), mock(AgentOntologyRuntimeContext.class));
 
         Agent agent = new Agent();
         agent.setId("agent-1");
@@ -266,6 +290,7 @@ class AgentRuntimeOrchestratorTest {
         private final Agent agent = new Agent();
         private final AgentExecution execution = new AgentExecution();
         private final AgentRuntimeOrchestrator runtime;
+        private final AgentOntologyRuntimeContext ontology = mock(AgentOntologyRuntimeContext.class);
 
         private Fixture(String agentType) {
             AgentMapper agents = mock(AgentMapper.class);
@@ -283,7 +308,8 @@ class AgentRuntimeOrchestratorTest {
             when(configs.loadConfigs("agent")).thenReturn(Collections.emptyList());
             when(sandbox.resolve(eq(agent), any())).thenReturn(SandboxPolicy.builder().build());
             when(sandbox.toSnapshot(any())).thenReturn(Collections.emptyMap());
-            runtime = new AgentRuntimeOrchestrator(agents, executions, strategies, sandbox, configs, mock(AgentLogService.class));
+            runtime = new AgentRuntimeOrchestrator(agents, executions, strategies, sandbox, configs,
+                    mock(AgentLogService.class), ontology);
         }
 
         private AgentExecutionContext resume(AgentExecutionInputDTO input) {

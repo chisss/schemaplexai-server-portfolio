@@ -9,13 +9,19 @@ public record QueryFilter(
         String operator,
         String value,
         String physicalObject,
-        String physicalField) {
+        String physicalField,
+        boolean textValue) {
+
+    public QueryFilter(String iri, String alias, String operator, String value, String physicalObject,
+                       String physicalField) {
+        this(iri, alias, operator, value, physicalObject, physicalField, false);
+    }
 
     public QueryFilter {
         iri = requireText(iri, "iri");
         alias = requireText(alias, "alias");
         operator = requireText(operator, "operator");
-        value = requireText(value, "value");
+        value = textValue ? Objects.requireNonNull(value, "value is required") : requireText(value, "value");
         physicalObject = requireText(physicalObject, "physicalObject");
         physicalField = requireText(physicalField, "physicalField");
     }

@@ -2,6 +2,7 @@ package com.schemaplexai.dao.mapper.semantic;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.schemaplexai.model.entity.semantic.SemanticModelEntity;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -13,6 +14,13 @@ import java.util.List;
 @Mapper
 public interface SemanticModelMapper extends BaseMapper<SemanticModelEntity> {
 
+    @Insert("""
+            INSERT INTO sf_semantic_model(id, tenant_id, name, domain, scope_id, description, status, revision)
+            VALUES (CAST(#{id} AS UUID), CAST(#{tenantId} AS UUID), #{name}, #{domain},
+                    CAST(#{scopeId} AS UUID), #{description}, #{status}, #{revision})
+            """)
+    int insertOwned(SemanticModelEntity model);
+
     @Select("""
             SELECT * FROM sf_semantic_model
             WHERE tenant_id = CAST(#{tenantId} AS UUID)
@@ -23,6 +31,15 @@ public interface SemanticModelMapper extends BaseMapper<SemanticModelEntity> {
     SemanticModelEntity selectOwned(
             @Param("tenantId") String tenantId,
             @Param("modelId") String modelId);
+
+    @Select("""
+            SELECT * FROM sf_semantic_model
+            WHERE tenant_id = CAST(#{tenantId} AS UUID)
+              AND id = CAST(#{modelId} AS UUID)
+              AND deleted = 0
+            FOR UPDATE
+            """)
+    SemanticModelEntity lockOwned(@Param("tenantId") String tenantId, @Param("modelId") String modelId);
 
     @Select("""
             SELECT * FROM sf_semantic_model
@@ -48,6 +65,7 @@ public interface SemanticModelMapper extends BaseMapper<SemanticModelEntity> {
             UPDATE sf_semantic_model
             SET name = #{entity.name},
                 domain = #{entity.domain},
+                scope_id = CAST(#{entity.scopeId} AS UUID),
                 description = #{entity.description},
                 active_version_id = CAST(#{entity.activeVersionId} AS UUID),
                 status = #{entity.status},

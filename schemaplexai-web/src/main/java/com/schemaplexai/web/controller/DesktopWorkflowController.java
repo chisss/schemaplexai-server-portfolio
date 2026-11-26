@@ -12,11 +12,21 @@ import jakarta.validation.constraints.Size;
 import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
+/**
+ * 员工侧桌面自助入口。
+ *
+ * <p>入口只声明「登录 + 个人自助权限」；真正的资源级授权在 service：
+ * 所有查询按 {@code Employee.current()} 的租户与用户过滤，跨用户资源一律不可见。
+ * 把细粒度判定留在服务层，是因为同一条端点常按业务类型对应不同权限码（如审批决策），
+ * 注解无法表达，硬写只会与 service 口径漂移。
+ */
 @Validated
+@PreAuthorize("@authorizationService.hasPermission('self:service')")
 @RestController
 @RequestMapping("/desktop/workflows")
 @RequiredArgsConstructor

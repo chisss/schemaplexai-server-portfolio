@@ -12,10 +12,29 @@ public record QueryIntent(
         List<QueryFilter> filters,
         QueryTimeRange timeRange,
         int limit,
-        QueryOutput output) {
+        QueryOutput output,
+        String releaseScope,
+        boolean exploratory) {
+
+    public QueryIntent(String semanticVersionId, String sourceId, List<QueryMetric> metrics,
+                       List<QueryDimension> dimensions, List<QueryFilter> filters, QueryTimeRange timeRange,
+                       int limit, QueryOutput output, String releaseScope) {
+        this(semanticVersionId, sourceId, metrics, dimensions, filters, timeRange, limit, output, releaseScope, false);
+    }
+
+    public QueryIntent(String semanticVersionId, String sourceId, List<QueryMetric> metrics,
+                       List<QueryDimension> dimensions, List<QueryFilter> filters, QueryTimeRange timeRange,
+                       int limit, QueryOutput output) {
+        this(semanticVersionId, sourceId, metrics, dimensions, filters, timeRange, limit, output, null, false);
+    }
 
     public QueryIntent {
-        semanticVersionId = requireText(semanticVersionId, "semanticVersionId");
+        if (!exploratory || semanticVersionId != null) {
+            semanticVersionId = requireText(semanticVersionId, "semanticVersionId");
+        }
+        if (exploratory && (releaseScope == null || releaseScope.isBlank())) {
+            throw new IllegalArgumentException("exploratory queries require an authorized release scope");
+        }
         sourceId = requireText(sourceId, "sourceId");
         metrics = copy(metrics);
         dimensions = copy(dimensions);

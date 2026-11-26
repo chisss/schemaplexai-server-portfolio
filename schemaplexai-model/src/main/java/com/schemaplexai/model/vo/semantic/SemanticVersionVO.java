@@ -15,5 +15,6 @@ public record SemanticVersionVO(
         long revision,
         LocalDateTime publishedAt,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt) {
+        LocalDateTime updatedAt,
+        SemanticPublishVO.Readiness readiness) {
 }

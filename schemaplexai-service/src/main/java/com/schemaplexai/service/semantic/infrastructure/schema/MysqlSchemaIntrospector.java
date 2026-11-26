@@ -2,6 +2,11 @@ package com.schemaplexai.service.semantic.infrastructure.schema;
 
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
+import java.util.HexFormat;
+import java.util.Set;
+import java.util.stream.Collectors;
+
 /** MySQL information_schema 扫描适配器。 */
 @Component
 public class MysqlSchemaIntrospector extends AbstractRelationalSchemaIntrospector {
@@ -14,7 +19,7 @@ public class MysqlSchemaIntrospector extends AbstractRelationalSchemaIntrospecto
             FROM information_schema.columns c
             JOIN information_schema.tables t
               ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-            WHERE c.table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+            WHERE c.table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')%s
             ORDER BY c.table_schema, c.table_name, c.ordinal_position
             """;
 
@@ -28,7 +33,7 @@ public class MysqlSchemaIntrospector extends AbstractRelationalSchemaIntrospecto
             JOIN information_schema.key_column_usage kcu
               ON kcu.constraint_schema = tc.constraint_schema AND kcu.constraint_name = tc.constraint_name
              AND kcu.table_name = tc.table_name
-            WHERE tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
+            WHERE tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')%s
             ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position
             """;
 
@@ -37,6 +42,7 @@ public class MysqlSchemaIntrospector extends AbstractRelationalSchemaIntrospecto
                    index_name, GROUP_CONCAT(column_name ORDER BY seq_in_index) AS columns,
                    (non_unique = 0) AS is_unique, index_type
             FROM information_schema.statistics
+            WHERE table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')%s
             GROUP BY table_schema, table_name, index_name, non_unique, index_type
             ORDER BY table_schema, table_name, index_name
             """;
@@ -52,11 +58,35 @@ public class MysqlSchemaIntrospector extends AbstractRelationalSchemaIntrospecto
     }
 
     @Override
-    protected String columnsQuery() { return COLUMNS; }
+    protected String columnsQuery(String schema, Set<String> objects) {
+        return COLUMNS.formatted(scopePredicate("c.", schema, objects));
+    }
 
     @Override
-    protected String constraintsQuery() { return CONSTRAINTS; }
+    protected String constraintsQuery(String schema, Set<String> objects) {
+        return CONSTRAINTS.formatted(scopePredicate("tc.", schema, objects));
+    }
 
     @Override
-    protected String indexesQuery() { return INDEXES; }
+    protected String indexesQuery(String schema, Set<String> objects) {
+        return INDEXES.formatted(scopePredicate("", schema, objects));
+    }
+
+    private String scopePredicate(String qualifier, String schema, Set<String> objects) {
+        StringBuilder sql = new StringBuilder();
+        if (schema != null) {
+            sql.append(" AND ").append(qualifier).append("table_schema = ").append(mysqlString(schema));
+        }
+        if (!objects.isEmpty()) {
+            sql.append(" AND ").append(qualifier).append("table_name IN (")
+                    .append(objects.stream().sorted().map(this::mysqlString).collect(Collectors.joining(", ")))
+                    .append(')');
+        }
+        return sql.toString();
+    }
+
+    private String mysqlString(String value) {
+        String encoded = HexFormat.of().formatHex(value.getBytes(StandardCharsets.UTF_8));
+        return "CONVERT(X'" + encoded + "' USING utf8mb4)";
+    }
 }

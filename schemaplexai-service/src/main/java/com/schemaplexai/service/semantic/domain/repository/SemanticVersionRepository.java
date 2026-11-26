@@ -16,6 +16,8 @@ public interface SemanticVersionRepository {
 
     Optional<SemanticVersion> findByTenantAndId(String tenantId, String versionId);
 
+    Optional<SemanticVersion> lockByTenantAndId(String tenantId, String versionId);
+
     List<SemanticVersion> findAllByTenantAndModel(String tenantId, String modelId);
 
     int nextVersionNo(String tenantId, String modelId);

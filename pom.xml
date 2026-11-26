@@ -49,6 +49,9 @@
         <jgit.version>6.10.0.202406032230-r</jgit.version>
         <langchain4j.version>1.24.0</langchain4j.version>
         <langchain4j.beta.version>1.24.0-beta34</langchain4j.beta.version>
+        <lucene.version>9.11.1</lucene.version>
+        <!-- 显式提升：Tika 的 zip 探测链 (commons-compress 1.28+) 需要 SystemProperties.getUserName（3.13+） -->
+        <commons-lang3.version>3.17.0</commons-lang3.version>
         <!-- Community 独立发布，版本不随核心 BOM 同步 -->
         <langchain4j.community.version>1.23.0-beta33</langchain4j.community.version>
         <!-- 1.9.10 尚未发布 Maven Central，使用最新可解析正式版 -->
@@ -59,6 +62,14 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- 依赖收敛：commons-compress 1.28+ 依赖 commons-lang3 3.13+ 的 SystemProperties，
+                 若被其他 BOM 拉低到 3.12 会在 Tika MIME 探测时抛 NoSuchMethodError。
+                 显式声明放在最前面，保证优先于后续导入的 BOM。 -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>${commons-lang3.version}</version>
+            </dependency>
             <!-- 内部模块 -->
             <dependency>
                 <groupId>com.schemaplexai</groupId>

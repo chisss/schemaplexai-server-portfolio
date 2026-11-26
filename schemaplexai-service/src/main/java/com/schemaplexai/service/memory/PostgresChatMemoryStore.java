@@ -70,6 +70,7 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
                         (execution_id = {0} OR NOT EXISTS (
                             SELECT 1 FROM sf_agent_execution source
                             WHERE source.id::text = sf_chat_message.execution_id
+                            AND source.tenant_id = sf_chat_message.tenant_id
                             AND (source.temporary_chat IS TRUE OR source.memory_project_id IS DISTINCT FROM (
                                 SELECT current_run.memory_project_id FROM sf_agent_execution current_run
                                 WHERE current_run.id::text = {0}
@@ -77,6 +78,15 @@ public class PostgresChatMemoryStore implements ChatMemoryStore {
                         ))
                         """, executionId)
                 .last("ORDER BY turn_index DESC NULLS LAST, message_index DESC LIMIT " + limit));
+        return recent.reversed().stream().map(this::toLangChain4jMessage).toList();
+    }
+
+    public List<ChatMessage> loadExecutionWindow(String conversationId, String executionId, int limit) {
+        List<ChatMessageEntity> recent = chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessageEntity>()
+                .eq(ChatMessageEntity::getConversationId, conversationId)
+                .eq(ChatMessageEntity::getExecutionId, executionId)
+                .orderByDesc(ChatMessageEntity::getMessageIndex)
+                .last("LIMIT " + limit));
         return recent.reversed().stream().map(this::toLangChain4jMessage).toList();
     }
 

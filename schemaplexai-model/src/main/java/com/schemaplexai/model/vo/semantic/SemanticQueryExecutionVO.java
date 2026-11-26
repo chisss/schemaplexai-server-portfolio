@@ -13,5 +13,7 @@ public record SemanticQueryExecutionVO(
         boolean truncated,
         long elapsedMs,
         String auditId,
-        List<String> warnings) {
+        List<String> warnings,
+        String queryPath,
+        SemanticQueryValidationVO validation) {
 }

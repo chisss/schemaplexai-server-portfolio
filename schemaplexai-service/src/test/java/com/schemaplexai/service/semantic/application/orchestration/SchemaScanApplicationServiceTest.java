@@ -3,6 +3,7 @@ package com.schemaplexai.service.semantic.application.orchestration;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.service.database.DatabaseSourceService;
 import com.schemaplexai.service.semantic.application.command.ScanSchemaCommand;
 import com.schemaplexai.service.semantic.domain.model.SchemaSnapshot;
 import com.schemaplexai.service.semantic.domain.model.schema.DatabaseSchema;
@@ -40,12 +41,15 @@ class SchemaScanApplicationServiceTest {
     private SchemaIntrospectorPort introspector;
     @Mock
     private SchemaMetadataSession session;
+    @Mock
+    private DatabaseSourceService databaseSourceService;
 
     private SchemaScanApplicationService service;
 
     @BeforeEach
     void setUp() {
-        service = new SchemaScanApplicationService(sessionFactory, repository, List.of(introspector));
+        service = new SchemaScanApplicationService(sessionFactory, repository, List.of(introspector),
+                databaseSourceService);
         SecurityUtil.setCurrentTenantId("tenant-a");
     }
 
@@ -106,5 +110,22 @@ class SchemaScanApplicationServiceTest {
                 .isInstanceOfSatisfying(BusinessException.class,
                         exception -> assertThat(exception.getCode())
                                 .isEqualTo(ResultCode.SCHEMA_SOURCE_UNSUPPORTED.getCode()));
+    }
+
+    @Test
+    void readsOnlyTenantSnapshotBelongingToRequestedSource() {
+        String id = "5aec90e8-badf-4b59-917e-eae78154b457";
+        SchemaSnapshot snapshot = SchemaSnapshot.create(id, "tenant-a", "source-1", "fingerprint",
+                new DatabaseSchema("postgresql", null, "public", List.of(), Set.of(), List.of()),
+                java.time.LocalDateTime.now());
+        when(repository.findByTenantAndId("tenant-a", id)).thenReturn(Optional.of(snapshot));
+
+        assertThatThrownBy(() -> service.getSnapshot("source-2", id))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getCode()).isEqualTo(ResultCode.SCHEMA_SNAPSHOT_NOT_FOUND.getCode()));
+        verify(databaseSourceService, never()).getById(any());
+
+        assertThat(service.getSnapshot("source-1", id)).isSameAs(snapshot);
+        verify(databaseSourceService).getById("source-1");
     }
 }

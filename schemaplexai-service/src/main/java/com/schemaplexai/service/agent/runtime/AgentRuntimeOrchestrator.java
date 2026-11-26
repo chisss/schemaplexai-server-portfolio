@@ -21,6 +21,7 @@ import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.agent.execution.SandboxPolicyResolver;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
+import com.schemaplexai.service.agent.ontology.AgentOntologyRuntimeContext;
 import com.schemaplexai.service.desktop.DesktopExecutionTarget;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -54,6 +55,7 @@ public class AgentRuntimeOrchestrator {
     private final SandboxPolicyResolver sandboxPolicyResolver;
     private final AgentConfigHandler agentConfigHandler;
     private final AgentLogService agentLogService;
+    private final AgentOntologyRuntimeContext ontologyContext;
 
     public CompletableFuture<AgentExecutionResult> execute(AgentExecutionContext context) {
         AgentExecution execution = requireExecution(context.getExecutionId());
@@ -68,6 +70,13 @@ public class AgentRuntimeOrchestrator {
         }
         List<AgentConfig> configs = agentConfigHandler.loadConfigs(agent.getId());
         applyOutputFormatContext(configs, context);
+        if (context.isOntologyContextAllowed() && Boolean.TRUE.equals(execution.getOntologyPrivate()) && !context.isEvaluation()) {
+            List<String> frozen = ontologyContext.start(agent, execution);
+            if (frozen.isEmpty()) {
+                throw new BusinessException(ResultCode.SEMANTIC_VERSION_STATUS_INVALID, "业务本体绑定已变化，请重新发起执行");
+            }
+            appendOntologyContext(context, frozen);
+        }
         context.setDesktopVerificationCommand(DesktopExecutionTarget.from(context.getInputContext()) == null
                 ? null : configValue(configs, DESKTOP_VERIFICATION_CONFIG));
         SandboxPolicy sandboxPolicy = sandboxPolicyResolver.resolve(agent, context);
@@ -76,13 +85,19 @@ public class AgentRuntimeOrchestrator {
         AgentExecution update = new AgentExecution();
         update.setId(execution.getId());
         update.setRuntimeEngine(runtimeEngine.getCode());
-        if (execution.getTemporaryChat() == null) {
+        if (context.isOntologyPrivate()) {
+            update.setOntologyPrivate(true);
+            update.setTemporaryChat(true);
+            update.setMemoryWriteEnabled(false);
+        } else if (execution.getTemporaryChat() == null) {
             // 内部首次执行入口可能先创建没有策略快照的 queued 记录。
             update.setTemporaryChat(context.isTemporaryChat());
             update.setMemoryWriteEnabled(context.getMemoryWriteEnabled());
         }
         update.setSandboxPolicySnapshot(buildRuntimeSnapshot(context, sandboxPolicy));
-        agentExecutionMapper.updateById(update);
+        if (agentExecutionMapper.updateById(update) != 1 && context.isOntologyPrivate()) {
+            throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
+        }
 
         var strategy = strategyFactory.getStrategy(agent.getAgentType());
         return context.isEvaluation() ? strategy.executeForEvaluation(agent, execution, context)
@@ -124,6 +139,7 @@ public class AgentRuntimeOrchestrator {
                 .outputFormat(snapshotText(snapshot, "outputFormat"))
                 .stream(Boolean.TRUE.equals(snapshot.get("stream")))
                 .temporaryChat(Boolean.TRUE.equals(execution.getTemporaryChat()))
+                .ontologyPrivate(Boolean.TRUE.equals(execution.getOntologyPrivate()))
                 .memoryWriteEnabled(execution.getMemoryWriteEnabled())
                 .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
                 .acceptance(AgentAcceptance.fromSnapshot(snapshot))
@@ -135,6 +151,7 @@ public class AgentRuntimeOrchestrator {
             throw new BusinessException(ResultCode.BAD_REQUEST, "执行沙箱策略已变更，需先核对中断任务");
         }
         context.setSandboxPolicy(policy);
+        restoreOntologyContext(agent, execution, context);
         return strategyFactory.getStrategy(agent.getAgentType()).recover(context);
     }
 
@@ -170,9 +187,11 @@ public class AgentRuntimeOrchestrator {
                 .executionMode(execution.getExecutionMode() != null ? execution.getExecutionMode() : "auto")
                 .systemAgent(Boolean.TRUE.equals(agent.getIsSystemAgent()))
                 .temporaryChat(temporaryChat)
+                .ontologyPrivate(Boolean.TRUE.equals(execution.getOntologyPrivate()))
                 .memoryWriteEnabled(memoryWriteEnabled)
                 .build();
         applyOutputFormatContext(agentConfigHandler.loadConfigs(agent.getId()), context);
+        restoreOntologyContext(agent, execution, context);
         if (parent.getSandboxPolicySnapshot() != null
                 && parent.getSandboxPolicySnapshot().get(DESKTOP_VERIFICATION_SNAPSHOT) instanceof String command) {
             context.setDesktopVerificationCommand(command);
@@ -204,6 +223,31 @@ public class AgentRuntimeOrchestrator {
             return left.longValue() == right.longValue();
         }
         return Objects.equals(current, previous);
+    }
+
+    private void appendOntologyContext(AgentExecutionContext context, List<String> ontology) {
+        if (ontology.isEmpty()) {
+            return;
+        }
+        context.setOntologyPrivate(true);
+        context.setTemporaryChat(true);
+        context.setMemoryWriteEnabled(false);
+        List<String> combined = new ArrayList<>(ontology);
+        if (context.getAdditionalSystemContexts() != null) {
+            combined.addAll(context.getAdditionalSystemContexts());
+        }
+        context.setAdditionalSystemContexts(combined);
+    }
+
+    private void restoreOntologyContext(Agent agent, AgentExecution execution, AgentExecutionContext context) {
+        if (!context.isOntologyPrivate()) {
+            return;
+        }
+        List<String> frozen = ontologyContext.resume(agent, execution);
+        if (frozen.isEmpty()) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "缺少本次执行已固定的本体范围，请新建执行");
+        }
+        appendOntologyContext(context, frozen);
     }
 
     private String snapshotText(Map<String, Object> snapshot, String key) {

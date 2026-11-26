@@ -13,6 +13,7 @@ public class SemanticModelEntity extends BaseEntity {
 
     private String name;
     private String domain;
+    private String scopeId;
     private String description;
     private String activeVersionId;
     private String status;

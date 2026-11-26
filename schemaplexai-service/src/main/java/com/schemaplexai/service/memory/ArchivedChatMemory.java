@@ -20,11 +20,17 @@ public final class ArchivedChatMemory implements ChatMemory {
 
     public ArchivedChatMemory(String conversationId, String executionId, CompositeChatMemoryStore store,
                               ChatMemory window, int replayLimit) {
+        this(conversationId, executionId, store, window, replayLimit, false);
+    }
+
+    public ArchivedChatMemory(String conversationId, String executionId, CompositeChatMemoryStore store,
+                              ChatMemory window, int replayLimit, boolean currentExecutionOnly) {
         this.conversationId = conversationId;
         this.executionId = executionId;
         this.store = store;
         this.window = window;
-        set(store.loadWindow(conversationId, executionId, replayLimit));
+        set(currentExecutionOnly ? store.loadExecutionWindow(conversationId, executionId, replayLimit)
+                : store.loadWindow(conversationId, executionId, replayLimit));
     }
 
     @Override

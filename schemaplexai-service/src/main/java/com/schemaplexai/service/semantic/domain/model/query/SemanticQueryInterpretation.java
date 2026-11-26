@@ -16,7 +16,7 @@ public record SemanticQueryInterpretation(
     public SemanticQueryInterpretation {
         status = Objects.requireNonNull(status, "status is required");
         question = Objects.requireNonNull(question, "question is required").trim();
-        semanticVersionId = Objects.requireNonNull(semanticVersionId, "semanticVersionId is required").trim();
+        semanticVersionId = semanticVersionId == null ? null : semanticVersionId.trim();
         sourceId = Objects.requireNonNull(sourceId, "sourceId is required").trim();
         clarifications = clarifications == null ? List.of() : clarifications.stream().limit(3).toList();
         reasons = reasons == null ? List.of() : List.copyOf(reasons);
@@ -68,5 +68,11 @@ public record SemanticQueryInterpretation(
                 null,
                 List.of(),
                 reasons);
+    }
+
+    public static SemanticQueryInterpretation noMatch(String question, String semanticVersionId, String sourceId) {
+        return new SemanticQueryInterpretation(
+                QueryInterpretationStatus.NO_MATCH, question, semanticVersionId, sourceId,
+                null, List.of(), List.of("未识别到已发布的查询口径"));
     }
 }

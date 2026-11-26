@@ -11,6 +11,8 @@ import com.schemaplexai.service.semantic.domain.model.ontology.OntologyStatement
 import com.schemaplexai.service.semantic.domain.model.ontology.OntologyTerm;
 import com.schemaplexai.service.semantic.domain.model.ontology.PublishPreparation;
 import com.schemaplexai.service.semantic.domain.port.SemanticPublishPort;
+import com.schemaplexai.service.semantic.domain.port.OntologyArtifactCompilerPort;
+import com.schemaplexai.service.semantic.domain.port.OntologyConfigurationStorePort;
 import com.schemaplexai.service.semantic.domain.repository.SemanticModelRepository;
 import com.schemaplexai.service.semantic.domain.repository.SemanticVersionRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -28,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -40,6 +43,10 @@ class SemanticPublishApplicationServiceTest {
     private SemanticVersionRepository versionRepository;
     @Mock
     private SemanticPublishPort publishPort;
+    @Mock
+    private OntologyConfigurationStorePort configurationStore;
+    @Mock
+    private OntologyArtifactCompilerPort artifactCompiler;
 
     private SemanticPublishApplicationService service;
     private SemanticModel model;
@@ -47,7 +54,9 @@ class SemanticPublishApplicationServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new SemanticPublishApplicationService(modelRepository, versionRepository, publishPort);
+        service = new SemanticPublishApplicationService(
+                modelRepository, versionRepository, publishPort, configurationStore, artifactCompiler,
+                mock(OntologyConfigurationApplicationService.class));
         model = SemanticModel.create("model-1", "tenant-a", "订单", "sales", null);
         version = SemanticVersion.createDraft(
                 "version-1", "tenant-a", "model-1", 1,

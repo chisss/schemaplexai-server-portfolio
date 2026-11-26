@@ -1,20 +1,36 @@
 package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.enums.OntologyReleasePurpose;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.result.PageResult;
+import com.schemaplexai.model.vo.database.DatabaseSourceVO;
 import com.schemaplexai.model.dto.semantic.SchemaScanRequest;
 import com.schemaplexai.model.dto.semantic.SemanticModelCreateRequest;
 import com.schemaplexai.model.dto.semantic.SemanticNodeUpdateRequest;
 import com.schemaplexai.model.dto.semantic.SemanticQueryExecutionRequest;
 import com.schemaplexai.model.dto.semantic.SemanticQueryInterpretRequest;
+import com.schemaplexai.service.desktop.DesktopDataService;
 import com.schemaplexai.model.dto.semantic.SemanticVersionActionRequest;
 import com.schemaplexai.model.dto.semantic.SemanticVersionCreateRequest;
 import com.schemaplexai.service.semantic.application.orchestration.OntologyGraphApplicationService;
+import com.schemaplexai.service.database.DatabaseSourceService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticModelApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticPublishApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticQueryApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticQueryExecutionApplicationService;
 import com.schemaplexai.service.semantic.application.orchestration.SemanticVersionApplicationService;
+import com.schemaplexai.service.semantic.application.query.PreparedSemanticQuery;
+import com.schemaplexai.service.semantic.application.query.SemanticQueryDatasetAccess;
+import com.schemaplexai.service.semantic.domain.model.query.CompiledQuery;
+import com.schemaplexai.service.semantic.domain.model.query.QueryColumn;
+import com.schemaplexai.service.semantic.domain.model.query.QueryDialect;
+import com.schemaplexai.service.semantic.domain.model.query.QueryIntent;
+import com.schemaplexai.service.semantic.domain.model.query.QueryMetric;
+import com.schemaplexai.service.semantic.domain.model.query.QueryOutput;
+import com.schemaplexai.service.semantic.domain.model.query.QueryPlan;
+import com.schemaplexai.service.semantic.domain.model.query.SemanticQueryInterpretation;
+import com.schemaplexai.service.semantic.domain.model.query.SignedQueryPlan;
 import com.schemaplexai.web.mapper.SemanticWebMapper;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -33,6 +49,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +70,8 @@ class SemanticControllerContractTest {
     @Mock
     private SemanticQueryExecutionApplicationService executionService;
     @Mock
+    private DesktopDataService datasets;
+    @Mock
     private SemanticWebMapper mapper;
 
     private Validator validator;
@@ -62,9 +82,9 @@ class SemanticControllerContractTest {
     @BeforeEach
     void setUp() {
         validator = Validation.buildDefaultValidatorFactory().getValidator();
-        modelController = new SemanticModelController(modelService, versionService, mapper);
+        modelController = new SemanticModelController(modelService, versionService, mapper, publishService);
         ontologyController = new SemanticOntologyController(graphService, publishService, mapper);
-        queryController = new SemanticQueryController(queryService, executionService);
+        queryController = new SemanticQueryController(queryService, executionService, datasets);
     }
 
     @Test
@@ -81,25 +101,107 @@ class SemanticControllerContractTest {
         assertThat(validator.validate(invalidNode)).hasSize(2);
         assertThat(validator.validate(invalidAction)).hasSize(1);
         assertThat(validator.validate(invalidScan)).hasSize(1);
-        assertThat(validator.validate(new SemanticQueryInterpretRequest(" ", "", "", null))).hasSize(3);
+        assertThat(validator.validate(new SemanticQueryInterpretRequest(" ", "", "", null))).hasSize(1);
         assertThat(validator.validate(new SemanticQueryExecutionRequest(
-                " ", "", "", null, "x".repeat(129), 0, 301))).hasSize(6);
+                " ", "", "", null, "x".repeat(129), 0, 301))).hasSize(4);
+    }
+
+    @Test
+    void listsOnlyDatasetsProvidedByGrantedCatalog() {
+        var dataset = new DesktopDataService.Dataset("ds1", "订单", "source1", "v1", 2, true, false);
+        when(datasets.catalog()).thenReturn(List.of(dataset));
+
+        assertThat(queryController.datasets().getData()).containsExactly(dataset);
+    }
+
+    @Test
+    void reportsTheActualRouteOfReadyPlan() {
+        var interpretation = SemanticQueryInterpretation.rejected("查询金额", "v1", "source1", List.of());
+        var request = new SemanticQueryExecutionRequest("查询金额", "v1", "source1", null, null, 200, 8);
+        var compiled = new CompiledQuery("SQL", "SELECT 1", List.of(), List.of(), List.of());
+        for (boolean structured : List.of(false, true)) {
+            var plan = new QueryPlan("v1", "source1", "postgresql", QueryDialect.POSTGRESQL,
+                    compiled, "hash", List.of(), structured);
+            when(executionService.prepare(eq("查询金额"), eq("v1"), eq("source1"), isNull(), isNull())).thenReturn(
+                    new PreparedSemanticQuery(interpretation, "postgresql", plan, new SignedQueryPlan(plan, "fixture")));
+            assertThat(queryController.plan(request).getData().queryPath())
+                    .isEqualTo(structured ? "PUBLISHED_ONTOLOGY" : "LEGACY_SEMANTIC");
+        }
+        when(executionService.prepare(eq("查询金额"), eq("v1"), eq("source1"), isNull(), isNull())).thenReturn(
+                new PreparedSemanticQuery(interpretation, null, null, null));
+        assertThat(queryController.plan(request).getData().queryPath()).isNull();
+    }
+
+    @Test
+    void derivesBindingFromGrantedDatasetAndShowsTypedExplorationWithoutPhysicalSql() {
+        var access = new SemanticQueryDatasetAccess("ds1", 2, null, "source1", "sales.orders",
+                List.of("units"), "snapshot1", true);
+        when(datasets.queryAccess("ds1")).thenReturn(access);
+        var intent = new QueryIntent(null, "source1",
+                List.of(new QueryMetric("urn:field", "units", "sum", "sales.orders", "units")),
+                List.of(), List.of(), null, 200, new QueryOutput("table", "探索查询"), "binding", true);
+        var interpretation = SemanticQueryInterpretation.ready("合计 units", intent);
+        var compiled = new CompiledQuery("SQL", "SELECT SUM(units) FROM sales.orders", List.of(),
+                List.of(new QueryColumn("metric", "metric_1", "SUM(units)", "urn:field")), List.of());
+        var plan = new QueryPlan(null, "source1", "postgresql", QueryDialect.POSTGRESQL, compiled, "hash",
+                List.of(), true, true);
+        when(executionService.prepare("合计 units", null, "source1", null, access)).thenReturn(
+                new PreparedSemanticQuery(interpretation, "postgresql", plan, new SignedQueryPlan(plan, "fixture")));
+
+        var preview = queryController.plan(
+                new SemanticQueryExecutionRequest("合计 units", null, null, null, null, 200, 8, "ds1")).getData();
+        assertThat(preview.queryPath()).isEqualTo("NL2SQL");
+        assertThat(preview.semanticVersionId()).isNull();
+        assertThat(preview.statement()).isNull();
+        assertThat(preview.columns().getFirst().expression()).isNull();
+        assertThat(preview.intent().metrics().getFirst().aggregation()).isEqualTo("sum");
+        assertThat(preview.intent().metrics().getFirst().physicalObject()).isNull();
+        assertThatThrownBy(() -> queryController.plan(
+                new SemanticQueryExecutionRequest("合计 units", null, "other", null, null, 200, 8, "ds1")))
+                .isInstanceOf(BusinessException.class);
     }
 
     @Test
     void protectsSemanticReadAndWriteEndpointsWithExplicitPermissions() throws Exception {
+        assertPermission(OntologyScopeController.class, "list", "semantic:model:view");
+        assertPermission(OntologyScopeController.class, "create", "semantic:model:manage");
+        assertPermission(OntologySchemaSourceController.class, "list", "database:source:view");
         assertPermission(SemanticModelController.class, "page", "semantic:model:view");
         assertPermission(SemanticModelController.class, "create", "semantic:model:manage");
         assertPermission(SemanticModelController.class, "createVersion", "semantic:model:manage");
         assertPermission(SemanticOntologyController.class, "graph", "semantic:model:view");
         assertPermission(SemanticOntologyController.class, "updateNode", "semantic:model:manage");
-        assertPermission(SemanticOntologyController.class, "publish", "semantic:model:manage");
+        assertPermission(SemanticOntologyController.class, "publish", "semantic:model:publish");
+        assertPermission(SemanticOntologyController.class, "validate", "semantic:model:manage");
+        assertPermission(SemanticOntologyController.class, "validate", "semantic:model:publish");
+        assertPermission(DatabaseSchemaController.class, "snapshotDetail", "database:source:view");
+        assertPermission(OntologyConfigurationController.class, "get", "semantic:model:view");
+        assertPermission(OntologyConfigurationController.class, "save", "semantic:model:manage");
         assertPermission(DatabaseSchemaController.class, "scan", "database:source:manage");
         assertPermission(DatabaseSchemaController.class, "snapshots", "database:source:view");
         assertPermission(SemanticQueryController.class, "interpret", "semantic:query:interpret");
+        assertPermission(SemanticQueryController.class, "datasets", "semantic:query:interpret");
         assertPermission(SemanticQueryController.class, "plan", "semantic:query:interpret");
         assertPermission(SemanticQueryController.class, "explain", "semantic:query:execute");
         assertPermission(SemanticQueryController.class, "execute", "semantic:query:execute");
+    }
+
+    @Test
+    void schemaSourcePickerReturnsMetadataOnly() {
+        DatabaseSourceService sources = mock(DatabaseSourceService.class);
+        DatabaseSourceVO source = new DatabaseSourceVO();
+        source.setId("source-1");
+        source.setName("工单库");
+        source.setDatabaseType("postgresql");
+        source.setDatabase("support");
+        source.setSchema("public");
+        source.setUsername("excluded");
+        when(sources.page(any())).thenReturn(new PageResult<>(List.of(source), 1, 1, 100));
+
+        var data = new OntologySchemaSourceController(sources).list(1, 100, "工单").getData();
+
+        assertThat(data.getRecords()).containsExactly(
+                new OntologySchemaSourceController.SourceOption("source-1", "工单库", "postgresql", "support", "public"));
     }
 
     @Test
@@ -126,7 +228,7 @@ class SemanticControllerContractTest {
                 "amount", "订单金额", null, List.of(), "decimal", true, null, 3);
         when(graphService.updateNode(eq("version-1"), eq("urn:order:amount"), any(), eq(3L)))
                 .thenThrow(new BusinessException(ResultCode.SEMANTIC_REVISION_CONFLICT));
-        when(publishService.publish("version-1", 3))
+        when(publishService.publish("version-1", 3, OntologyReleasePurpose.CONTEXT))
                 .thenThrow(new BusinessException(ResultCode.SEMANTIC_REVISION_CONFLICT));
 
         assertConflict(() -> ontologyController.updateNode("version-1", "urn:order:amount", update));

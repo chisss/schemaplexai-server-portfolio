@@ -17,7 +17,12 @@ public record SemanticQueryPlanVO(
         List<LineageVO> lineage,
         List<String> warnings,
         List<SemanticQueryInterpretVO.ClarificationVO> clarifications,
-        List<String> reasons) {
+        List<String> reasons,
+        String queryPath,
+        String routeReason,
+        SemanticQueryInterpretVO.QueryIntentVO intent,
+        String datasetId,
+        String datasetName) {
 
     public record ColumnVO(String role, String alias, String expression, String semanticIri) {
     }

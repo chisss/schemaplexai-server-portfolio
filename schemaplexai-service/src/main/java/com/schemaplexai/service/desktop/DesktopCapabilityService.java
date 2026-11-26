@@ -33,10 +33,12 @@ public class DesktopCapabilityService {
     private final JdbcTemplate jdbc;
 
     public record Bootstrap(String userId, String tenantId, Card defaultAgent, boolean canCreateSkill,
-                            boolean canCreateExpert, boolean canRunWorkflow, boolean canManageWorkflow) {}
+                            boolean canCreateExpert, boolean canRunWorkflow, boolean canManageWorkflow,
+                            boolean canViewOntology, boolean canManageOntology, boolean canPublishOntology,
+                            boolean canViewOntologySources, boolean canScanOntologySources) {}
 
     public record Card(String id, String name, String description, String type, String status,
-                       List<String> tags, String code, boolean canUse) {}
+                       List<String> tags, String code, boolean canUse, boolean isSystemAgent) {}
 
     public Bootstrap bootstrap() {
         Employee employee = Employee.current();
@@ -46,7 +48,12 @@ public class DesktopCapabilityService {
                 assistant != null && "active".equals(assistant.getStatus())
                         && permission(PermissionCodeEnum.AGENT_EXECUTE) ? expertCard(assistant) : null,
                 agentManage, agentManage, permission(PermissionCodeEnum.WORKFLOW_EXECUTE),
-                permission(PermissionCodeEnum.WORKFLOW_MANAGE));
+                permission(PermissionCodeEnum.WORKFLOW_MANAGE),
+                authorization.hasPermission("semantic:model:view"),
+                authorization.hasPermission("semantic:model:manage"),
+                authorization.hasPermission("semantic:model:publish"),
+                authorization.hasPermission("database:source:view"),
+                permission(PermissionCodeEnum.DATABASE_SOURCE_MANAGE));
     }
 
     public PageResult<Card> experts(String keyword, String type, int page, int size) {
@@ -166,14 +173,15 @@ public class DesktopCapabilityService {
                 : Arrays.stream(agent.getAgentTag().split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
         return new Card(agent.getId(), agent.getName(), agent.getDescription(), agent.getAgentType(),
                 agent.getStatus(), tags, null,
-                "active".equals(agent.getStatus()) && permission(PermissionCodeEnum.AGENT_EXECUTE));
+                "active".equals(agent.getStatus()) && permission(PermissionCodeEnum.AGENT_EXECUTE),
+                Boolean.TRUE.equals(agent.getIsSystemAgent()));
     }
 
     private Card skillCard(Skill skill) {
         String name = StringUtils.hasText(skill.getDisplayName()) ? skill.getDisplayName() : skill.getName();
         return new Card(skill.getId(), name, skill.getDescription(), skill.getCategory(),
                 skill.getStatus(), List.of(), skill.getName(),
-                "active".equals(skill.getStatus()) && permission(PermissionCodeEnum.AGENT_EXECUTE));
+                "active".equals(skill.getStatus()) && permission(PermissionCodeEnum.AGENT_EXECUTE), false);
     }
 
     private boolean permission(PermissionCodeEnum permission) {

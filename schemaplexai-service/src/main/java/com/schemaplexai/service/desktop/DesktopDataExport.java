@@ -1,5 +1,6 @@
 package com.schemaplexai.service.desktop;
 
+import com.schemaplexai.model.vo.semantic.SemanticQueryValidationVO;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import java.io.ByteArrayOutputStream;
@@ -13,7 +14,13 @@ import java.util.Map;
 
 final class DesktopDataExport {
     byte[] encode(String format, List<String> keys, List<Map<String, Object>> rows, boolean truncated) {
-        return "csv".equals(format) ? csv(keys, rows, truncated) : workbook(keys, rows, truncated);
+        return encode(format, keys, rows, truncated, null);
+    }
+
+    byte[] encode(String format, List<String> keys, List<Map<String, Object>> rows, boolean truncated,
+                  SemanticQueryValidationVO validation) {
+        return "csv".equals(format) ? csv(keys, rows, truncated)
+                : workbook(keys, rows, truncated, validationSummary(validation));
     }
 
     private byte[] csv(List<String> keys, List<Map<String, Object>> rows, boolean truncated) {
@@ -41,7 +48,7 @@ final class DesktopDataExport {
         return !text.isEmpty() && "=+-@＝＋－＠".indexOf(text.charAt(0)) >= 0;
     }
 
-    private byte[] workbook(List<String> keys, List<Map<String, Object>> rows, boolean truncated) {
+    private byte[] workbook(List<String> keys, List<Map<String, Object>> rows, boolean truncated, List<String> summary) {
         try (var workbook = new XSSFWorkbook(); var bytes = new ByteArrayOutputStream()) {
             var sheet = workbook.createSheet("查询结果");
             var dates = workbook.createCellStyle();
@@ -76,6 +83,9 @@ final class DesktopDataExport {
             var info = workbook.createSheet("导出说明");
             info.createRow(0).createCell(0).setCellValue(truncated ? "结果已截断，仅包含当前查询快照" : "当前查询快照");
             info.createRow(1).createCell(0).setCellValue("已导出 " + rows.size() + " 行");
+            for (int indexInfo = 0; indexInfo < summary.size(); indexInfo++) {
+                info.createRow(indexInfo + 2).createCell(0).setCellValue(summary.get(indexInfo));
+            }
             workbook.write(bytes);
             return bytes.toByteArray();
         } catch (IOException ex) {
@@ -86,5 +96,21 @@ final class DesktopDataExport {
     private boolean safeNumeric(Number number) {
         if (!Double.isFinite(number.doubleValue())) return false;
         return new BigDecimal(number.toString()).stripTrailingZeros().precision() <= 15;
+    }
+
+    private List<String> validationSummary(SemanticQueryValidationVO validation) {
+        if (validation == null) {
+            return List.of();
+        }
+        String technical = "PASSED".equals(validation.technicalStatus()) ? "技术校验已通过" : "技术校验未执行";
+        String business = switch (validation.businessStatus()) {
+            case "MATCHED" -> "业务对账一致";
+            case "MISMATCH" -> "业务对账有差异";
+            default -> "业务对账未执行";
+        };
+        if (validation.baselineLabel() != null) {
+            business += "（" + validation.baselineLabel() + "）";
+        }
+        return List.of(technical, business);
     }
 }

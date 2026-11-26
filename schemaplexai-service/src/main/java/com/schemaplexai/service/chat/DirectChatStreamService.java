@@ -162,6 +162,10 @@ public class DirectChatStreamService {
     private List<ChatMessageEntity> loadHistoryEntities(String conversationId) {
         return chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessageEntity>()
                 .eq(ChatMessageEntity::getConversationId, conversationId)
+                .apply("""
+                        NOT EXISTS (SELECT 1 FROM sf_agent_execution origin WHERE origin.id::text = sf_chat_message.execution_id
+                            AND origin.tenant_id = sf_chat_message.tenant_id AND origin.ontology_private)
+                        """)
                 .orderByAsc(ChatMessageEntity::getMessageIndex));
     }
 

@@ -2,7 +2,7 @@
 
 业务服务模块，承载数据库数据源、Agent 执行、工具治理和语义查询的应用编排与基础设施适配。
 
-旧 PostgreSQL 库升级时将 Agent 记忆正文列扩展为 `TEXT`，迁移脚本由完整交付环境提供。`AgentMemoryContentMigrationPostgresTest` 使用 `DB_TEST_URL` 在临时表上验证长记忆和兼容性。
+旧 PostgreSQL 库的 Agent 记忆正文列通过 `db/migration/agent-memory-content-text.sql` 升级。`AgentMemoryContentMigrationPostgresTest` 使用 `DB_TEST_URL` 在临时表上验证长记忆和兼容性。
 
 ## 企业 Desktop 执行桥
 
@@ -29,11 +29,14 @@
 
 语义控制面位于 `com.schemaplexai.service.semantic`：
 
+业务本体支持按租户的系统和业务域归属。结构化草稿和已发布的 RDF 产物使用 PostgreSQL 版本行和事务，兼容查询与浏览已有 TDB2 图。当前结构化发布开放 Agent 上下文，查询指标与业务证据校验显示为待配置。配置助手从 SQL 初始化的固定身份读取提示，按授权和使用者挑选的 Schema 生成候选。Solo Agent 可引用已发布定义，实际版本在运行启动时固定。
+
+
 - `domain` 保存模型和版本聚合、仓储端口及纯状态转换；
 - `application` 编排当前租户下的模型 CRUD 和草稿版本创建；
 - `infrastructure.database` 适配 MyBatis，并通过 tenant + revision 条件执行读写；
 - 草稿版本可绑定当前租户的 Schema 快照，后续自动构建本体时可追溯到确定的物理结构基线；
-- PostgreSQL 语义目录结构由完整交付环境的数据库迁移初始化。
+- PostgreSQL 迁移见工作区 `sql/54_semantic_catalog.sql`。
 
 Schema 快照链路复用租户数据库 MCP 数据源：
 
@@ -55,18 +58,18 @@ Schema 快照链路复用租户数据库 MCP 数据源：
 
 对外提供 `/semantic/query/interpret`、`/plan`、`/explain`、`/execute` 四阶段 REST 契约。客户端不能提交 graph IRI、原始 SPARQL、SQL、Mongo pipeline 或物理字段映射。
 
-语义层的完整查询流程见[项目说明](../README.md#本体驱动的企业数据查询)。
-
+详细方案见工作区的 [后端语义查询技术文档](../../document/tech/backend/07-语义数据查询与本体引擎技术文档.md)。
 
 ## Agent 执行 Harness
 
-执行 API 支持通过 `requiredOutputJson` 声明交付断言，执行详情以 `acceptanceStatus` 记录结果。根 Solo 执行通过租约和已确认的工具回执恢复，Team 成员共享父执行预算。
+执行 API 支持可选字段 `requiredOutputJson`。将 JSON Pointer 映射到要求的类型，例如 `{"/result/count":"integer","/result/ok":"boolean"}`。详情的 `acceptanceStatus` 可为 `accepted`、`partial`、`unverified` 或 `rejected`。配置了桌面验证命令时，设备回执仍是独立验收条件。
 
-用 `bash scripts/agent-harness-gate.sh` 运行公开快照的固定轨迹和运行时测试。数据库迁移及跨进程故障注入使用完整交付环境的迁移资源。
+应用 `agent-execution-harness.sql` 后，新建根 Solo 执行可在租约过期时由创建者调用 `POST /agents/{id}/executions/{execId}/recover`。用原执行 ID 查状态和回放。已确认工具回执按调用 ID 恢复，派发后状态未知的工具进入人工核对。
 
+PR 门禁使用 `scripts/agent-harness-gate.sh`。本地运行时为 `AGENT_HARNESS_DB_URL` 提供隔离 PostgreSQL 连接，按需设置 `AGENT_HARNESS_DB_USER` 和 `AGENT_HARNESS_DB_PASSWORD`。测试夹具会创建并清理独立 schema。
 
-### 执行可靠性与定向验收
+### 可靠性与任务验收
 
-轨迹评估和在线 Agent 分配到各自的有界执行池。Solo 将供应商调用预算和租约校验绑定到单次尝试。终态事件通过持久化 Outbox 重投，SSE 用稳定事件 ID 去重。
-
-任务支持 `requiredOutputValues` 等值断言及 `requiredOutputSha256` 终稿版本校验。符合条件时仅修订终稿，Team 可复用已有成员证据。完整数据库回归使用交付环境的迁移资源。
+- 轨迹评估的协调器、评估条目、Solo 和 Team 分别使用独立线程池。评估队列饱和时任务标记为失败，可从评估页重试。
+- 在应用 `agent-harness-reliability.sql` 后升级服务。根 Solo 每次模型派发前保存额度预占，终态事件可自动重投。SSE 客户端可用 `Last-Event-ID` 重连，终态事件使用稳定 ID。
+- 支持 `requiredOutputValues`，例如 `{"/ok":true}`。期望交付特定版本时可提供 `requiredOutputSha256`，服务端对实际存入输出的 UTF-8 字节计算 SHA-256。详情的 `acceptanceOutputSha256` 可用来绑定后续消费。

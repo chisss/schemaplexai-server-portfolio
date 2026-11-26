@@ -15,6 +15,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -50,8 +51,9 @@ public class McpSchemaMetadataSessionFactory implements SchemaMetadataSessionFac
 
     private static final class McpSchemaMetadataSession implements SchemaMetadataSession {
 
+        private static final Duration METADATA_TIMEOUT = Duration.ofSeconds(60);
         private static final List<String> QUERY_TOOLS = List.of(
-                "query", "execute_sql", "read_query", "sql_query", "run_query", "executeQuery");
+                "query", "mysql_query", "execute_sql", "read_query", "sql_query", "run_query", "executeQuery");
         private static final List<String> QUERY_ARGUMENTS = List.of("sql", "query", "statement", "command");
         private static final Map<String, List<String>> METADATA_TOOLS = Map.of(
                 "list_collections", List.of("list_collections", "collections", "mongodb_list_collections"),
@@ -104,7 +106,7 @@ public class McpSchemaMetadataSessionFactory implements SchemaMetadataSessionFac
             RuntimeException lastFailure = null;
             for (String argument : QUERY_ARGUMENTS) {
                 try {
-                    return payloadRows.extract(client.toolsCall(source, tool, Map.of(argument, statement)));
+                    return payloadRows.extract(client.toolsCall(source, tool, Map.of(argument, statement), METADATA_TIMEOUT));
                 } catch (RuntimeException exception) {
                     lastFailure = exception;
                 }

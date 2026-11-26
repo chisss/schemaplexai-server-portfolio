@@ -2,6 +2,7 @@ package com.schemaplexai.web.controller;
 
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.model.dto.semantic.SchemaScanRequest;
+import com.schemaplexai.model.vo.semantic.SchemaSnapshotDetailVO;
 import com.schemaplexai.model.vo.semantic.SchemaSnapshotVO;
 import com.schemaplexai.service.semantic.application.command.ScanSchemaCommand;
 import com.schemaplexai.service.semantic.application.orchestration.SchemaScanApplicationService;
@@ -56,5 +57,12 @@ public class DatabaseSchemaController {
                         snapshot,
                         latestFingerprint != null && !latestFingerprint.equals(snapshot.getFingerprint())))
                 .toList());
+    }
+
+    @GetMapping("/{id}/schema/snapshots/{snapshotId}")
+    @PreAuthorize("@authorizationService.hasPermission('database:source:view')")
+    public R<SchemaSnapshotDetailVO> snapshotDetail(
+            @PathVariable @NotBlank String id, @PathVariable @NotBlank String snapshotId) {
+        return R.ok(mapper.toSnapshotDetail(scanService.getSnapshot(id, snapshotId)));
     }
 }

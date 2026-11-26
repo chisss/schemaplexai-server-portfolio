@@ -3,6 +3,7 @@ package com.schemaplexai.service.database.impl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.common.enums.McpServerTypeEnum;
 import com.schemaplexai.common.enums.McpTransportTypeEnum;
@@ -33,6 +34,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -201,9 +203,31 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
 
     @Override
     public DatabaseQueryResultVO executeQuery(String id, DatabaseQueryExecuteRequest request) {
+        return executeQuery(id, request, null, null);
+    }
+
+    @Override
+    public DatabaseQueryResultVO executeSemanticQuery(String id, DatabaseQueryExecuteRequest request, int timeoutSeconds) {
+        return executeQuery(id, request, Duration.ofSeconds(timeoutSeconds), null);
+    }
+
+    @Override
+    public DatabaseQueryResultVO executeSemanticQuery(String id, DatabaseQueryExecuteRequest request, int timeoutSeconds,
+                                                      String expectedSourceRevision) {
+        return executeQuery(id, request, Duration.ofSeconds(timeoutSeconds), expectedSourceRevision);
+    }
+
+    private DatabaseQueryResultVO executeQuery(String id, DatabaseQueryExecuteRequest request, Duration timeout,
+                                               String expectedSourceRevision) {
         McpServer server = requireDatabaseSource(id);
+        if (expectedSourceRevision != null && !expectedSourceRevision.equals(Objects.toString(server.getUpdatedAt(), ""))) {
+            throw new BusinessException(ResultCode.SEMANTIC_QUERY_PLAN_CHANGED, "对账数据源已变更，请重新确认查询");
+        }
         String sql = normalizeSql(request.getSql());
         sqlReadOnlyGuard.validate(sql);
+        if (timeout != null && !Boolean.TRUE.equals(readBoolean(defaultMap(server.getConnectionConfig()), "readOnly"))) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "业务本体查询要求配置为只读的数据源");
+        }
 
         List<Map<String, Object>> tools = extractTools(server);
         if (tools.isEmpty()) {
@@ -215,10 +239,12 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
         }
 
         long start = System.currentTimeMillis();
-        Map<String, Object> rawPayload = executeQueryWithFallback(server, toolSelection, sql);
+        Map<String, Object> rawPayload = timeout == null ? executeQueryWithFallback(server, toolSelection, sql)
+                : mcpClientService.toolsCall(server, toolSelection.toolName(), Map.of(toolSelection.argumentName(), sql), timeout);
         long elapsed = System.currentTimeMillis() - start;
 
-        ParsedQueryResult parsed = parseQueryResult(rawPayload);
+        ParsedQueryResult parsed = timeout == null ? parseQueryResult(rawPayload)
+                : parseSemanticQueryResult(rawPayload);
         int limit = request.getLimit() == null || request.getLimit() < 1 ? 200 : request.getLimit();
         List<Map<String, Object>> rows = parsed.rows();
         boolean truncated = rows.size() > limit;
@@ -235,6 +261,47 @@ public class DatabaseSourceServiceImpl implements DatabaseSourceService {
         result.setRawText(parsed.rawText());
         result.setWarnings(truncated ? List.of("结果已按限制行数截断返回") : List.of());
         return result;
+    }
+
+    private ParsedQueryResult parseSemanticQueryResult(Map<String, Object> payload) {
+        var result = structuredRows(payload);
+        if (result == null) {
+            throw new BusinessException(ResultCode.SEMANTIC_QUERY_EXECUTION_UNAVAILABLE, "数据源未返回有效的结构化查询结果");
+        }
+        return result;
+    }
+
+    private ParsedQueryResult structuredRows(Object payload) {
+        if (payload instanceof String text) {
+            try {
+                return structuredRows(objectMapper.readerFor(Object.class)
+                        .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS).readValue(text));
+            } catch (JsonProcessingException ignored) {
+                return null;
+            }
+        }
+        if (payload instanceof List<?> rows && rows.stream().allMatch(Map.class::isInstance)) {
+            var normalized = normalizeRowList(rows);
+            return new ParsedQueryResult(resolveColumns(List.of(), normalized), normalized, null);
+        }
+        if (!(payload instanceof Map<?, ?> map) || map.get("error") != null
+                || Boolean.TRUE.equals(map.get("isError")) || Boolean.FALSE.equals(map.get("success"))) {
+            return null;
+        }
+        for (String key : List.of("rows", "data", "records", "result")) {
+            if (map.containsKey(key)) {
+                return structuredRows(map.get(key));
+            }
+        }
+        if (map.get("content") instanceof List<?> content && content.size() == 1) {
+            return structuredRows(content.getFirst());
+        }
+        for (String key : List.of("content", "text", "json")) {
+            if (map.containsKey(key)) {
+                return structuredRows(map.get(key));
+            }
+        }
+        return null;
     }
 
     private McpServer requireDatabaseSource(String id) {

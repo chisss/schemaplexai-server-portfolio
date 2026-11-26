@@ -6,6 +6,7 @@ import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.service.semantic.application.command.CreateSemanticModelCommand;
 import com.schemaplexai.service.semantic.application.command.UpdateSemanticModelCommand;
 import com.schemaplexai.service.semantic.domain.model.SemanticModel;
+import com.schemaplexai.service.semantic.domain.model.scope.OntologyScope;
 import com.schemaplexai.service.semantic.domain.repository.SemanticModelRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,11 +31,14 @@ class SemanticModelServiceTest {
     @Mock
     private SemanticModelRepository repository;
 
+    @Mock
+    private OntologyScopeApplicationService scopeService;
+
     private SemanticModelApplicationService service;
 
     @BeforeEach
     void setUp() {
-        service = new SemanticModelApplicationService(repository);
+        service = new SemanticModelApplicationService(repository, scopeService);
         SecurityUtil.setCurrentTenantId("tenant-a");
     }
 
@@ -53,6 +57,16 @@ class SemanticModelServiceTest {
         verify(repository).insert(captor.capture());
         assertThat(captor.getValue().getTenantId()).isEqualTo("tenant-a");
         assertThat(result.getRevision()).isZero();
+    }
+
+    @Test
+    void usesTenantScopeAsAuthoritativeDomain() {
+        when(scopeService.require("scope-1")).thenReturn(new OntologyScope("scope-1", "销售中台", "订单履约"));
+
+        SemanticModel result = service.create(new CreateSemanticModelCommand("订单", "客户", null, "scope-1"));
+
+        assertThat(result.getDomain()).isEqualTo("订单履约");
+        assertThat(result.getScopeId()).isEqualTo("scope-1");
     }
 
     @Test

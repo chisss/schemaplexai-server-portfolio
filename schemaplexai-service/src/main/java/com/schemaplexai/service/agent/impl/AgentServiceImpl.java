@@ -107,6 +107,7 @@ import com.schemaplexai.model.vo.agent.ConversationMessageVO;
 import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.handler.AgentConfigHandler;
+import com.schemaplexai.service.agent.ontology.AgentOntologyRuntimeContext;
 import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
@@ -188,6 +189,7 @@ public class AgentServiceImpl implements AgentService {
     private final AgentToolBindingConverter agentToolBindingConverter;
     private final AgentValidator agentValidator;
     private final AgentConfigHandler agentConfigHandler;
+    private final AgentOntologyRuntimeContext ontologyContext;
     private final EntityValidator entityValidator;
     private final ContextEntityMapper contextEntityMapper;
     private final ContextItemMapper contextItemMapper;
@@ -1344,6 +1346,11 @@ public class AgentServiceImpl implements AgentService {
 
         var execution = new AgentExecution();
         execution.setAgentId(agentId);
+        boolean ontologyPrivate = ontologyContext.requiresPrivateExecution(agent);
+        if (ontologyPrivate && !ontologyContext.mayReadCurrentUser()) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "执行发起人需要当前租户的业务本体查看权限");
+        }
+        execution.setOntologyPrivate(ontologyPrivate);
         if (acceptance != null) {
             execution.setAcceptanceStatus(AgentAcceptance.Status.UNVERIFIED.code());
             execution.setSandboxPolicySnapshot(acceptance.snapshot());
@@ -1351,8 +1358,8 @@ public class AgentServiceImpl implements AgentService {
         execution.setMemoryProjectId(memoryProjectId);
         execution.setInputPrompt(dto.getPrompt());
         execution.setInputContext(dto.getContext());
-        execution.setTemporaryChat(Boolean.TRUE.equals(dto.getTemporaryChat()));
-        execution.setMemoryWriteEnabled(dto.getMemoryWriteEnabled());
+        execution.setTemporaryChat(ontologyPrivate || Boolean.TRUE.equals(dto.getTemporaryChat()));
+        execution.setMemoryWriteEnabled(ontologyPrivate ? Boolean.FALSE : dto.getMemoryWriteEnabled());
         execution.setAiModel(selectedModel);
         execution.setConversationId(StringUtils.hasText(dto.getConversationId())
                 ? dto.getConversationId()
@@ -1442,6 +1449,7 @@ public class AgentServiceImpl implements AgentService {
                 .tenantId(SecurityUtil.getCurrentTenantId())
                 .userId(SecurityUtil.getCurrentUserId())
                 .inputPrompt(dto.getPrompt())
+                .ontologyContextAllowed(true)
                 .model(execution.getAiModel())
                 .agentModelType(agent.getAiModelType())
                 .agentModelGroupId(agent.getAiModelGroupId())
@@ -1547,6 +1555,13 @@ public class AgentServiceImpl implements AgentService {
                         .apply("coalesce(conversation_id, '') NOT LIKE 'desktop-%'")
                         .apply("coalesce(conversation_id, '') NOT LIKE '%:desktop-%'"))
                 .or().eq(AgentExecution::getCreatedBy, SecurityUtil.getCurrentUserId()));
+        boolean canViewOwnOntology = ontologyContext.mayReadCurrentUser();
+        wrapper.and(visibility -> {
+            visibility.eq(AgentExecution::getOntologyPrivate, false);
+            if (canViewOwnOntology) {
+                visibility.or().eq(AgentExecution::getCreatedBy, SecurityUtil.getCurrentUserId());
+            }
+        });
         if (StringUtils.hasText(query.getExecutionId())) {
             wrapper.eq(AgentExecution::getId, query.getExecutionId());
         }
@@ -1572,7 +1587,7 @@ public class AgentServiceImpl implements AgentService {
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
-        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
+        enforceExecutionOwner(execution);
         var vo = toExecutionVO(execution);
         if (isTeamParent(agent, execution)) {
             if (isExecutionOwner(execution) && AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())) {
@@ -1635,14 +1650,20 @@ public class AgentServiceImpl implements AgentService {
         entityValidator.requireExists(agentMapper, agentId, ResultCode.AGENT_NOT_FOUND);
         AgentExecution execution = agentExecutionMapper.selectOne(new LambdaQueryWrapper<AgentExecution>()
                 .select(AgentExecution::getId, AgentExecution::getAgentId,
-                        AgentExecution::getInputContext, AgentExecution::getCreatedBy, AgentExecution::getConversationId)
+                        AgentExecution::getInputContext, AgentExecution::getCreatedBy, AgentExecution::getConversationId,
+                        AgentExecution::getTenantId, AgentExecution::getOntologyPrivate)
                 .eq(AgentExecution::getId, executionId)
                 .eq(AgentExecution::getAgentId, agentId));
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
-        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
+        enforceExecutionOwner(execution);
         return execution;
+    }
+
+    private void enforceExecutionOwner(AgentExecution execution) {
+        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
+        ontologyContext.enforceAccess(execution);
     }
 
     @Override
@@ -1666,7 +1687,7 @@ public class AgentServiceImpl implements AgentService {
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
-        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
+        enforceExecutionOwner(execution);
         if (DesktopExecutionTarget.from(execution.getInputContext()) != null
                 && (AgentExecutionStatusEnum.STOPPED.getCode().equals(execution.getStatus())
                 || AgentExecutionStatusEnum.COMPLETED.getCode().equals(execution.getStatus())
@@ -1918,7 +1939,7 @@ public class AgentServiceImpl implements AgentService {
         if (execution == null) {
             throw new BusinessException(ResultCode.AGENT_EXECUTION_NOT_FOUND);
         }
-        DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId());
+        enforceExecutionOwner(execution);
         if (execution.getStatus() == null || !STOPPABLE_EXECUTION_STATUSES.contains(execution.getStatus())) {
             throw new BusinessException(ResultCode.BAD_REQUEST);
         }
@@ -2016,9 +2037,10 @@ public class AgentServiceImpl implements AgentService {
             }
         }
         agentExecutionMapper.selectList(new LambdaQueryWrapper<AgentExecution>()
-                        .select(AgentExecution::getInputContext, AgentExecution::getCreatedBy, AgentExecution::getConversationId)
+                        .select(AgentExecution::getInputContext, AgentExecution::getCreatedBy, AgentExecution::getConversationId,
+                                AgentExecution::getTenantId, AgentExecution::getOntologyPrivate)
                         .in(AgentExecution::getConversationId, conversationIdCandidates(conversationId)))
-                .forEach(execution -> DesktopExecutionTarget.requireOwner(execution, SecurityUtil.getCurrentUserId()));
+                .forEach(this::enforceExecutionOwner);
     }
 
     private List<String> conversationIdCandidates(String conversationId) {

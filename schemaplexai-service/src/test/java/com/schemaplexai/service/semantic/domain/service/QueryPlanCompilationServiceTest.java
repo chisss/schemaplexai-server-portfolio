@@ -65,6 +65,41 @@ class QueryPlanCompilationServiceTest {
     }
 
     @Test
+    void compilesMysqlPublishedMetricAndDimensionsUsingExactStringProjections() {
+        String object = "sales.orders";
+        var intent = new QueryIntent("v1", "source-1",
+                List.of(new QueryMetric("urn:metric", "订单金额", "sum", object, "amount")),
+                List.of(new QueryDimension("urn:city", "城市", null, object, "city")),
+                List.of(new QueryFilter("urn:status", "状态", "eq", "01", object, "status", true)),
+                null, 200, new QueryOutput("table", "统计指标"), "release");
+
+        var planned = service.compile(intent, "mysql");
+
+        assertThat(planned.queryPath()).isEqualTo("PUBLISHED_ONTOLOGY");
+        assertThat(planned.query().statement()).isEqualTo(
+                "SELECT CAST(SUM(`sales`.`orders`.`amount`) AS CHAR) AS metric_1, "
+                + "CAST(`sales`.`orders`.`city` AS CHAR) AS dimension_1 FROM `sales`.`orders`"
+                + " WHERE `sales`.`orders`.`status` = :p1 GROUP BY `sales`.`orders`.`city`"
+                + " ORDER BY `sales`.`orders`.`city` LIMIT 201");
+        assertThat(planned.query().parameters()).singleElement().satisfies(parameter -> {
+            assertThat(parameter.value()).isEqualTo("01");
+            assertThat(parameter.textValue()).isTrue();
+        });
+    }
+
+    @Test
+    void compilesMysqlStructuredTimeRangeAndRejectsUnsupportedExplorationDialects() {
+        var input = intent();
+        var ranged = new QueryIntent(input.semanticVersionId(), input.sourceId(), input.metrics(), input.dimensions(),
+                input.filters(), input.timeRange(), input.limit(), input.output(), "release");
+        var exploration = new QueryIntent(input.semanticVersionId(), input.sourceId(), input.metrics(), input.dimensions(),
+                input.filters(), null, input.limit(), input.output(), "release", true);
+        assertThat(service.compile(ranged, "mysql").query().statement())
+                .contains("DATE_SUB(CURRENT_TIMESTAMP, INTERVAL :p_time_days DAY)");
+        assertThatThrownBy(() -> service.compile(exploration, "clickhouse")).hasMessageContaining("不支持此类授权查询");
+    }
+
+    @Test
     void rejectsMultiplePhysicalObjectsAndUnsafeIdentifiers() {
         QueryIntent differentObject = new QueryIntent(
                 "v1", "source-1",

@@ -7,6 +7,8 @@ import com.schemaplexai.service.semantic.domain.model.SchemaSnapshot;
 import com.schemaplexai.service.semantic.domain.model.SemanticModel;
 import com.schemaplexai.service.semantic.domain.model.SemanticVersion;
 import com.schemaplexai.service.semantic.domain.port.SemanticGraphLocator;
+import com.schemaplexai.service.semantic.domain.port.OntologyArtifactCompilerPort;
+import com.schemaplexai.service.semantic.domain.port.OntologyConfigurationStorePort;
 import com.schemaplexai.service.semantic.domain.repository.SchemaSnapshotRepository;
 import com.schemaplexai.service.semantic.domain.repository.SemanticModelRepository;
 import com.schemaplexai.service.semantic.domain.repository.SemanticVersionRepository;
@@ -36,13 +38,20 @@ class SemanticVersionServiceTest {
     private SchemaSnapshotRepository snapshotRepository;
     @Mock
     private SemanticGraphLocator graphLocator;
+    @Mock
+    private SchemaScanApplicationService schemaScanService;
+    @Mock
+    private OntologyConfigurationStorePort configurationStore;
+    @Mock
+    private OntologyArtifactCompilerPort artifactCompiler;
 
     private SemanticVersionApplicationService service;
 
     @BeforeEach
     void setUp() {
         service = new SemanticVersionApplicationService(
-                modelRepository, versionRepository, snapshotRepository, graphLocator);
+                modelRepository, versionRepository, snapshotRepository, graphLocator, schemaScanService,
+                configurationStore, artifactCompiler);
         SecurityUtil.setCurrentTenantId("tenant-a");
     }
 
@@ -54,7 +63,7 @@ class SemanticVersionServiceTest {
     @Test
     void createsNextDraftWithServerOwnedGraphIri() {
         SemanticModel model = SemanticModel.create("model-1", "tenant-a", "订单", "sales", null);
-        when(modelRepository.findByTenantAndId("tenant-a", "model-1")).thenReturn(Optional.of(model));
+        when(modelRepository.lockByTenantAndId("tenant-a", "model-1")).thenReturn(Optional.of(model));
         when(versionRepository.nextVersionNo("tenant-a", "model-1")).thenReturn(2);
         when(graphLocator.assertedGraph("tenant-a", "model-1", 2)).thenReturn(
                 "urn:spx:tenant:tenant-a:semantic:model-1:v:2:asserted");
@@ -72,8 +81,9 @@ class SemanticVersionServiceTest {
     void bindsOnlySnapshotOwnedByCurrentTenant() {
         SemanticModel model = SemanticModel.create("model-1", "tenant-a", "订单", "sales", null);
         SchemaSnapshot snapshot = org.mockito.Mockito.mock(SchemaSnapshot.class);
+        when(snapshot.getSourceId()).thenReturn("source-1");
         String snapshotId = "79d58fb6-8df4-4aec-8939-abac643096fb";
-        when(modelRepository.findByTenantAndId("tenant-a", "model-1")).thenReturn(Optional.of(model));
+        when(modelRepository.lockByTenantAndId("tenant-a", "model-1")).thenReturn(Optional.of(model));
         when(snapshotRepository.findByTenantAndId("tenant-a", snapshotId)).thenReturn(Optional.of(snapshot));
         when(versionRepository.nextVersionNo("tenant-a", "model-1")).thenReturn(1);
         when(graphLocator.assertedGraph("tenant-a", "model-1", 1)).thenReturn(
@@ -83,13 +93,13 @@ class SemanticVersionServiceTest {
 
         assertThat(result.getSourceSnapshotId()).isEqualTo(snapshotId);
         verify(snapshotRepository).findByTenantAndId("tenant-a", snapshotId);
+        verify(schemaScanService).getSnapshot("source-1", snapshotId);
     }
 
     @Test
     void rejectsSnapshotOutsideCurrentTenant() {
         SemanticModel model = SemanticModel.create("model-1", "tenant-a", "订单", "sales", null);
         String snapshotId = "79d58fb6-8df4-4aec-8939-abac643096fb";
-        when(modelRepository.findByTenantAndId("tenant-a", "model-1")).thenReturn(Optional.of(model));
         when(snapshotRepository.findByTenantAndId("tenant-a", snapshotId)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.createDraft("model-1", snapshotId))

@@ -44,7 +44,7 @@ class DesktopConversationServiceTest {
         var jdbc = mock(JdbcTemplate.class);
         var workspace = mock(DesktopWorkspaceService.class);
         var executions = mock(AgentExecutionMapper.class);
-        var service = new DesktopConversationService(jdbc, null, workspace, null, null, null, null, executions);
+        var service = new DesktopConversationService(jdbc, null, workspace, null, null, null, null, executions, null);
         var record = mock(ResultSet.class);
         when(record.getString("id")).thenReturn("turn-1");
         when(record.getString("state")).thenReturn("running");

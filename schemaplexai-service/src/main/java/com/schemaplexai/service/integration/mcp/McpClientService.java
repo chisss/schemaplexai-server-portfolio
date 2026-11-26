@@ -4,12 +4,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.model.entity.McpServer;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.internal.JsonSchemaElementJsonUtils;
 import dev.langchain4j.mcp.client.McpClient;
 import dev.langchain4j.service.tool.ToolExecutionResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -54,7 +56,8 @@ public class McpClientService {
                 Map<String, Object> payload = new HashMap<>();
                 payload.put("name", toolSpecification.name());
                 payload.put("description", toolSpecification.description());
-                payload.put("inputSchema", objectMapper.convertValue(toolSpecification.parameters(), Map.class));
+                payload.put("inputSchema", toolSpecification.parameters() == null
+                        ? Map.of() : JsonSchemaElementJsonUtils.toMap(toolSpecification.parameters()));
                 payload.put("metadata", toolSpecification.metadata());
                 tools.add(payload);
             }
@@ -72,15 +75,29 @@ public class McpClientService {
      * @param arguments  工具参数
      * @return 工具执行结果
      */
-    @SuppressWarnings("unchecked")
     public Map<String, Object> toolsCall(McpServer server, String toolName, Map<String, Object> arguments) {
-        try (McpClient mcpClient = mcpClientFactory.create(server)) {
+        return callTool(server, toolName, arguments, null);
+    }
+
+    public Map<String, Object> toolsCall(McpServer server, String toolName, Map<String, Object> arguments,
+                                         Duration timeout) {
+        return callTool(server, toolName, arguments, timeout);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> callTool(McpServer server, String toolName, Map<String, Object> arguments,
+                                         Duration timeout) {
+        try (McpClient mcpClient = timeout == null
+                ? mcpClientFactory.create(server) : mcpClientFactory.create(server, timeout)) {
             ToolExecutionRequest request = ToolExecutionRequest.builder()
                     .id(UUID.randomUUID().toString())
                     .name(toolName)
                     .arguments(objectMapper.writeValueAsString(arguments != null ? arguments : Map.of()))
                     .build();
             ToolExecutionResult result = mcpClient.executeTool(request);
+            if (timeout != null && result.isError()) {
+                throw new IllegalStateException("MCP 查询工具执行失败");
+            }
             if (result.result() instanceof Map<?, ?> resultMap) {
                 return (Map<String, Object>) resultMap;
             }

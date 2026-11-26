@@ -85,24 +85,28 @@ public class SemanticOntologyController {
     }
 
     @PostMapping("/{id}/validate")
-    @PreAuthorize("@authorizationService.hasPermission('semantic:model:manage')")
+    @PreAuthorize("@authorizationService.hasPermission('semantic:model:manage') or "
+            + "@authorizationService.hasPermission('semantic:model:publish')")
     public R<SemanticValidationVO> validate(
             @PathVariable @NotBlank String id,
             @Valid @RequestBody SemanticVersionActionRequest request) {
-        SemanticValidation validation = publishService.validate(id, request.expectedRevision());
+        SemanticValidation validation = publishService.validate(id, request.expectedRevision(), request.effectivePurpose());
         return R.ok(mapper.toValidation(id, request.expectedRevision(), validation));
     }
 
     @PostMapping("/{id}/publish")
-    @PreAuthorize("@authorizationService.hasPermission('semantic:model:manage')")
+    @PreAuthorize("@authorizationService.hasPermission('semantic:model:publish')")
     public R<SemanticPublishVO> publish(
             @PathVariable @NotBlank String id,
             @Valid @RequestBody SemanticVersionActionRequest request) {
-        SemanticVersion version = publishService.publish(id, request.expectedRevision());
+        SemanticVersion version = publishService.publish(id, request.expectedRevision(), request.effectivePurpose());
+        var readiness = publishService.releaseReadiness(version);
         return R.ok(new SemanticPublishVO(
                 version.getModelId(),
                 mapper.toVersion(version),
-                "PUBLISHED".equals(version.getStatus().name())));
+                "PUBLISHED".equals(version.getStatus().name()),
+                readiness == null ? null : new SemanticPublishVO.Readiness(
+                        readiness.contextReady(), readiness.validationReady(), readiness.queryReady())));
     }
 
     private OntologyNodeUpdate toNodeUpdate(SemanticNodeUpdateRequest request) {

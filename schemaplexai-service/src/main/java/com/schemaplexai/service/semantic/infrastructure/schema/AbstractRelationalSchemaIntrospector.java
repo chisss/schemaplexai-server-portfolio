@@ -24,9 +24,9 @@ abstract class AbstractRelationalSchemaIntrospector implements SchemaIntrospecto
     public DatabaseSchema scan(SchemaScanScope scope, SchemaMetadataSession session) {
         String catalog = firstText(scope.catalog(), session.defaultCatalog());
         String schema = firstText(scope.schema(), session.defaultSchema());
-        List<Map<String, Object>> columnRows = session.query(columnsQuery());
-        List<Map<String, Object>> constraintRows = session.query(constraintsQuery());
-        List<Map<String, Object>> indexRows = session.query(indexesQuery());
+        List<Map<String, Object>> columnRows = session.query(columnsQuery(schema, scope.includeObjects()));
+        List<Map<String, Object>> constraintRows = session.query(constraintsQuery(schema, scope.includeObjects()));
+        List<Map<String, Object>> indexRows = session.query(indexesQuery(schema, scope.includeObjects()));
 
         Map<String, ObjectSeed> seeds = new LinkedHashMap<>();
         for (Map<String, Object> row : columnRows) {
@@ -66,11 +66,11 @@ abstract class AbstractRelationalSchemaIntrospector implements SchemaIntrospecto
 
     protected abstract String databaseType();
 
-    protected abstract String columnsQuery();
+    protected abstract String columnsQuery(String schema, Set<String> objects);
 
-    protected abstract String constraintsQuery();
+    protected abstract String constraintsQuery(String schema, Set<String> objects);
 
-    protected abstract String indexesQuery();
+    protected abstract String indexesQuery(String schema, Set<String> objects);
 
     protected Set<String> capabilities() {
         return Set.of("tables", "views", "columns", "primary_keys", "foreign_keys", "indexes", "comments");

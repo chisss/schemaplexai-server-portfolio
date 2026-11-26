@@ -22,6 +22,10 @@ public enum QueryDialect {
         };
     }
 
+    public boolean supportsPublishedQuery() {
+        return this == POSTGRESQL || this == MYSQL;
+    }
+
     public String databaseType() {
         return switch (this) {
             case POSTGRESQL -> "postgresql";

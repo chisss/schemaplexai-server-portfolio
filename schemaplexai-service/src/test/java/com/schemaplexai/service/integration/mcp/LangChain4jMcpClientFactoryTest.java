@@ -9,6 +9,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -16,6 +17,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -27,6 +30,18 @@ import static org.mockito.Mockito.when;
 
 class LangChain4jMcpClientFactoryTest {
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @Test
+    void preservesMysqlDataWithoutTheSeparateTimingBlock() {
+        var rows = Map.<String, Object>of("type", "text", "text", "[{\"count\":\"4\"}]");
+        var timing = Map.<String, Object>of("type", "text", "text", "Query execution time: 22.41 ms");
+        var response = List.of(rows, timing);
+
+        assertThat(LangChain4jMcpClientFactory.mysqlQueryContent(response, false)).containsExactly(rows);
+        assertThat(LangChain4jMcpClientFactory.mysqlQueryContent(response, true)).isEqualTo(response);
+        var secondResult = List.of(rows, Map.<String, Object>of("type", "text", "text", "another response"));
+        assertThat(LangChain4jMcpClientFactory.mysqlQueryContent(secondResult, false)).isEqualTo(secondResult);
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"legacy_sse", "streamable_http"})
@@ -55,6 +70,11 @@ class LangChain4jMcpClientFactoryTest {
                 DatabaseCredentialMaterializer materializer = mock(DatabaseCredentialMaterializer.class);
                 when(materializer.materialize(server)).thenReturn(server);
                 var factory = new LangChain4jMcpClientFactory(mock(DatabaseMcpPresetResolver.class), materializer);
+                var discovered = new McpClientService(JSON, factory).discoverTools(server);
+                assertThat(discovered).hasSize(1);
+                assertThat(discovered.getFirst().get("inputSchema")).isEqualTo(Map.of(
+                        "type", "object", "properties", Map.of("sql", Map.of("type", "string")),
+                        "required", List.of("sql")));
 
                 try (var client = factory.create(server)) {
                     assertThat(client.listTools()).extracting(ToolSpecification::name).containsExactly("lookup");
@@ -107,8 +127,12 @@ class LangChain4jMcpClientFactoryTest {
                     capabilities.putObject("tools");
                     capabilities.putObject("resources");
                 }
-                case "tools/list" -> result.putArray("tools").addObject().put("name", "lookup")
-                        .put("description", "测试工具").putObject("inputSchema").put("type", "object");
+                case "tools/list" -> {
+                    var schema = result.putArray("tools").addObject().put("name", "lookup")
+                            .put("description", "测试工具").putObject("inputSchema").put("type", "object");
+                    schema.putObject("properties").putObject("sql").put("type", "string");
+                    schema.putArray("required").add("sql");
+                }
                 case "tools/call" -> result.putArray("content").addObject().put("type", "text").put("text", "fixture response");
                 case "resources/list" -> result.putArray("resources");
                 default -> throw new IOException("未知测试方法");

@@ -13,5 +13,15 @@ public record QueryAuditEvent(
         String outcome,
         int rowCount,
         long elapsedMs,
-        Instant occurredAt) {
+        Instant occurredAt,
+        String queryPath,
+        String semanticVersionId,
+        QueryResultValidation validation,
+        String failureCode) {
+
+    public QueryAuditEvent(String auditId, String tenantId, String userId, String planHash, String sourceId,
+                           String action, String outcome, int rowCount, long elapsedMs, Instant occurredAt) {
+        this(auditId, tenantId, userId, planHash, sourceId, action, outcome, rowCount, elapsedMs,
+                occurredAt, null, null, null, null);
+    }
 }

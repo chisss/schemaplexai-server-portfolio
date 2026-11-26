@@ -98,6 +98,12 @@ public class AgentExecutionContext {
     /** 运行时附加系统上下文 */
     private List<String> additionalSystemContexts;
 
+    /** 服务端常规 Agent 调用可激活本体上下文。任务入参不能设置此标记。 */
+    private boolean ontologyContextAllowed;
+
+    /** 执行输出只对授权发起人可见，模型窗口只加载本次执行。 */
+    private boolean ontologyPrivate;
+
     /** 运行时工具绑定覆盖 */
     private List<AgentToolBinding> overrideToolBindings;
 

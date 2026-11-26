@@ -4,5 +4,6 @@ package com.schemaplexai.service.semantic.domain.model.query;
 public enum QueryInterpretationStatus {
     READY,
     CLARIFICATION,
+    NO_MATCH,
     REJECTED
 }

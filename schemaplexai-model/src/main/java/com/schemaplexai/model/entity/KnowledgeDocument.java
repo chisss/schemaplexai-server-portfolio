@@ -89,6 +89,15 @@ public class KnowledgeDocument implements Serializable {
     /** 下次重试时间 */
     private LocalDateTime nextRetryAt;
 
+    /** 文档分类（路由标签）：code/document/excel/image */
+    private String docCategory;
+
+    /** 实际使用的解析器：tika/excel-poi/multimodal-ocr/ocr-api */
+    private String sourceParser;
+
+    /** chunk 版本号，每次重新摄入自增，用于缓存失效 */
+    private Integer indexVersion;
+
     /** 创建人 */
     private String createdBy;
 

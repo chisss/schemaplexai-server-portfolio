@@ -3,6 +3,7 @@ package com.schemaplexai.service.semantic.application.orchestration;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.service.database.DatabaseSourceService;
 import com.schemaplexai.service.semantic.application.command.ScanSchemaCommand;
 import com.schemaplexai.service.semantic.domain.model.SchemaSnapshot;
 import com.schemaplexai.service.semantic.domain.model.schema.DatabaseSchema;
@@ -13,6 +14,7 @@ import com.schemaplexai.service.semantic.domain.port.SchemaMetadataSessionFactor
 import com.schemaplexai.service.semantic.domain.repository.SchemaSnapshotRepository;
 import com.schemaplexai.service.semantic.domain.service.SchemaFingerprint;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -27,15 +29,18 @@ public class SchemaScanApplicationService {
     private final SchemaMetadataSessionFactory sessionFactory;
     private final SchemaSnapshotRepository snapshotRepository;
     private final List<SchemaIntrospectorPort> introspectors;
+    private final DatabaseSourceService databaseSourceService;
     private final SchemaFingerprint fingerprint = new SchemaFingerprint();
 
     public SchemaScanApplicationService(
             SchemaMetadataSessionFactory sessionFactory,
             SchemaSnapshotRepository snapshotRepository,
-            List<SchemaIntrospectorPort> introspectors) {
+            List<SchemaIntrospectorPort> introspectors,
+            DatabaseSourceService databaseSourceService) {
         this.sessionFactory = sessionFactory;
         this.snapshotRepository = snapshotRepository;
         this.introspectors = List.copyOf(introspectors);
+        this.databaseSourceService = databaseSourceService;
     }
 
     public SchemaSnapshot scan(String sourceId, ScanSchemaCommand command) {
@@ -63,6 +68,25 @@ public class SchemaScanApplicationService {
 
     public List<SchemaSnapshot> list(String sourceId) {
         return snapshotRepository.findAllBySource(requireTenantId(), sourceId);
+    }
+
+    @PreAuthorize("@authorizationService.hasPermission('database:source:view')")
+    public SchemaSnapshot getSnapshot(String sourceId, String snapshotId) {
+        String tenantId = requireTenantId();
+        String normalizedId;
+        if (!StringUtils.hasText(snapshotId)) {
+            throw new BusinessException(ResultCode.SCHEMA_SNAPSHOT_NOT_FOUND);
+        }
+        try {
+            normalizedId = UUID.fromString(snapshotId.trim()).toString();
+        } catch (IllegalArgumentException exception) {
+            throw new BusinessException(ResultCode.SCHEMA_SNAPSHOT_NOT_FOUND);
+        }
+        SchemaSnapshot snapshot = snapshotRepository.findByTenantAndId(tenantId, normalizedId)
+                .filter(candidate -> candidate.getSourceId().equals(sourceId))
+                .orElseThrow(() -> new BusinessException(ResultCode.SCHEMA_SNAPSHOT_NOT_FOUND));
+        databaseSourceService.getById(sourceId);
+        return snapshot;
     }
 
     private SchemaSnapshot persist(

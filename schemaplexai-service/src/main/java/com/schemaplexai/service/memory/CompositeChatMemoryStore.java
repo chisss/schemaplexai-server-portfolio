@@ -32,6 +32,10 @@ public class CompositeChatMemoryStore implements ChatMemoryStore {
         return postgresChatMemoryStore.loadWindow(conversationId, executionId, limit);
     }
 
+    public List<ChatMessage> loadExecutionWindow(String conversationId, String executionId, int limit) {
+        return postgresChatMemoryStore.loadExecutionWindow(conversationId, executionId, limit);
+    }
+
     public void appendMessages(String conversationId, String executionId,
                                List<PostgresChatMemoryStore.ArchivedMessage> messages) {
         postgresChatMemoryStore.appendMessages(conversationId, executionId, messages);

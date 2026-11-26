@@ -1,6 +1,8 @@
 package com.schemaplexai.service.semantic.domain.service;
 
 import com.schemaplexai.service.semantic.domain.model.query.CompiledQuery;
+import com.schemaplexai.service.semantic.domain.model.query.PublishedQueryReference;
+import com.schemaplexai.service.semantic.domain.model.query.QueryCalendar;
 import com.schemaplexai.service.semantic.domain.model.query.QueryColumn;
 import com.schemaplexai.service.semantic.domain.model.query.QueryExecutionLimits;
 import com.schemaplexai.service.semantic.domain.model.query.QueryExecutionResult;
@@ -9,12 +11,14 @@ import com.schemaplexai.service.semantic.domain.model.query.QueryLineage;
 import com.schemaplexai.service.semantic.domain.model.query.QueryParameter;
 import com.schemaplexai.service.semantic.domain.model.query.QueryPlan;
 import com.schemaplexai.service.semantic.domain.model.query.QueryDialect;
+import com.schemaplexai.service.semantic.domain.model.query.QueryTimeRange;
 import com.schemaplexai.service.semantic.domain.model.query.SignedQueryPlan;
 import com.schemaplexai.service.semantic.domain.port.SemanticQueryAuditPort;
 import com.schemaplexai.service.semantic.domain.port.SemanticQueryExecutorPort;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
@@ -86,6 +90,46 @@ class SemanticQueryExecutionServiceTest {
                 .hasMessageContaining("signature");
         service.execute(signed, "tenant-a", "user-a", new QueryExecutionLimits(5000, 30));
         assertThat(calls).containsExactly("execute");
+    }
+
+    @Test
+    void signsReferenceBindingsAndFrozenCandidateWindow() {
+        var signatures = new QueryPlanSignatureService("test-secret");
+        var range = new QueryTimeRange("urn:date", null, LocalDate.of(2026, 11, 1), LocalDate.of(2026, 11, 3),
+                "orders", "paid_at", new QueryCalendar("America/New_York", "timestamp with time zone"));
+        var reference = reference("reference_region", "reference_day", range.calendar().timeZone());
+        var plan = comparisonPlan(reference, range);
+        var signed = signatures.sign(plan);
+        signatures.verify(signed);
+
+        var changedRange = new QueryTimeRange(range.fieldIri(), null, range.from(), range.to().plusDays(1),
+                range.physicalObject(), range.physicalField(), range.calendar());
+        for (var tampered : List.of(
+                comparisonPlan(reference("alternate_region", "reference_day", range.calendar().timeZone()), range),
+                comparisonPlan(reference("reference_region", "alternate_day", range.calendar().timeZone()), range),
+                comparisonPlan(reference("reference_region", "reference_day", "UTC"), range),
+                comparisonPlan(reference, changedRange))) {
+            assertThatThrownBy(() -> signatures.verify(new SignedQueryPlan(tampered, signed.signature())))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("signature");
+        }
+    }
+
+    private PublishedQueryReference reference(String dimensionColumn, String timeColumn, String zone) {
+        return new PublishedQueryReference("dataset", "source-1", "orders", "v1", "checksum", "snapshot",
+                "fingerprint", "amount", "urn:metric", "sum", "reporting.finance_reference", "reference_amount",
+                null, "财务参考", "reference-binding", "source-revision", "amount",
+                List.of(new PublishedQueryReference.Dimension("region", "urn:region", "region", "string",
+                        "text", dimensionColumn)),
+                new PublishedQueryReference.Time("paid_at", "urn:date", "paid_at", "dateTime",
+                        "timestamp with time zone", zone, timeColumn));
+    }
+
+    private QueryPlan comparisonPlan(PublishedQueryReference reference, QueryTimeRange range) {
+        var sample = plan();
+        var query = sample.query();
+        return new QueryPlan(sample.semanticVersionId(), sample.sourceId(), sample.databaseType(), sample.dialect(),
+                new CompiledQuery(query.language(), query.statement(), query.parameters(), query.columns(),
+                        query.lineage(), List.of(), range), sample.planHash(), List.of(), true, false, reference);
     }
 
     private QueryPlan plan() {
