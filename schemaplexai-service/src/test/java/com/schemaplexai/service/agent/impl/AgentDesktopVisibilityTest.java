@@ -22,6 +22,7 @@ import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.AgentTerminalEventOutbox;
 import com.schemaplexai.service.agent.execution.ExecutionEventStreamService;
+import com.schemaplexai.service.agent.ontology.AgentOntologyRuntimeContext;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.common.EntityValidator;
 import com.schemaplexai.service.cost.BudgetAdmissionService;
@@ -73,6 +74,7 @@ class AgentDesktopVisibilityTest {
     @Mock private AgentLogService agentLogService;
     @Mock private ExecutionEventStreamService stream;
     @Mock private AgentTerminalEventOutbox terminalOutbox;
+    @Mock private AgentOntologyRuntimeContext ontologyContext;
     @InjectMocks private AgentServiceImpl service;
 
     @BeforeEach
