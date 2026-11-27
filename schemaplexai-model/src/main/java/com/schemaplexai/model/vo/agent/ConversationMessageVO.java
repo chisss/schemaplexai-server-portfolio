@@ -16,6 +16,8 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 public class ConversationMessageVO {
 
+    private String executionId;
+
     /** 消息类型: SYSTEM / USER / AI / TOOL_EXECUTION_RESULT */
     private String messageType;
 

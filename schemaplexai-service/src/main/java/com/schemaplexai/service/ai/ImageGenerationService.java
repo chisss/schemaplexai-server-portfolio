@@ -45,13 +45,15 @@ public class ImageGenerationService {
     private final ObjectMapper objectMapper;
 
     public ImageGenerationResult generate(ImageGenerationRequest request) {
-        if (request == null || !StringUtils.hasText(request.getModelId())) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "生图模型不能为空");
-        }
-        if (!StringUtils.hasText(request.getPrompt())) {
+        if (request == null || !StringUtils.hasText(request.getPrompt())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "生图描述不能为空");
         }
-        AiModel model = aiModelMapper.selectOne(new LambdaQueryWrapper<AiModel>()
+        AiModel model = !StringUtils.hasText(request.getModelId())
+                ? aiModelMapper.selectList(new LambdaQueryWrapper<AiModel>()
+                        .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
+                        .orderByAsc(AiModel::getId)).stream()
+                        .filter(this::isImageModel).findFirst().orElse(null)
+                : aiModelMapper.selectOne(new LambdaQueryWrapper<AiModel>()
                 .eq(AiModel::getId, request.getModelId())
                 .eq(AiModel::getStatus, CommonConstant.STATUS_ACTIVE)
                 .last("limit 1"));

@@ -474,8 +474,9 @@ public class AgentExecutionEngine {
                 return approvalResumeResult;
             }
 
-            int firstRound = ctx.getRecoveryLease() == null ? 1 : Math.max(state.getLastRound(),
-                    ctx.getRecoveryLease().checkpoint().round()) + 1;
+            int checkpointRound = ctx.getRecoveryLease() == null
+                    ? 0 : ctx.getRecoveryLease().checkpoint().round();
+            int firstRound = Math.max(state.getLastRound(), checkpointRound) + 1;
             checkpoint(ctx, state, firstRound - 1);
             int lastAllowedRound = resumeInput != null ? firstRound + maxLoopRounds - 1 : maxLoopRounds;
             for (int round = firstRound; round <= lastAllowedRound; round++) {
@@ -1199,6 +1200,7 @@ public class AgentExecutionEngine {
                     "审批归属校验失败，拒绝恢复该审批");
         }
         int round = approval.getRoundNum() != null ? approval.getRoundNum() : 0;
+        state.setLastRound(Math.max(state.getLastRound(), round));
         AgentToolSessionFactory.RoundToolContext roundCtx = toolSession.buildRoundContext(chatMemory, round);
         AgentExecutionResult interrupted = applyPendingApprovalDecision(
                 ctx, roundCtx, chatMemory, input, approval, params, startMs, conversationId, state);
@@ -2402,9 +2404,11 @@ public class AgentExecutionEngine {
     }
 
     private void publishActivity(AgentExecutionContext ctx, AgentExecutionActivity activity) {
-        // 团队成员的活动跟随父执行推送，成员角色保留在步骤中。
-        String agentId = ctx.getTeamAgentId() == null ? ctx.getAgentId() : ctx.getTeamAgentId();
-        executionEventStreamService.publishActivity(activityExecutionId(ctx), agentId, ctx.getTenantId(), activity);
+        executionEventStreamService.publishActivity(ctx.getExecutionId(), ctx.getAgentId(), ctx.getTenantId(), activity);
+        if (ctx.getParentExecutionId() != null) {
+            executionEventStreamService.publishActivity(ctx.getParentExecutionId(),
+                    ctx.getTeamAgentId(), ctx.getTenantId(), activity);
+        }
     }
 
     private String activityExecutionId(AgentExecutionContext ctx) {

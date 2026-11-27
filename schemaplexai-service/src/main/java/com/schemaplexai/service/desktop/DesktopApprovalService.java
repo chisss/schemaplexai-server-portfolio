@@ -66,6 +66,15 @@ public class DesktopApprovalService {
             AND s.assigned_to=e.uid WHERE s.deleted=0
         )
         """;
+    private static final String SELECT_ITEMS = """
+        SELECT items.*, COALESCE(NULLIF(applicant_user.real_name,''), applicant_user.username) applicant_name,
+          COALESCE(NULLIF(assignee_user.real_name,''), assignee_user.username) assignee_name
+        FROM items CROSS JOIN employee
+        LEFT JOIN sf_user applicant_user ON applicant_user.id::text=items.applicant
+          AND applicant_user.tenant_id=employee.tenant AND applicant_user.deleted=0
+        LEFT JOIN sf_user assignee_user ON assignee_user.id::text=items.assignee
+          AND assignee_user.tenant_id=employee.tenant AND assignee_user.deleted=0
+        """;
     private final JdbcTemplate jdbc;
     private final ReviewSessionService reviews;
     private final AgentService agents;
@@ -76,24 +85,26 @@ public class DesktopApprovalService {
     public record Source(String kind, String id, String executionId, String nodeId) {}
     public record Item(String id, String type, String title, String summary, String state, Source source,
                        String applicant, String assignee, LocalDateTime createdAt, LocalDateTime expiresAt,
-                       String revision, List<String> allowedActions, String evidence) {}
+                       String revision, List<String> allowedActions, String evidence,
+                       String applicantName, String assigneeName) {}
     public record Decision(@NotBlank String action, @Size(max = 2000) String comment,
                            @NotNull String expectedRevision, @NotBlank @Size(max = 128) String clientRequestId) {}
 
     public PageResult<Item> list(boolean pending, String type, int page, int size) {
         var employee = Employee.current();
-        String where = " FROM items WHERE (pending AND (expires_at IS NULL OR expires_at>now()))=?"
-                + " AND (CAST(? AS varchar) IS NULL OR type=?)";
-        long count = jdbc.queryForObject(ITEMS + "SELECT count(*)" + where, Long.class,
+        String where = " WHERE (items.pending AND (items.expires_at IS NULL OR items.expires_at>now()))=?"
+                + " AND (CAST(? AS varchar) IS NULL OR items.type=?)";
+        long count = jdbc.queryForObject(ITEMS + "SELECT count(*) FROM items" + where, Long.class,
                 employee.tenantId(), employee.userId(), pending, type, type);
-        var rows = jdbc.query(ITEMS + "SELECT *" + where + " ORDER BY created_at DESC,id LIMIT ? OFFSET ?", mapper(),
+        var rows = jdbc.query(ITEMS + SELECT_ITEMS + where
+                        + " ORDER BY items.created_at DESC,items.id LIMIT ? OFFSET ?", mapper(),
                 employee.tenantId(), employee.userId(), pending, type, type, size, DesktopWorkspaceService.offset(page, size));
         return new PageResult<>(rows, count, page, size);
     }
 
     public Item detail(String type, String id) {
         var employee = Employee.current();
-        return jdbc.query(ITEMS + "SELECT * FROM items WHERE type=? AND id=?", mapper(),
+        return jdbc.query(ITEMS + SELECT_ITEMS + " WHERE items.type=? AND items.id=?", mapper(),
                 employee.tenantId(), employee.userId(), type, id).stream().findFirst()
                 .orElseThrow(() -> new BusinessException(ResultCode.NOT_FOUND));
     }
@@ -195,7 +206,7 @@ public class DesktopApprovalService {
                     rs.getString("node_id")), rs.getString("applicant"), rs.getString("assignee"),
                     rs.getTimestamp("created_at").toLocalDateTime(), expiry == null ? null : expiry.toLocalDateTime(),
                     String.valueOf(rs.getTimestamp("updated_at")) + ":" + rs.getString("state") + ":" + pending,
-                    actions, rs.getString("evidence"));
+                    actions, rs.getString("evidence"), rs.getString("applicant_name"), rs.getString("assignee_name"));
         };
     }
 }

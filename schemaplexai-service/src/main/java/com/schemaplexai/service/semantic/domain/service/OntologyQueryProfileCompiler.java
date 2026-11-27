@@ -28,7 +28,7 @@ public final class OntologyQueryProfileCompiler {
     private static final Pattern MYSQL_TYPE = Pattern.compile("[a-z]+");
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_$]*");
     private static final Set<String> AGGREGATIONS = Set.of("sum", "count", "avg", "min", "max");
-    private static final Set<String> GRAINS = Set.of("day", "week", "month");
+    private static final Set<String> GRAINS = Set.of("minute", "hour", "day", "week", "month");
     private static final Set<String> ZONE_IDS = ZoneId.getAvailableZoneIds();
 
     public PublishedQueryProfile compile(
@@ -103,10 +103,13 @@ public final class OntologyQueryProfileCompiler {
             if (!Set.of("date", "dateTime").contains(field.dataType())) {
                 throw new IllegalArgumentException("时间字段需要 DATE 或受支持的时间戳");
             }
-            var grains = items(profile.time().grains(), 1, 3, "时间粒度").stream()
+            var grains = items(profile.time().grains(), 1, GRAINS.size(), "时间粒度").stream()
                     .map(value -> option(value, GRAINS, "时间粒度")).toList();
             if (Set.copyOf(grains).size() != grains.size()) {
                 throw new IllegalArgumentException("时间粒度不能重复");
+            }
+            if ("date".equals(field.dataType()) && grains.stream().anyMatch(Set.of("hour", "minute")::contains)) {
+                throw new IllegalArgumentException("小时与分钟粒度需要时间戳字段");
             }
             time = new PublishedQueryProfile.Time(field.id(), field.iri(), field.name(), field.label(),
                     field.physicalField(), field.dataType(), field.physicalType(), grains);

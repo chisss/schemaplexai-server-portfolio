@@ -1,6 +1,7 @@
 package com.schemaplexai.service.desktop;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.common.exception.BusinessException;
@@ -13,6 +14,7 @@ import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.ontology.AgentOntologyRuntimeContext;
 import com.schemaplexai.service.desktop.DesktopEmployeeAccess.Employee;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -27,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
+import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -55,10 +58,17 @@ public class DesktopConversationService {
                             @NotBlank @Size(max = 200) String desktopWorkspaceId) {}
     public record Send(@NotBlank @Size(max = 128) String clientRequestId, @NotBlank @Size(max = 32000) String text,
                        @Size(max = 10) List<@NotBlank @Size(max = 64) String> attachmentIds,
-                       @Size(max = 100) String skillCode, @NotNull Long contextVersion, @Valid DeviceRef deviceWorkspaceRef) {}
+                       @Size(max = 100) String skillCode, @NotNull Long contextVersion, @Valid DeviceRef deviceWorkspaceRef,
+                       @JsonInclude(JsonInclude.Include.NON_NULL)
+                       @Pattern(regexp = "low|medium|high") String reasoningStrength) {
+        public Send(String clientRequestId, String text, List<String> attachmentIds,
+                    String skillCode, Long contextVersion, DeviceRef deviceWorkspaceRef) {
+            this(clientRequestId, text, attachmentIds, skillCode, contextVersion, deviceWorkspaceRef, null);
+        }
+    }
     public record Receipt(String messageId, String conversationId, String executionId, String status, String eventsUrl) {}
     public record Turn(String id, String prompt, String executionId, String state, long sequence,
-                       OffsetDateTime createdAt, Object output, String errorMessage) {}
+                       OffsetDateTime createdAt, Object output, String errorMessage, Long elapsedMs) {}
     private record StoredTurn(String id, String requestId, String fingerprint, String prompt, String executionId,
                               String state, long sequence, OffsetDateTime createdAt) {}
     private static final RowMapper<StoredTurn> TURN = (rs, index) -> new StoredTurn(
@@ -116,6 +126,7 @@ public class DesktopConversationService {
         command.setPrompt(request.text().strip());
         command.setAttachmentIds(keys);
         command.setSkillCode(request.skillCode());
+        command.setReasoningStrength(request.reasoningStrength());
         command.setContext(context);
         command.setStream(true);
         try {
@@ -151,7 +162,9 @@ public class DesktopConversationService {
                 || ontologyContext.mayReadCurrentUser());
         return new Turn(row.id(), row.prompt(), row.executionId(), execution == null ? row.state() : execution.getStatus(),
                 row.sequence(), row.createdAt(), showOutput ? execution.getOutputResult() : null,
-                showOutput ? execution.getErrorMessage() : null);
+                showOutput ? execution.getErrorMessage() : null,
+                execution == null || execution.getCreatedAt() == null || execution.getCompletedAt() == null
+                        ? null : Duration.between(execution.getCreatedAt(), execution.getCompletedAt()).toMillis());
     }
 
     private StoredTurn reconcile(String id, StoredTurn row) {

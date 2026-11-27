@@ -36,6 +36,8 @@ public final class PublishedQueryInterpretationService {
                     + "|\\b(?:show|find|give|me|what|is|the|was|calculate|and|where|from|for)\\b"
                     + "|[\\s,，。？?：:]+");
     private static final Map<String, Pattern> GRAINS = Map.of(
+            "minute", grouping("分钟|minute"),
+            "hour", grouping("小时|hour"),
             "day", grouping("日|天|day"),
             "week", grouping("周|星期|week"),
             "month", grouping("月度|月份|月|month"));

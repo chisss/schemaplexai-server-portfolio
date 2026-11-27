@@ -11,6 +11,8 @@ import java.util.List;
 @Data
 public class AgentExecutionChildVO {
 
+    private String agentId;
+
     /** 子执行 ID */
     private String executionId;
 

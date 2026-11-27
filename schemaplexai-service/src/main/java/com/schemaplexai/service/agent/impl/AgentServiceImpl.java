@@ -1594,7 +1594,7 @@ public class AgentServiceImpl implements AgentService {
                 teamChildApprovalService.findPending(execution).ifPresent(child ->
                         vo.setPendingApproval(toPendingApprovalVO(child.approval(), TeamChildApprovalService.ALLOWED_DECISIONS)));
             }
-        } else {
+        } else if (AgentExecutionStatusEnum.PAUSED.getCode().equals(execution.getStatus())) {
             pendingToolApprovalService.findActivePending(executionId).ifPresent(approval ->
                     vo.setPendingApproval(toPendingApprovalVO(approval, List.of("approve", "deny", "edit", "approve_always"))));
         }
@@ -2055,6 +2055,7 @@ public class AgentServiceImpl implements AgentService {
 
     private ConversationMessageVO toConversationMessageVO(ChatMessageEntity entity) {
         return ConversationMessageVO.builder()
+                .executionId(entity.getExecutionId())
                 .messageType(entity.getMessageType())
                 .textContent(entity.getTextContent())
                 .toolCallId(entity.getToolCallId())
@@ -2161,11 +2162,12 @@ public class AgentServiceImpl implements AgentService {
         }
         Map<String, String> memberRoleNameMap = resolveMemberRoleNameMap(childExecutions);
         return childExecutions.stream()
-                .map(childExecution -> toChildExecutionVO(
-                        childExecution,
-                        memberRoleNameMap.get(childExecution.getTeamMemberId()),
-                        List.of()
-                ))
+                .map(childExecution -> {
+                    var child = toChildExecutionVO(childExecution,
+                            memberRoleNameMap.get(childExecution.getTeamMemberId()), List.of());
+                    child.setAgentId(childExecution.getAgentId());
+                    return child;
+                })
                 .toList();
     }
 

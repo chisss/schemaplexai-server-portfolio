@@ -238,7 +238,12 @@ public final class QueryPlanCompilationService {
         }
         String local = calendar.instant() ? field + " AT TIME ZONE '" + calendar.timeZone() + "'"
                 : "CAST(" + field + " AS timestamp without time zone)";
-        return "TO_CHAR(date_trunc('" + grain(dimension.timeGrain()) + "', " + local + "), 'YYYY-MM-DD')";
+        String grain = grain(dimension.timeGrain());
+        String format = switch (grain) {
+            case "minute", "hour" -> "YYYY-MM-DD HH24:MI";
+            default -> "YYYY-MM-DD";
+        };
+        return "TO_CHAR(date_trunc('" + grain + "', " + local + "), '" + format + "')";
     }
 
     private void addCalendarRange(String field, QueryTimeRange range, QueryDialect dialect, List<String> predicates,
@@ -364,13 +369,15 @@ public final class QueryPlanCompilationService {
 
     private String grain(String value) {
         return switch (value.toLowerCase()) {
-            case "day", "week", "month", "quarter", "year" -> value.toLowerCase();
+            case "minute", "hour", "day", "week", "month", "quarter", "year" -> value.toLowerCase();
             default -> throw new IllegalArgumentException("unsupported time grain: " + value);
         };
     }
 
     private String mysqlFormat(String value) {
         return switch (grain(value)) {
+            case "minute" -> "%Y-%m-%d %H:%i";
+            case "hour" -> "%Y-%m-%d %H:00";
             case "day" -> "%Y-%m-%d";
             case "month" -> "%Y-%m-01";
             case "quarter" -> "%Y-Q%q";
@@ -381,6 +388,8 @@ public final class QueryPlanCompilationService {
 
     private String clickhouseGrain(String value, String field) {
         return switch (grain(value)) {
+            case "minute" -> "toStartOfMinute(" + field + ")";
+            case "hour" -> "toStartOfHour(" + field + ")";
             case "day" -> "toStartOfDay(" + field + ")";
             case "week" -> "toStartOfWeek(" + field + ")";
             case "month" -> "toStartOfMonth(" + field + ")";
