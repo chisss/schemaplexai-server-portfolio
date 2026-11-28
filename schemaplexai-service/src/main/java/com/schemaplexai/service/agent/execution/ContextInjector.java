@@ -9,6 +9,7 @@ import com.schemaplexai.model.entity.AgentContextBinding;
 import com.schemaplexai.model.entity.ContextEntity;
 import com.schemaplexai.model.entity.ContextItem;
 import com.schemaplexai.service.agent.memory.AgentInstructionsAutoService;
+import com.schemaplexai.service.agent.memory.AgentFactMemoryService;
 import com.schemaplexai.service.ai.AiModelConfig;
 import com.schemaplexai.service.context.ContextCacheService;
 import com.schemaplexai.service.memory.rag.RagContentRetrieverFactory;
@@ -25,6 +26,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.springframework.dao.DataAccessException;
+import java.util.stream.Collectors;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -92,6 +95,13 @@ public class ContextInjector {
     @Lazy
     @Autowired(required = false)
     private com.schemaplexai.service.agent.memory.AgentMemoryExtractionService agentMemoryService;
+
+    private AgentFactMemoryService agentFactMemoryService;
+
+    @Autowired
+    void setAgentFactMemoryService(AgentFactMemoryService agentFactMemoryService) {
+        this.agentFactMemoryService = agentFactMemoryService;
+    }
 
     /** 用户长期记忆服务（用户画像与偏好） */
     @Lazy
@@ -340,6 +350,19 @@ public class ContextInjector {
                 }
             } catch (Exception e) {
                 log.debug("用户记忆注入跳过: userId={}, agentId={}, error={}", userId, agentId, e.getMessage());
+            }
+        }
+
+        if (!temporaryChat && agentFactMemoryService != null && StringUtils.hasText(tenantId)) {
+            try {
+                var facts = agentFactMemoryService.list(tenantId, agentId);
+                if (!facts.isEmpty()) {
+                    String text = facts.stream().map(fact -> fact.key() + " = " + fact.jsonValue())
+                            .collect(Collectors.joining("\n"));
+                    sections.add("## Agent 事实资料（用于参考）\n" + compressText(text, 2000));
+                }
+            } catch (DataAccessException e) {
+                log.warn("Agent 事实记忆读取失败: agentId={}, errorType={}", agentId, e.getClass().getSimpleName());
             }
         }
 

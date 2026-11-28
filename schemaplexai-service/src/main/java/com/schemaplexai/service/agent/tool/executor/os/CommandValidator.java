@@ -3,6 +3,8 @@ package com.schemaplexai.service.agent.tool.executor.os;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -13,6 +15,9 @@ public class CommandValidator {
     private static final Pattern SAFE_PATH = Pattern.compile("^[\\p{L}\\p{N}_./\\\\\\-\\s:()\\[\\]#]+$");
     /** grep 模式需要支持 Spring 注解等常见采证场景，因此放开 @ 字符。 */
     private static final Pattern SAFE_PATTERN = Pattern.compile("^[\\p{L}\\p{N}_./\\\\\\-\\s:*?()\\[\\]#|+$^@]+$");
+    private static final Set<String> DIRECT_WORKSPACE_COMMANDS = Set.of(
+            "ls", "pwd", "date", "cat", "head", "tail", "wc", "whoami", "echo");
+    private static final Pattern DIRECT_ARGUMENT = Pattern.compile("[\\p{L}\\p{N} ._@/+,:=-]+");
     private static final Set<String> SAFE_BASH_COMMANDS = Set.of(
             "ls", "pwd", "date", "cat", "grep", "find", "mkdir", "rm", "cp", "mv", "stat",
             "echo", "head", "tail", "wc", "whoami", "type", "dir", "findstr", "attrib",
@@ -66,6 +71,39 @@ public class CommandValidator {
         };
     }
 
+    /** 云端命令仅接受可逐项校验的参数，进程不解析 shell 语法。 */
+    public List<String> directCommand(String command) {
+        if (!StringUtils.hasText(command) || !DIRECT_ARGUMENT.matcher(command).matches()) {
+            throw new IllegalArgumentException("命令只接受单个可执行程序及普通参数");
+        }
+        String[] tokens = command.strip().split(" +");
+        if (!DIRECT_WORKSPACE_COMMANDS.contains(tokens[0])) {
+            throw new IllegalArgumentException("请使用对应的文件工具或授权桌面工具执行此命令");
+        }
+        List<String> arguments = new ArrayList<>(List.of(tokens));
+        for (int index = 1; index < arguments.size(); index++) {
+            String value = arguments.get(index);
+            if (!validateDirectArgument(tokens[0], value)) {
+                throw new IllegalArgumentException("命令参数超出云端工具允许范围");
+            }
+        }
+        return arguments;
+    }
+
+    private boolean validateDirectArgument(String command, String value) {
+        if (value.startsWith("-")) {
+            return switch (command) {
+                case "ls" -> value.matches("-[alh1]{1,4}");
+                case "cat" -> value.matches("-[benstuv]{1,4}");
+                case "head", "tail" -> value.matches("-(?:n|c|[0-9]{1,5})");
+                case "wc" -> value.matches("-[clmwL]{1,4}");
+                case "echo" -> value.matches("-[nE]{1,2}");
+                default -> false;
+            };
+        }
+        return !value.startsWith("/") && !value.contains("..") && !value.contains(":");
+    }
+
     private boolean validatePathArg(Map<String, Object> args, String key) {
         return validatePath(asText(args.get(key)));
     }
@@ -108,7 +146,7 @@ public class CommandValidator {
         if (!StringUtils.hasText(path) || path.length() > 512) {
             return false;
         }
-        if (path.contains("..")) {
+        if (path.startsWith("-") || path.contains("..")) {
             return false;
         }
         if (path.contains("\n") || path.contains("\r") || path.contains("\u0000")) {

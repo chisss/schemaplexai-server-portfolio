@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.runtime.team;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
@@ -17,6 +18,7 @@ import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.model.entity.AgentTeamMemberContextBinding;
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentExecutionResult;
@@ -29,6 +31,7 @@ import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringServic
 import com.schemaplexai.service.desktop.DesktopAttachmentService;
 import com.schemaplexai.service.memory.CompositeChatMemoryStore;
 import com.schemaplexai.service.mq.AgentContextPublisher;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import com.schemaplexai.service.user.impl.UserMemoryExtractionService;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.StateGraph;
@@ -38,6 +41,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.postgresql.ds.PGSimpleDataSource;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.util.StringUtils;
@@ -51,6 +55,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -67,6 +72,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -173,7 +179,7 @@ class TeamAgentRuntimeStrategyCheckpointTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"normal", "release_failure", "missing_checkpoint", "attachment", "attachment_revoked"})
+    @ValueSource(strings = {"normal", "release_failure", "missing_checkpoint", "attachment", "attachment_revoked", "legacy_schema_version", "future_schema_version"})
     void shouldResumePausedExecutionWithRealCheckpointState(String scenario) throws Exception {
         AgentExecutionMapper agentExecutionMapper = mock(AgentExecutionMapper.class);
         AgentTeamMemberMapper agentTeamMemberMapper = mock(AgentTeamMemberMapper.class);
@@ -216,6 +222,14 @@ class TeamAgentRuntimeStrategyCheckpointTest {
                 mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class),
                 Runnable::run
         );
+        @SuppressWarnings("unchecked")
+        ObjectProvider<SecurityRuntimeGuardService> outputGuardProvider = mock(ObjectProvider.class);
+        SecurityRuntimeGuardService outputGuard = mock(SecurityRuntimeGuardService.class);
+        SecurityCheckDecisionVO allow = new SecurityCheckDecisionVO();
+        allow.setDecision(SecurityComplianceConstant.DECISION_ALLOW);
+        when(outputGuard.evaluate(any(), isNull())).thenReturn(allow);
+        when(outputGuardProvider.getIfAvailable()).thenReturn(outputGuard);
+        strategy.setSecurityRuntimeGuardServiceProvider(outputGuardProvider);
 
         Agent agent = new Agent();
         agent.setId(UUID.randomUUID().toString());
@@ -353,6 +367,9 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         assertThat(pausedState.exists()).isTrue();
         assertThat(pausedState.released()).isFalse();
         assertThat(pausedState.checkpointCount()).isGreaterThan(0);
+        if ("legacy_schema_version".equals(scenario)) {
+            removeLatestSchemaVersion(threadName);
+        }
 
         AgentExecutionInputDTO resumeInput = new AgentExecutionInputDTO();
         resumeInput.setMessage("人工已确认可以继续，请只输出审批后的安全方案。");
@@ -384,12 +401,21 @@ class TeamAgentRuntimeStrategyCheckpointTest {
             doThrow(new BusinessException(ResultCode.FORBIDDEN, "附件已被撤销")).when(desktopAttachments)
                     .validateObjectKeys(attachmentIds, true, parentExecution.getTenantId(), parentExecution.getCreatedBy());
         }
+        if ("future_schema_version".equals(scenario)) {
+            // 高版本 checkpoint：lastStateOf 返回当前版本 + 1，resume 应在 invoke(resume)/成员副作用发生前拒绝
+            LangGraphTeamRuntimeAdapter adapter = spy(new LangGraphTeamRuntimeAdapter());
+            TeamGraphState future = new TeamGraphState(Map.of(
+                    TeamGraphConstants.STATE_SCHEMA_VERSION, TeamGraphConstants.SCHEMA_VERSION + 1));
+            doReturn(Optional.of(future)).when(adapter).lastStateOf(any(), any());
+            ReflectionTestUtils.setField(strategy, "langGraphRuntimeAdapter", adapter);
+        }
         AgentExecutionResult resumedResult = strategy.resume(agent, parentExecution, resumeContext, resumeInput).get();
         if (!attachmentIds.isEmpty()) {
             verify(desktopAttachments, times(2))
                     .validateObjectKeys(attachmentIds, true, parentExecution.getTenantId(), parentExecution.getCreatedBy());
         }
-        if ("missing_checkpoint".equals(scenario) || "attachment_revoked".equals(scenario)) {
+        if ("missing_checkpoint".equals(scenario) || "attachment_revoked".equals(scenario)
+                || "future_schema_version".equals(scenario)) {
             assertThat(executionRound.get()).isEqualTo(1);
             assertThat(resumedResult.getStatus()).isEqualTo(AgentExecutionStatusEnum.FAILED.getCode());
             verify(agentLogService).tryFinalizeWithEvent(eq(parentExecution.getId()),
@@ -446,6 +472,9 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         assertThat(resumedState.exists()).isTrue();
         assertThat(resumedState.released()).isEqualTo(!"release_failure".equals(scenario));
         assertThat(resumedState.checkpointCount()).isGreaterThan(0);
+        if ("legacy_schema_version".equals(scenario)) {
+            assertThat(loadLatestSchemaVersion(threadName)).isEqualTo(TeamGraphConstants.SCHEMA_VERSION);
+        }
     }
 
     @Test
@@ -575,7 +604,7 @@ class TeamAgentRuntimeStrategyCheckpointTest {
     }
 
     @Test
-    void shouldExpireOnlyOldReleasedTerminalThreadsAndTheirCheckpoints() throws Exception {
+    void shouldExpireOldTerminalThreadsAndKeepPausedOrRecentCheckpoints() throws Exception {
         DataSource dataSource = buildCheckpointDataSource();
         TeamCheckpointStore store = new TeamCheckpointStore(dataSource);
         ReflectionTestUtils.setField(store, "retentionDays", 7);
@@ -599,13 +628,13 @@ class TeamAgentRuntimeStrategyCheckpointTest {
         store.cleanupExpiredCheckpoints();
 
         assertThat(loadCheckpointState("expired").exists()).isFalse();
-        assertThat(loadCheckpointState("still-active").checkpointCount()).isEqualTo(1);
+        assertThat(loadCheckpointState("still-active").exists()).isFalse();
         assertThat(loadCheckpointState("paused").checkpointCount()).isEqualTo(1);
         assertThat(loadCheckpointState("fresh").checkpointCount()).isEqualTo(1);
         try (var connection = dataSource.getConnection(); var statement = connection.createStatement();
              var result = statement.executeQuery("SELECT count(*) FROM lg4jcheckpoint")) {
             assertThat(result.next()).isTrue();
-            assertThat(result.getInt(1)).isEqualTo(3);
+            assertThat(result.getInt(1)).isEqualTo(2);
         }
     }
 
@@ -635,6 +664,58 @@ class TeamAgentRuntimeStrategyCheckpointTest {
             execution.setInt(4, ageDays);
             execution.executeUpdate();
         }
+    }
+
+    private void removeLatestSchemaVersion(String threadName) throws Exception {
+        String select = latestCheckpointSql();
+        String checkpointId;
+        String payload;
+        try (var connection = buildCheckpointDataSource().getConnection();
+             var statement = connection.prepareStatement(select)) {
+            statement.setString(1, threadName);
+            try (var resultSet = statement.executeQuery()) {
+                assertThat(resultSet.next()).isTrue();
+                checkpointId = resultSet.getString("checkpoint_id");
+                payload = resultSet.getString("state_data");
+            }
+        }
+        var serializer = new StateGraph<TeamGraphState>(TeamGraphState::new).getStateSerializer();
+        Map<String, Object> data = new java.util.LinkedHashMap<>(serializer.readDataFromString(payload).data());
+        data.remove(TeamGraphConstants.STATE_SCHEMA_VERSION);
+        try (var connection = buildCheckpointDataSource().getConnection();
+             var statement = connection.prepareStatement(
+                     "UPDATE lg4jcheckpoint SET state_data = ? WHERE checkpoint_id = ?::uuid")) {
+            statement.setString(1, serializer.writeDataAsString(data));
+            statement.setString(2, checkpointId);
+            statement.executeUpdate();
+        }
+    }
+
+    private int loadLatestSchemaVersion(String threadName) throws Exception {
+        try (var connection = buildCheckpointDataSource().getConnection();
+             var statement = connection.prepareStatement(latestCheckpointSql())) {
+            statement.setString(1, threadName);
+            try (var resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return -1;
+                }
+                var serializer = new StateGraph<TeamGraphState>(TeamGraphState::new).getStateSerializer();
+                Object version = serializer.readDataFromString(resultSet.getString("state_data")).data()
+                        .get(TeamGraphConstants.STATE_SCHEMA_VERSION);
+                return version instanceof Number number ? number.intValue() : -1;
+            }
+        }
+    }
+
+    private String latestCheckpointSql() {
+        return """
+                SELECT c.checkpoint_id, c.state_data
+                FROM lg4jcheckpoint c
+                JOIN lg4jthread t ON t.thread_id = c.thread_id
+                WHERE t.thread_name = ?
+                ORDER BY c.saved_at DESC, c.checkpoint_id DESC
+                LIMIT 1
+                """;
     }
 
     private CheckpointState loadCheckpointState(String threadName) throws Exception {

@@ -1,6 +1,7 @@
 package com.schemaplexai.web.config;
 
 import com.schemaplexai.common.util.SecurityUtil;
+import io.opentelemetry.context.Context;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskDecorator;
@@ -19,6 +20,7 @@ public class AgentAsyncConfig {
     @Bean
     public TaskDecorator securityContextTaskDecorator() {
         return runnable -> {
+            Context trace = Context.current();
             String callerUserId = SecurityUtil.getCurrentUserId();
             String callerTenantId = SecurityUtil.getCurrentTenantId();
             String callerUsername = SecurityUtil.getCurrentUsername();
@@ -26,7 +28,7 @@ public class AgentAsyncConfig {
                 String originalUserId = SecurityUtil.getCurrentUserId();
                 String originalTenantId = SecurityUtil.getCurrentTenantId();
                 String originalUsername = SecurityUtil.getCurrentUsername();
-                try {
+                try (var scope = trace.makeCurrent()) {
                     SecurityUtil.clear();
                     if (StringUtils.hasText(callerUserId)) {
                         SecurityUtil.setCurrentUserId(callerUserId);

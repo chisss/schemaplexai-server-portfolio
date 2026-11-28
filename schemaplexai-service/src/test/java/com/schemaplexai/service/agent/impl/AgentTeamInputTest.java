@@ -25,6 +25,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.InjectMocks;
+import com.schemaplexai.service.agent.ontology.AgentOntologyRuntimeContext;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -50,6 +51,7 @@ class AgentTeamInputTest {
     @Mock private PendingToolApprovalService pendingApprovals;
     @Mock private TeamChildApprovalService teamApprovals;
     @Mock private ExecutionEventStreamService executionEvents;
+    @Mock private AgentOntologyRuntimeContext ontologyContext;
     @InjectMocks private AgentServiceImpl service;
 
     @BeforeEach

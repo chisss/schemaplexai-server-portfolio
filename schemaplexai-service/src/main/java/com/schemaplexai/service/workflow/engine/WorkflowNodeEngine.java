@@ -47,6 +47,10 @@ import com.schemaplexai.service.quality.runtime.BuiltinQualityAssuranceService;
 import com.schemaplexai.service.notification.InAppMessageService;
 import com.schemaplexai.service.quality.feedback.QualityIssueFeedbackService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard.Decision;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard.OutputGuardContext;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard.OutputGuardResult;
 import com.schemaplexai.service.quality.pipeline.QualityCheckRequest;
 import com.schemaplexai.service.quality.pipeline.QualityCheckResult;
 import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategy;
@@ -1052,7 +1056,7 @@ public class WorkflowNodeEngine {
         List<QualityEvaluationStrategy.Finding> findings = buildWorkflowQualityFindings(qualityOutput, qualityGateDecision);
         return new QualityCheckResult(
                 readString(qualityOutput, "qualityTaskId"),
-                qualityGateDecision.decision(),
+                defaultIfBlank(readString(qualityOutput, "qualityGateDecision"), qualityGateDecision.decision()),
                 findings,
                 readInteger(qualityOutput != null ? qualityOutput.get("qualityScore") : null, 0),
                 resolveWorkflowQualitySummary(qualityOutput, qualityGateDecision),
@@ -1061,8 +1065,22 @@ public class WorkflowNodeEngine {
                 readString(qualityOutput, "qualityExecutionStrategy"),
                 resolveWorkflowQualityTaskStatus(qualityOutput),
                 readInteger(qualityOutput != null ? qualityOutput.get("qualityDeviationCount") : null, findings.size()),
-                readInteger(qualityOutput != null ? qualityOutput.get("qualityWarningCount") : null, 0)
+                readInteger(qualityOutput != null ? qualityOutput.get("qualityWarningCount") : null, 0),
+                readObjectMap(qualityOutput, "qualityCoverage")
         );
+    }
+
+    private Map<String, Object> readObjectMap(Map<String, Object> source, String key) {
+        if (source == null || !(source.get(key) instanceof Map<?, ?> raw)) {
+            return Map.of();
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        raw.forEach((mapKey, value) -> {
+            if (mapKey != null) {
+                result.put(String.valueOf(mapKey), value);
+            }
+        });
+        return result;
     }
 
     private List<QualityEvaluationStrategy.Finding> buildWorkflowQualityFindings(Map<String, Object> qualityOutput,
@@ -2273,30 +2291,23 @@ public class WorkflowNodeEngine {
     /** 评估工作流节点输出内容的安全合规性（PII、敏感信息、有害内容、合规风险） */
     private SecurityCheckDecisionVO evaluateOutputSecurityForNode(
             WorkflowInstance instance, WorkflowNodeExecution nodeExec, String outputContent) {
-        try {
-            SecurityRuntimeGuardService guard = securityRuntimeGuardServiceProvider.getIfAvailable();
-            if (guard == null || !StringUtils.hasText(outputContent)) {
-                return null;
-            }
-            SecurityRuntimeCheckRequest request = new SecurityRuntimeCheckRequest();
-            request.setTenantId(instance.getTenantId());
-            request.setScene(SecurityComplianceConstant.CHECK_SCENE_OUTPUT);
-            request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
-            request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_NODE);
-            request.setResourceId(nodeExec.getId());
-            request.setResourceName(nodeExec.getNodeLabel());
-            request.setWorkflowInstanceId(instance.getId());
-            request.setWorkflowNodeId(nodeExec.getNodeId());
-            request.setContent(outputContent);
-            SecurityCheckDecisionVO decision = guard.evaluate(request, null);
-            if (decision == null || SecurityComplianceConstant.DECISION_ALLOW.equals(decision.getDecision())) {
-                return null;
-            }
-            return decision;
-        } catch (Exception e) {
-            log.warn("节点输出安全检查异常，默认放行: instanceId={}, nodeId={}",
-                    instance.getId(), nodeExec.getNodeId(), e);
+        OutputGuardResult guarded = new AgentOutputSecurityGuard(securityRuntimeGuardServiceProvider)
+                .evaluate(new OutputGuardContext(
+                        instance.getTenantId(), null, nodeExec.getAgentExecutionId(),
+                        SecurityComplianceConstant.RESOURCE_TYPE_WORKFLOW_NODE, nodeExec.getId(),
+                        nodeExec.getNodeLabel(), instance.getId(), nodeExec.getNodeId(), null,
+                        outputContent, outputContent, Map.of("runtimeType", "workflow_node")
+                ));
+        if (guarded.decision() == Decision.ALLOW) {
             return null;
         }
+        if (guarded.decision() == Decision.ERROR) {
+            SecurityCheckDecisionVO failClosed = new SecurityCheckDecisionVO();
+            failClosed.setDecision(SecurityComplianceConstant.DECISION_BLOCK);
+            failClosed.setMessage(guarded.message());
+            failClosed.setShouldCreateIncident(false);
+            return failClosed;
+        }
+        return guarded.policyDecision();
     }
 }

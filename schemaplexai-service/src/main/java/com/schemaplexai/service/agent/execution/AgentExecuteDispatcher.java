@@ -109,8 +109,10 @@ public class AgentExecuteDispatcher {
 
         // 获取准入令牌的副本用于 lambda 中的释放
         final ExecutionAdmissionService.AdmissionToken admissionTokenRef = admissionToken;
+        var heartbeat = executionLeaseService.keepAlive(executionId, nodeId, leaseSeconds);
         try {
             agentRuntimeOrchestrator.execute(context).whenComplete((ignored, throwable) -> {
+                if (heartbeat != null) heartbeat.cancel(false);
                 executionLeaseService.releaseLease(executionId, nodeId);
                 admissionService.release(admissionTokenRef);
                 if (throwable != null) {
@@ -119,6 +121,7 @@ public class AgentExecuteDispatcher {
             });
             log.info("执行任务已分发: executionId={}, nodeId={}", executionId, nodeId);
         } catch (Exception ex) {
+            if (heartbeat != null) heartbeat.cancel(false);
             executionLeaseService.releaseLease(executionId, nodeId);
             admissionService.release(admissionToken);
             agentLogService.updateExecutionStatus(

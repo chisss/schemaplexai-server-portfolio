@@ -12,6 +12,7 @@ import lombok.Getter;
 public enum TeamMemberRoleTypeEnum {
 
     LEAD_AGENT("lead_agent", "团队负责人"),
+    ADVISOR("advisor", "团队协调顾问"),
     MEMBER("member", "通用成员");
 
     private final String code;

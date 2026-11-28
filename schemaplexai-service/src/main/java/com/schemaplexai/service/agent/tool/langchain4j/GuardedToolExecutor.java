@@ -14,9 +14,12 @@ import com.schemaplexai.service.agent.tool.model.ToolCall;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.invocation.InvocationContext;
+import dev.langchain4j.invocation.InvocationParameters;
 import dev.langchain4j.service.tool.ToolExecutionResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.StringUtils;
+
+import java.util.UUID;
 
 /**
  * 统一工具安全装饰器（Agent 主链可信执行入口）。
@@ -84,14 +87,30 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
         String actualToolCode = binding != null && StringUtils.hasText(binding.getToolCode())
                 ? binding.getToolCode()
                 : request.name();
+        ParsedArguments parsedArguments;
+        try {
+            parsedArguments = parseArguments(request.arguments(), actualToolCode);
+        } catch (IllegalArgumentException exception) {
+            ToolCall rejected = ToolCall.builder()
+                    .callId(request.id())
+                    .toolCode(actualToolCode)
+                    .arguments(objectMapper.createObjectNode())
+                    .build();
+            return blockedResult(rejected, exception.getMessage(), null);
+        }
+        ToolExecutionRequest canonicalRequest = ToolExecutionRequest.builder()
+                .id(request.id())
+                .name(request.name())
+                .arguments(parsedArguments.canonicalJson())
+                .build();
         ToolCall toolCall = ToolCall.builder()
                 .callId(request.id())
                 .toolCode(actualToolCode)
-                .arguments(parseArguments(request.arguments()))
+                .arguments(parsedArguments.node())
                 .build();
 
         // ① 沙箱前置校验（null 策略 fail-closed）
-        String sandboxError = sandboxGuard.validateTool(sandboxPolicy, sourceType, toolCall);
+        String sandboxError = sandboxGuard.validateTool(sandboxPolicy, sourceType, toolCall, tenantId);
         if (StringUtils.hasText(sandboxError)) {
             log.warn("工具被沙箱守卫拦截: toolCode={}, error={}", toolCall.getToolCode(), sandboxError);
             return blockedResult(toolCall, sandboxError, null);
@@ -111,13 +130,14 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
         }
 
         // ③ 委托执行
-        ToolExecutionResult result = delegate.executeWithContext(request, invocationContext);
+        ToolExecutionResult result = delegate.executeWithContext(canonicalRequest,
+                invocationContext != null ? invocationContext : fallbackContext(null));
 
         // ④ 运行时合规后置检查
         if (securityRuntimeGuardService != null) {
             SecurityCheckDecisionVO postDecision = securityRuntimeGuardService.evaluate(
                     buildCheckRequest(SecurityComplianceConstant.CHECK_SCENE_TOOL_POST, toolCall,
-                            toPlatformResult(request, result)),
+                            toPlatformResult(canonicalRequest, result)),
                     null
             );
             if (ToolSecuritySupport.requiresInterrupt(postDecision)) {
@@ -131,7 +151,22 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
 
     @Override
     public String execute(ToolExecutionRequest request, Object memoryId) {
-        return executeWithContext(request, null).resultText();
+        return executeWithContext(request, fallbackContext(memoryId)).resultText();
+    }
+
+    private InvocationContext fallbackContext(Object memoryId) {
+        InvocationParameters parameters = new InvocationParameters();
+        if (tenantId != null) parameters.put("tenantId", tenantId);
+        if (agentId != null) parameters.put("agentId", agentId);
+        if (executionId != null) parameters.put("executionId", executionId);
+        return InvocationContext.builder()
+                .invocationId(UUID.randomUUID())
+                .interfaceName(GuardedToolExecutor.class.getName())
+                .methodName("execute")
+                .chatMemoryId(memoryId)
+                .invocationParameters(parameters)
+                .timestampNow()
+                .build();
     }
 
     private SecurityRuntimeCheckRequest buildCheckRequest(String scene, ToolCall call, ToolResult result) {
@@ -180,17 +215,22 @@ public class GuardedToolExecutor implements dev.langchain4j.service.tool.ToolExe
                 .build();
     }
 
-    private JsonNode parseArguments(String arguments) {
+    private ParsedArguments parseArguments(String arguments, String toolCode) {
         if (arguments == null || arguments.isBlank()) {
-            return objectMapper.createObjectNode();
+            return new ParsedArguments(objectMapper.createObjectNode(), "{}");
         }
         try {
-            return objectMapper.readTree(arguments);
+            JsonNode parsed = objectMapper.readTree(arguments);
+            if (parsed == null || !parsed.isObject()) {
+                throw new IllegalArgumentException("工具参数必须是 JSON 对象: " + toolCode);
+            }
+            return new ParsedArguments(parsed, objectMapper.writeValueAsString(parsed));
         } catch (Exception exception) {
-            log.warn("工具参数 JSON 解析失败: toolName={}, error={}",
-                    binding != null ? binding.getToolCode() : null, exception.getMessage());
-            return objectMapper.createObjectNode();
+            throw new IllegalArgumentException("工具参数 JSON 非法，已拒绝执行: " + toolCode, exception);
         }
+    }
+
+    private record ParsedArguments(JsonNode node, String canonicalJson) {
     }
 
     private String serialize(ToolResult result) {

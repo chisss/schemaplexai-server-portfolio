@@ -17,6 +17,7 @@ import com.schemaplexai.service.security.SecurityAuditEventService;
 import com.schemaplexai.service.security.SecurityIncidentService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -223,6 +224,56 @@ class SecurityRuntimeGuardServiceImplTest {
         assertThat(result.getDecision()).isEqualTo(SecurityComplianceConstant.DECISION_BLOCK);
         assertThat(result.getMatchedPolicies()).extracting(SecurityMatchedRuleVO::getSourceCode)
                 .containsExactly("tool_result_limit", "legacy_limit");
+    }
+
+    @Test
+    void shouldUseServerRegionFactAndIgnoreCallerSuppliedContext() {
+        SecurityPolicy policy = new SecurityPolicy();
+        policy.setId("region-policy");
+        policy.setPolicyCode("region-policy");
+        policy.setEnforcementMode(SecurityComplianceConstant.ENFORCEMENT_BLOCK);
+        policy.setPolicyConfig(Map.of(
+                "allowedRegions", List.of("cn-hz"),
+                "hitAction", SecurityComplianceConstant.DECISION_BLOCK
+        ));
+        var service = serviceWithPolicies(policy);
+        SecurityUtil.setCurrentTenantId("tenant-test");
+        var request = new SecurityRuntimeCheckRequest();
+        request.setScene(SecurityComplianceConstant.CHECK_SCENE_AGENT_EXECUTE);
+        request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+        request.setContent("普通请求");
+        request.setContext(Map.of("region", "forged-region"));
+
+        var decision = service.evaluate(request, null);
+
+        assertThat(decision.getDecision()).isEqualTo(SecurityComplianceConstant.DECISION_ALLOW);
+    }
+
+    @Test
+    void shouldBlockWhenRequiredServerFactIsMissingOrUnknown() {
+        SecurityPolicy policy = new SecurityPolicy();
+        policy.setId("transport-policy");
+        policy.setPolicyCode("transport-policy");
+        policy.setEnforcementMode(SecurityComplianceConstant.ENFORCEMENT_BLOCK);
+        policy.setPolicyConfig(Map.of(
+                "encryptTransport", true,
+                "transportProtocol", "TLS1.3",
+                "hitAction", SecurityComplianceConstant.DECISION_BLOCK
+        ));
+        var service = serviceWithPolicies(policy);
+        ReflectionTestUtils.setField(service, "trustedTransportProtocol", "unknown");
+        SecurityUtil.setCurrentTenantId("tenant-test");
+        var request = new SecurityRuntimeCheckRequest();
+        request.setScene(SecurityComplianceConstant.CHECK_SCENE_AGENT_EXECUTE);
+        request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
+        request.setContent("普通请求");
+        request.setContext(Map.of("transportProtocol", "TLS1.3"));
+
+        var decision = service.evaluate(request, null);
+
+        assertThat(decision.getDecision()).isEqualTo(SecurityComplianceConstant.DECISION_BLOCK);
+        assertThat(decision.getMatchedPolicies()).extracting(SecurityMatchedRuleVO::getHitReason)
+                .containsExactly("传输协议合规事实不可用: unknown");
     }
 
     private SecurityPolicy lengthPolicy(String code, List<String> controlPoints) {

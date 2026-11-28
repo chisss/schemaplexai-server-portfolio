@@ -38,6 +38,9 @@ import org.springframework.web.util.HtmlUtils;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.util.Locale;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -240,8 +243,17 @@ public class BuiltinToolExecutor implements ToolExecutor {
                 return failure(toolCall, "命令不在白名单");
             }
 
-            ProcessBuilder processBuilder = new ProcessBuilder(adapter.wrapShellCommand(command));
             sandboxGuard.validateBuiltinExecution(sandboxPolicy, toolCode, args, workingDirectory, command);
+            List<String> processArguments = "sys.bash".equals(toolCode)
+                    ? directWorkspaceCommand(command, workingDirectory) : adapter.wrapShellCommand(command);
+            ProcessBuilder processBuilder = new ProcessBuilder(processArguments);
+            processBuilder.environment().clear();
+            processBuilder.environment().put("PATH", "/usr/bin:/bin");
+            processBuilder.environment().put("LANG", "C.UTF-8");
+            if (System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win")) {
+                String systemRoot = System.getenv("SystemRoot");
+                if (systemRoot != null) processBuilder.environment().put("SystemRoot", systemRoot);
+            }
             if (workingDirectory != null) {
                 processBuilder.directory(workingDirectory.toFile());
             }
@@ -486,7 +498,11 @@ public class BuiltinToolExecutor implements ToolExecutor {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
+                int remaining = MAX_COMMAND_OUTPUT_LENGTH - output.length();
+                if (remaining > 0) {
+                    output.append(line, 0, Math.min(remaining, line.length()));
+                    if (output.length() < MAX_COMMAND_OUTPUT_LENGTH) output.append('\n');
+                }
             }
         }
         return output.toString();
@@ -769,6 +785,21 @@ public class BuiltinToolExecutor implements ToolExecutor {
         return requestedPath;
     }
 
+    private List<String> directWorkspaceCommand(String command, Path workingDirectory) throws IOException {
+        List<String> arguments = commandValidator.directCommand(command);
+        if (!"echo".equals(arguments.getFirst()) && workingDirectory != null) {
+            Path root = workingDirectory.toRealPath();
+            for (String argument : arguments.subList(1, arguments.size())) {
+                if (argument.startsWith("-")) continue;
+                Path target = root.resolve(argument).normalize();
+                if (Files.exists(target) && !target.toRealPath().startsWith(root)) {
+                    throw new IllegalArgumentException("命令文件参数超出授权目录");
+                }
+            }
+        }
+        return arguments;
+    }
+
     private boolean requiresWorkingDirectory(String toolCode) {
         return StringUtils.hasText(toolCode) && toolCode.startsWith("sys.");
     }
@@ -777,13 +808,24 @@ public class BuiltinToolExecutor implements ToolExecutor {
                                        LocalDateTime startAt, Map<String, Object> safeArgsForLog,
                                        String tenantId, String agentId) throws Exception {
         Process process = processBuilder.start();
+        process.getOutputStream().close();
         FutureTask<String> outputTask = new FutureTask<>(() -> readProcessOutput(process));
         Thread outputReader = new Thread(outputTask, "builtin-tool-output-reader");
         outputReader.setDaemon(true);
         outputReader.start();
 
-        boolean finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        boolean finished;
+        try {
+            finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException cancellation) {
+            process.descendants().forEach(ProcessHandle::destroyForcibly);
+            process.destroyForcibly();
+            outputTask.cancel(true);
+            Thread.currentThread().interrupt();
+            throw cancellation;
+        }
         if (!finished) {
+            process.descendants().forEach(ProcessHandle::destroyForcibly);
             process.destroyForcibly();
             process.waitFor(3, TimeUnit.SECONDS);
             outputTask.cancel(true);
@@ -838,7 +880,7 @@ public class BuiltinToolExecutor implements ToolExecutor {
             return null;
         }
         Path target = workingDirectory.resolve(pathValue).normalize();
-        if (java.nio.file.Files.exists(target)) {
+        if (Files.exists(target)) {
             return null;
         }
         String error = "系统工具路径不存在: " + pathValue;

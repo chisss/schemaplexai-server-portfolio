@@ -1,6 +1,7 @@
 package com.schemaplexai.service.agent.runtime.team;
 
 import com.schemaplexai.common.util.SecurityUtil;
+import io.opentelemetry.context.Context;
 import org.bsc.langgraph4j.CompileConfig;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphInput;
@@ -18,12 +19,16 @@ public class LangGraphTeamRuntimeAdapter {
     public CompileConfig buildCompileConfig(PostgresSaver saver) {
         return CompileConfig.builder()
                 .checkpointSaver(saver)
+                // 审计 LA-02：保留 interruptBefore（而非 interruptAfter）。await_input 在 resume 时会被重新执行，
+                // 用于重新校验暂停期间可能被撤销的附件——这是有意的恢复语义。约束：await_input 必须保持幂等/无副作用，
+                // 因此不采用 interruptAfter（后者会在暂停前执行节点，从而丢失 resume 时的附件复校验）。
                 .interruptBefore(TeamGraphConstants.NODE_AWAIT_INPUT)
                 .releaseThread(false)
                 .build();
     }
 
     public RunnableConfig buildRunnableConfig(String threadId) {
+        Context trace = Context.current();
         String tenantId = SecurityUtil.getCurrentTenantId();
         String userId = SecurityUtil.getCurrentUserId();
         String username = SecurityUtil.getCurrentUsername();
@@ -31,7 +36,7 @@ public class LangGraphTeamRuntimeAdapter {
                 .threadId(threadId)
                 // 父图会等待子图完成，各自使用独立虚拟线程执行节点与边
                 .emitterExecutor(command -> Thread.startVirtualThread(() -> {
-                    try {
+                    try (var scope = trace.makeCurrent()) {
                         SecurityUtil.setCurrentTenantId(tenantId);
                         SecurityUtil.setCurrentUserId(userId);
                         SecurityUtil.setCurrentUsername(username);

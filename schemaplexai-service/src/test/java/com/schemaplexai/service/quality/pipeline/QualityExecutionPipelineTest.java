@@ -20,6 +20,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -55,14 +56,17 @@ class QualityExecutionPipelineTest {
 
         QualityCheckResult result = pipeline.execute(REQUEST, "task");
 
-        assertThat(result.score()).isEqualTo(100);
-        assertThat(result.taskStatus()).isEqualTo("succeeded");
+        assertThat(result.score()).isEqualTo(59);
+        assertThat(result.taskStatus()).isEqualTo("failed");
+        assertThat(result.gateDecision()).isEqualTo("error");
+        assertThat(result.toOutputMap()).containsKeys("qualityGateDecision", "qualityCoverage")
+                .containsEntry("qualityCoverageComplete", false);
         Map<String, Object> summary = savedSummary();
-        assertThat(summary).containsEntry("score", 100).containsEntry("deviationCount", 0);
-        assertThat(summary.get("coverage")).isEqualTo(Map.of(
-                "rules", Map.of("mode", "all_detectors", "configuredRuleCount", 0, "enabledRuleCount", 0L,
-                        "detectorsAttempted", 2, "detectorsCompleted", 1, "detectorsFailed", 1),
-                "model", Map.of("status", "skipped", "reason", "no_profile")));
+        assertThat(summary).containsEntry("score", 59).containsEntry("deviationCount", 0);
+        Map<String, Object> coverage = objectMap(summary.get("coverage"));
+        assertThat(coverage).containsEntry("requiredIncomplete", true);
+        assertThat(objectMap(coverage.get("rules"))).containsEntry("detectorsFailed", 2);
+        assertThat(objectMap(coverage.get("model"))).containsEntry("status", "not_applicable");
         verifyNoInteractions(strategies);
     }
 
@@ -80,12 +84,14 @@ class QualityExecutionPipelineTest {
         QualityCheckResult result = pipeline.execute(REQUEST, "task");
 
         assertThat(result.deviationCount()).isEqualTo(1);
+        assertThat(result.score()).isEqualTo(59);
+        assertThat(result.taskStatus()).isEqualTo("failed");
         Map<String, Object> summary = savedSummary();
         assertThat(summary).containsEntry("deviationCount", 1).containsEntry("warningCount", 1L);
-        assertThat(summary.get("coverage")).isEqualTo(Map.of(
-                "rules", Map.of("mode", "configured", "configuredRuleCount", 3, "enabledRuleCount", 2L,
-                        "detectorsAttempted", 1, "detectorsCompleted", 1, "detectorsFailed", 0),
-                "model", Map.of("status", "skipped", "reason", "no_profile")));
+        Map<String, Object> coverage = objectMap(summary.get("coverage"));
+        assertThat(coverage).containsEntry("requiredIncomplete", true);
+        assertThat(objectMap(coverage.get("dimensions")))
+                .containsKeys("structural", "semantic");
     }
 
     @Test
@@ -94,7 +100,8 @@ class QualityExecutionPipelineTest {
 
         pipeline.execute(REQUEST, "task");
 
-        assertModelEvidence(Map.of("status", "skipped", "reason", "no_model", "resolvedProfileId", "profile"));
+        assertModelEvidence(Map.of("status", "failed", "modelRunStatus", "failed", "required", true,
+                "requiredIncomplete", true, "reason", "no_model", "resolvedProfileId", "profile"));
         verifyNoInteractions(strategies);
     }
 
@@ -106,8 +113,10 @@ class QualityExecutionPipelineTest {
 
         QualityCheckResult result = pipeline.execute(REQUEST, "task");
 
-        assertThat(result.score()).isEqualTo(96);
+        assertThat(result.score()).isEqualTo(59);
+        assertThat(result.taskStatus()).isEqualTo("failed");
         assertModelEvidence(Map.of("status", "unknown", "reason", "unverified_result",
+                "modelRunStatus", "unknown", "required", true, "requiredIncomplete", true,
                 "resolvedProfileId", "profile", "resolvedModelId", "model"));
     }
 
@@ -120,7 +129,8 @@ class QualityExecutionPipelineTest {
         QualityCheckResult result = pipeline.execute(REQUEST, "task");
 
         assertThat(result.score()).isEqualTo(96);
-        assertModelEvidence(Map.of("status", "completed", "resolvedProfileId", "profile", "resolvedModelId", "model"));
+        assertModelEvidence(Map.of("status", "passed", "modelRunStatus", "completed", "required", true,
+                "requiredIncomplete", false, "resolvedProfileId", "profile", "resolvedModelId", "model"));
     }
 
     @Test
@@ -132,8 +142,9 @@ class QualityExecutionPipelineTest {
         QualityCheckResult result = pipeline.execute(REQUEST, "task");
 
         assertThat(result.score()).isEqualTo(20);
-        assertThat(result.taskStatus()).isEqualTo("succeeded");
+        assertThat(result.taskStatus()).isEqualTo("failed");
         assertModelEvidence(Map.of("status", "failed", "reason", "model_response_invalid",
+                "modelRunStatus", "failed", "required", true, "requiredIncomplete", true,
                 "resolvedProfileId", "profile", "resolvedModelId", "model"));
     }
 
@@ -151,6 +162,7 @@ class QualityExecutionPipelineTest {
         assertThat(result.score()).isEqualTo(20);
         assertThat(result.findings()).containsExactly(finding);
         assertModelEvidence(Map.of("status", "unknown", "reason", "model_response_invalid",
+                "modelRunStatus", "unknown", "required", true, "requiredIncomplete", true,
                 "resolvedProfileId", "profile", "resolvedModelId", "model"));
     }
 
@@ -160,19 +172,26 @@ class QualityExecutionPipelineTest {
 
         QualityCheckResult result = pipeline.execute(REQUEST, "task");
 
-        assertThat(result.score()).isEqualTo(100);
+        assertThat(result.score()).isEqualTo(59);
         assertModelEvidence(Map.of("status", "unknown", "reason", "no_result",
+                "modelRunStatus", "unknown", "required", true, "requiredIncomplete", true,
                 "resolvedProfileId", "profile", "resolvedModelId", "model"));
     }
 
     private Map<String, Object> savedSummary() {
         ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.captor();
-        verify(tasks).completeManualDeviationTask(eq("task"), eq(REQUEST), any(), captor.capture());
+        verify(tasks).completeManualDeviationTask(
+                eq("task"), eq(REQUEST), any(), captor.capture(), anyBoolean());
         return captor.getValue();
     }
 
-    private void assertModelEvidence(Map<String, String> expected) {
-        assertThat(((Map<?, ?>) savedSummary().get("coverage")).get("model")).isEqualTo(expected);
+    private void assertModelEvidence(Map<String, Object> expected) {
+        assertThat(objectMap(objectMap(savedSummary().get("coverage")).get("model"))).isEqualTo(expected);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> objectMap(Object value) {
+        return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
 
     private void stubProfile() {

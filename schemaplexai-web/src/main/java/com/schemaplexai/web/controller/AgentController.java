@@ -5,6 +5,9 @@ import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.common.result.PageResult;
 import com.schemaplexai.common.result.R;
 import com.schemaplexai.common.util.SecurityUtil;
+import com.schemaplexai.service.agent.memory.AgentFactMemoryService;
+import org.springframework.beans.factory.annotation.Autowired;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.schemaplexai.model.dto.agent.AgentConfigRequest;
 import com.schemaplexai.model.dto.agent.AgentContextBindingDTO;
 import com.schemaplexai.model.dto.agent.AgentCreateRequest;
@@ -121,6 +124,33 @@ public class AgentController {
     @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
     public R<Void> updateStatus(@PathVariable String id, @RequestParam String status) {
         agentService.updateStatus(id, status);
+        return R.ok();
+    }
+
+    private AgentFactMemoryService agentFactMemoryService;
+
+    @Autowired
+    void setAgentFactMemoryService(AgentFactMemoryService agentFactMemoryService) {
+        this.agentFactMemoryService = agentFactMemoryService;
+    }
+
+    @GetMapping("/{id}/facts")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
+    public R<List<AgentFactMemoryService.Fact>> listFacts(@PathVariable String id) {
+        return R.ok(agentFactMemoryService.list(SecurityUtil.getCurrentTenantId(), id));
+    }
+
+    @PutMapping("/{id}/facts/{key}")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
+    public R<Void> saveFact(@PathVariable String id, @PathVariable String key, @RequestBody JsonNode value) {
+        agentFactMemoryService.save(SecurityUtil.getCurrentTenantId(), id, key, value);
+        return R.ok();
+    }
+
+    @DeleteMapping("/{id}/facts/{key}")
+    @PreAuthorize("@authorizationService.hasPermission(T(com.schemaplexai.common.enums.PermissionCodeEnum).AGENT_MANAGE.getCode())")
+    public R<Void> deleteFact(@PathVariable String id, @PathVariable String key) {
+        agentFactMemoryService.remove(SecurityUtil.getCurrentTenantId(), id, key);
         return R.ok();
     }
 

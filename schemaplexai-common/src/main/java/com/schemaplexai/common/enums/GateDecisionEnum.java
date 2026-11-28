@@ -12,6 +12,7 @@ public enum GateDecisionEnum {
 
     PASS("pass", "通过"),
     WARN("warn", "告警"),
+    ERROR("error", "检查错误"),
     PAUSE("pause", "暂停"),
     FAIL("fail", "终止"),
     RETRY("retry", "重试");

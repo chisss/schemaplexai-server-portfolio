@@ -1,6 +1,12 @@
 package com.schemaplexai.service.agent.tool.sandbox;
 
 import io.roastedroot.quickjs4j.core.Runner;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -25,6 +31,8 @@ public class WasmSandboxService {
 
     private final CodeExecProperties properties;
     private final Semaphore concurrencyLimiter;
+    private final HttpClient workerClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+    private final ObjectMapper workerJson = new ObjectMapper();
 
     public WasmSandboxService(CodeExecProperties properties) {
         this.properties = properties;
@@ -38,6 +46,9 @@ public class WasmSandboxService {
         // 前置校验
         if (!properties.isEnabled()) {
             return errorResult(request, 4, "代码沙箱功能未启用");
+        }
+        if (properties.isRequireWorker() && properties.getWorkerUrl() == null) {
+            return errorResult(request, 4, "未配置隔离代码执行服务");
         }
         if (!StringUtils.hasText(request.getLanguage())
                 || !SUPPORTED_LANGUAGES.contains(request.getLanguage().toLowerCase())) {
@@ -65,9 +76,47 @@ public class WasmSandboxService {
 
         long startMs = System.currentTimeMillis();
         try {
+            if (properties.getWorkerUrl() != null) {
+                return executeInWorker(request, timeout);
+            }
             return executeJavaScript(request, timeout, startMs);
         } finally {
             concurrencyLimiter.release();
+        }
+    }
+
+    public boolean workerAvailable() {
+        if (properties.getWorkerUrl() == null) return false;
+        var probe = HttpRequest.newBuilder(properties.getWorkerUrl().resolve("health"))
+                .timeout(Duration.ofSeconds(2)).GET().build();
+        try {
+            return workerClient.send(probe, HttpResponse.BodyHandlers.discarding()).statusCode() == 200;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private CodeExecResult executeInWorker(CodeExecRequest request, int timeout) {
+        try {
+            var limited = CodeExecRequest.builder().language(request.getLanguage()).code(request.getCode())
+                    .timeoutMs(timeout).build();
+            var http = HttpRequest.newBuilder(properties.getWorkerUrl()).timeout(Duration.ofMillis(timeout + 5_000L))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(workerJson.writeValueAsBytes(limited))).build();
+            var response = workerClient.send(http, HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() == 200 && response.body().length <= 250_000) {
+                return workerJson.readValue(response.body(), CodeExecResult.class);
+            }
+            return errorResult(request, 4, "隔离代码执行服务暂不可用");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResult(request, 2, "隔离代码执行已中断");
+        } catch (IOException e) {
+            log.warn("隔离代码执行服务调用失败: {}", e.getClass().getSimpleName());
+            return errorResult(request, 4, "隔离代码执行服务暂不可用");
         }
     }
 

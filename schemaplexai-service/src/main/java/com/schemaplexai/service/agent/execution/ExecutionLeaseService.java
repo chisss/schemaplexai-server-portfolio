@@ -1,5 +1,6 @@
 package com.schemaplexai.service.agent.execution;
 
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,6 +13,10 @@ import org.springframework.util.StringUtils;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -24,6 +29,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ExecutionLeaseService {
 
     private final StringRedisTemplate stringRedisTemplate;
+    private final ScheduledExecutorService heartbeat = Executors.newScheduledThreadPool(2,
+            Thread.ofPlatform().daemon().name("agent-dispatch-lease-", 0).factory());
+
+    ScheduledFuture<?> keepAlive(String executionId, String owner, int leaseSeconds) {
+        int interval = Math.max(1, leaseSeconds / 3);
+        return heartbeat.scheduleWithFixedDelay(() -> {
+            if (!renewLease(executionId, owner, leaseSeconds)) {
+                log.warn("派发租约续期失败: executionId={}", executionId);
+            }
+        }, interval, interval, TimeUnit.SECONDS);
+    }
+
+    @PreDestroy
+    void shutdown() {
+        heartbeat.shutdownNow();
+    }
 
     private final ConcurrentHashMap<String, LocalLease> localLeaseMap = new ConcurrentHashMap<>();
 

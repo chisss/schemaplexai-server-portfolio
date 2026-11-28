@@ -23,6 +23,7 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 
+import io.micrometer.core.instrument.Metrics;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.StringUtils;
 
@@ -101,6 +102,7 @@ final class AgentChatMemoryCompactor {
 
     private final TokenEstimatorSupport tokenEstimatorSupport;
     private final ChatModel compactionModel;
+    private final String initialSystemPrompt;
 
     AgentChatMemoryCompactor(TokenEstimatorSupport tokenEstimatorSupport) {
         this(tokenEstimatorSupport, null);
@@ -111,8 +113,13 @@ final class AgentChatMemoryCompactor {
      *                        执行级注入，实例无共享可变状态，并发安全
      */
     AgentChatMemoryCompactor(TokenEstimatorSupport tokenEstimatorSupport, ChatModel compactionModel) {
+        this(tokenEstimatorSupport, compactionModel, "");
+    }
+
+    AgentChatMemoryCompactor(TokenEstimatorSupport tokenEstimatorSupport, ChatModel compactionModel, String systemPrompt) {
         this.tokenEstimatorSupport = tokenEstimatorSupport;
         this.compactionModel = compactionModel;
+        this.initialSystemPrompt = systemPrompt;
     }
 
     ArchivedChatMemory createChatMemory(String conversationId, String executionId,
@@ -129,8 +136,11 @@ final class AgentChatMemoryCompactor {
                 .id(conversationId)
                 .maxTokens(memoryBudgetTokens, tokenEstimatorSupport.resolveEstimator(modelConfig))
                 .build();
+        // 回放条数用于限制查询成本。扩大普通窗口，减少条数先于 Token 窗口淘汰短消息。
+        int replayLimit = currentExecutionOnly ? params.getMaxMessages()
+                : Math.max(params.getMaxMessages(), memoryBudgetTokens / 64);
         return new ArchivedChatMemory(conversationId, executionId, chatMemoryStore, window,
-                Math.clamp(params.getMaxMessages(), 8, 2_000), currentExecutionOnly);
+                Math.clamp(replayLimit, 8, 2_000), currentExecutionOnly);
     }
 
     CompactionResult compactIfNeeded(ChatMemory chatMemory, AgentEngineParams params, AiModelConfig modelConfig) {
@@ -158,12 +168,19 @@ final class AgentChatMemoryCompactor {
     CompactionResult compactIfNeeded(ChatMemory chatMemory, AgentEngineParams params, AiModelConfig modelConfig,
                                      boolean approvalResume, boolean verifiedDesktop, UserMessage exactDesktopTask,
                                      SummaryModel summaryModel, long remainingExecutionTokens) {
+        return compactIfNeeded(chatMemory, params, modelConfig, approvalResume, verifiedDesktop, exactDesktopTask,
+                summaryModel, remainingExecutionTokens, promptTokens(modelConfig));
+    }
+
+    CompactionResult compactIfNeeded(ChatMemory chatMemory, AgentEngineParams params, AiModelConfig modelConfig,
+                                     boolean approvalResume, boolean verifiedDesktop, UserMessage exactDesktopTask,
+                                     SummaryModel summaryModel, long remainingExecutionTokens, long requestOverheadTokens) {
         if (chatMemory == null || chatMemory.messages() == null || chatMemory.messages().isEmpty()) {
             return CompactionResult.noop();
         }
         List<ChatMessage> messages = new ArrayList<>(chatMemory.messages());
         int beforeTokens = tokenEstimatorSupport.estimateMessages(modelConfig, messages);
-        int memoryBudgetTokens = resolveMemoryBudgetTokens(params, modelConfig);
+        int memoryBudgetTokens = resolveMemoryBudgetTokens(modelConfig, requestOverheadTokens);
         // 审批恢复重放原始轨迹，预算内保留多笔工具审批积累的证据。
         if (approvalResume && beforeTokens < memoryBudgetTokens) {
             return new CompactionResult(false, beforeTokens, beforeTokens, 0, messages.size(), messages.size());
@@ -172,7 +189,7 @@ final class AgentChatMemoryCompactor {
         boolean tokenBudgetTight = beforeTokens >= (int) (memoryBudgetTokens * 0.58);
         boolean earlyDesktopCompaction = verifiedDesktop && !tokenBudgetTight
                 && remainingExecutionTokens > 0 && remainingExecutionTokens < memoryBudgetTokens * 4L
-                && beforeTokens >= (int) (memoryBudgetTokens * 0.40)
+                && beforeTokens >= Math.min((int) (memoryBudgetTokens * 0.40), remainingExecutionTokens * 0.80)
                 && canCompactDesktopHistoryEarly(messages, exactDesktopTask);
 
         int splitIndex = resolveSafeSplitIndex(messages, recentRawMessageCount);
@@ -200,7 +217,7 @@ final class AgentChatMemoryCompactor {
                 && historical.contains(exactDesktopTask) && !recent.contains(exactDesktopTask);
         // 桌面验收依赖工具回执，按回执提取历史证据。
         String summary = verifiedDesktop ? buildDesktopEvidenceSummary(historical, exactDesktopTask)
-                : modelBasedSummarize(historical, summaryModel);
+                : modelBasedSummarize(historical, summaryModel, params);
         if (!StringUtils.hasText(summary)) {
             summary = buildHistoricalSummary(historical);
         }
@@ -583,10 +600,21 @@ final class AgentChatMemoryCompactor {
     }
 
     int resolveMemoryBudgetTokens(AgentEngineParams params, AiModelConfig modelConfig) {
+        return resolveMemoryBudgetTokens(modelConfig, promptTokens(modelConfig));
+    }
+
+    private int promptTokens(AiModelConfig config) {
+        return StringUtils.hasText(initialSystemPrompt)
+                ? tokenEstimatorSupport.estimateMessage(config, SystemMessage.from(initialSystemPrompt)) : 0;
+    }
+
+    int resolveMemoryBudgetTokens(AiModelConfig modelConfig, long requestOverheadTokens) {
         int contextWindowTokens = modelConfig != null ? modelConfig.resolvedContextWindowTokens() : 16_384;
         int outputReserveTokens = modelConfig != null && modelConfig.getMaxTokens() > 0 ? modelConfig.getMaxTokens() : 2_048;
-        int target = Math.max(2_048, contextWindowTokens - outputReserveTokens - 1_536);
-        int ceiling = Math.max(3_072, contextWindowTokens / 2);
+        int target = (int) Math.max(1L, (long) contextWindowTokens - outputReserveTokens - requestOverheadTokens);
+        double fraction = modelConfig == null || modelConfig.getContextWindowTokens() <= 0 ? 0.50
+                : contextWindowTokens >= 128_000 ? 0.85 : 0.75;
+        int ceiling = Math.max(1, (int) (contextWindowTokens * fraction));
         return Math.min(target, ceiling);
     }
 
@@ -742,10 +770,12 @@ final class AgentChatMemoryCompactor {
     /**
      * 模型驱动摘要：使用小模型生成高质量压缩摘要
      */
-    private String modelBasedSummarize(List<ChatMessage> historicalMessages, SummaryModel summaryModel) {
+    private String modelBasedSummarize(List<ChatMessage> historicalMessages, SummaryModel summaryModel,
+                                       AgentEngineParams params) {
         if (summaryModel == null || historicalMessages == null || historicalMessages.isEmpty()) {
             return null;
         }
+        String failureReason = "empty_response";
         try {
             StringBuilder historyText = new StringBuilder();
             for (ChatMessage msg : historicalMessages) {
@@ -759,8 +789,10 @@ final class AgentChatMemoryCompactor {
             if (historyText.isEmpty()) {
                 return null;
             }
+            Metrics.counter("agent.memory.compaction.attempt").increment();
             ChatResponse response = summaryModel.chat(ChatRequest.builder().messages(List.of(
-                    SystemMessage.from(MODEL_SUMMARIZATION_PROMPT),
+                    SystemMessage.from(params != null && StringUtils.hasText(params.getCompactionPrompt())
+                            ? params.getCompactionPrompt() : MODEL_SUMMARIZATION_PROMPT),
                     UserMessage.from(historyText.toString())
             )).build());
             String summary = response.aiMessage().text();
@@ -772,8 +804,10 @@ final class AgentChatMemoryCompactor {
         } catch (CancellationException e) {
             throw e;
         } catch (Exception e) {
-            log.warn("模型驱动摘要失败，降级到字符串提取: {}", e.getMessage());
+            failureReason = "model_failed";
+            log.warn("模型驱动摘要失败，降级到规则提取，异常类型: {}", e.getClass().getSimpleName());
         }
+        Metrics.counter("agent.memory.compaction.fallback", "reason", failureReason).increment();
         return null;
     }
 

@@ -2,13 +2,16 @@ package com.schemaplexai.service.agent.runtime.team;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.schemaplexai.common.constant.SecurityComplianceConstant;
 import com.schemaplexai.common.util.HashUtils;
+import com.schemaplexai.common.exception.BusinessException;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import com.schemaplexai.common.enums.AgentExecutionEventTypeEnum;
 import com.schemaplexai.common.enums.AgentExecutionStatusEnum;
 import com.schemaplexai.common.enums.TeamMemberRoleTypeEnum;
+import com.schemaplexai.common.enums.TeamMemberExecutionMode;
 import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.dao.mapper.AgentExecutionMapper;
 import com.schemaplexai.dao.mapper.AgentTeamMemberContextBindingMapper;
@@ -17,11 +20,15 @@ import com.schemaplexai.dao.mapper.AgentTeamMemberToolBindingMapper;
 import com.schemaplexai.dao.mapper.BuiltinToolMapper;
 import com.schemaplexai.dao.mapper.ContextItemMapper;
 import com.schemaplexai.model.entity.Agent;
+import com.schemaplexai.model.entity.AgentToolBinding;
+import com.schemaplexai.model.entity.BuiltinTool;
 import com.schemaplexai.model.dto.agent.AgentExecutionInputDTO;
 import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.model.entity.AgentTeamMember;
 import com.schemaplexai.model.entity.AgentTeamMemberToolBinding;
+import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.execution.AgentAcceptance;
+import com.schemaplexai.service.agent.execution.AgentEngineParams;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEngine;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
@@ -38,12 +45,15 @@ import com.schemaplexai.service.desktop.DesktopExecutionTarget;
 import com.schemaplexai.service.memory.CompositeChatMemoryStore;
 import com.schemaplexai.service.memory.PostgresChatMemoryStore.ArchivedMessage;
 import com.schemaplexai.service.mq.AgentContextPublisher;
+import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import com.schemaplexai.service.user.impl.UserMemoryExtractionService;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
 import org.bsc.langgraph4j.GraphRunnerException;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -72,6 +82,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -103,6 +114,7 @@ class TeamAgentRuntimeStrategyTest {
                 mock(SandboxPolicyResolver.class), mock(ExecutionSteeringService.class),
                 new DefaultTeamQualityDetector(), new TeamConversationArchive(chatMemory, userMemory, new ObjectMapper()),
                 mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class), Runnable::run);
+        useAllowedOutputGuard(strategy);
 
         var agent = new Agent();
         agent.setId("office-team");
@@ -196,6 +208,26 @@ class TeamAgentRuntimeStrategyTest {
         } finally {
             SecurityUtil.clear();
         }
+    }
+
+    @Test
+    void reusesReadOnlyClassificationForTheSameBuiltinToolSet() {
+        var strategy = createStrategy();
+        var mapper = (BuiltinToolMapper) ReflectionTestUtils.getField(strategy, "builtinToolMapper");
+        var first = verificationTeamMember("first", "第一位", "member");
+        var second = verificationTeamMember("second", "第二位", "member");
+        var binding = new AgentToolBinding();
+        binding.setToolCode("sys.read");
+        binding.setSourceType("builtin");
+        var tool = new BuiltinTool();
+        tool.setCode("sys.read");
+        tool.setIoType("READ");
+        when(mapper.selectList(any())).thenReturn(List.of(tool));
+        var bindings = Map.of(first.getId(), List.of(binding), second.getId(), List.of(binding));
+
+        assertThat(strategy.resolveExecutionMode(List.of(first, second), bindings)).isEqualTo(TeamMemberExecutionMode.PARALLEL);
+        assertThat(strategy.resolveExecutionMode(List.of(second, first), bindings)).isEqualTo(TeamMemberExecutionMode.PARALLEL);
+        verify(mapper).selectList(any());
     }
 
     @Test
@@ -345,6 +377,329 @@ class TeamAgentRuntimeStrategyTest {
     }
 
     @Test
+    void shouldCapAllMemberStateOutput() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        AgentTeamMember lead = new AgentTeamMember();
+        lead.setRoleName("Lead");
+        lead.setRoleType("lead_agent");
+        AgentTeamMember member = new AgentTeamMember();
+        member.setRoleName("Researcher");
+        member.setRoleType("member");
+
+        String shortOutput = "简短输出";
+        String longOutput = "x".repeat(12_000);
+
+        // 短输出不动，null 原样返回
+        assertThat(strategy.capStateMemberOutput(lead, shortOutput)).isEqualTo(shortOutput);
+        assertThat(strategy.capStateMemberOutput(member, shortOutput)).isEqualTo(shortOutput);
+        assertThat(strategy.capStateMemberOutput(member, null)).isNull();
+        // 所有成员（含 Leader）长输出均裁剪到上限，全文经 DB 取回
+        String cappedLead = strategy.capStateMemberOutput(lead, longOutput);
+        assertThat(cappedLead).startsWith("x".repeat(8_000));
+        assertThat(cappedLead).contains("read_team_member_evidence");
+        String cappedMember = strategy.capStateMemberOutput(member, longOutput);
+        assertThat(cappedMember).startsWith("x".repeat(8_000));
+        assertThat(cappedMember).contains("read_team_member_evidence");
+    }
+
+    @Test
+    void shouldResolveMemberTimeoutWithGracePeriod() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        // 无引擎参数时使用默认 10 分钟 + 30 秒宽限
+        assertThat(strategy.resolveMemberTimeoutSeconds(null)).isEqualTo(630L);
+        AgentExecutionContext withParams = AgentExecutionContext.builder().build();
+        withParams.setTeamEngineParams(AgentEngineParams.builder().memberExecutionTimeoutMinutes(5).build());
+        assertThat(strategy.resolveMemberTimeoutSeconds(withParams)).isEqualTo(330L);
+    }
+
+    @Test
+    void shouldPublishStopSignalWhenMemberExecutionTimesOut() throws Exception {
+        var executions = mock(AgentExecutionMapper.class);
+        var engine = mock(AgentExecutionEngine.class);
+        var logs = mock(AgentLogService.class);
+        var stopSignal = mock(com.schemaplexai.service.agent.execution.ExecutionStopSignal.class);
+        TeamAgentRuntimeStrategy strategy = org.mockito.Mockito.spy(
+                createStrategy(executions, logs, mock(ExecutionEventStreamService.class)));
+        ReflectionTestUtils.setField(strategy, "agentExecutionEngine", engine);
+        strategy.setExecutionStopSignal(stopSignal);
+        org.mockito.Mockito.doReturn(0L).when(strategy).resolveMemberTimeoutSeconds(any());
+        when(logs.createTeamChildWhileParentRunning(any())).thenAnswer(invocation -> {
+            invocation.<AgentExecution>getArgument(0).setId("timeout-child");
+            return true;
+        });
+        when(engine.execute(any())).thenReturn(new CompletableFuture<>());
+        var agent = new Agent();
+        agent.setId("team");
+        var parent = new AgentExecution();
+        parent.setId("parent");
+        parent.setTenantId("tenant");
+        parent.setAgentId("team");
+        parent.setInputPrompt("执行任务");
+        var context = AgentExecutionContext.builder()
+                .executionId("parent").tenantId("tenant").agentId("team").inputPrompt("执行任务").build();
+        var member = memberWithId("slow-member");
+
+        CompletableFuture<Map<String, Object>> run = ReflectionTestUtils.invokeMethod(strategy, "executeMember",
+                agent, parent, context, member, 0, "", Map.of(), "", "", List.of(), null, null, false);
+        Map<String, Object> result = run.get(2, TimeUnit.SECONDS);
+
+        assertThat(result).containsEntry(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.FAILED.getCode())
+                .containsEntry(TeamGraphConstants.RESULT_EXECUTION_ID, "timeout-child");
+        assertThat(result.get(TeamGraphConstants.RESULT_ERROR_MESSAGE)).asString().contains("成员执行超时");
+        verify(stopSignal).publishAfterCommit("timeout-child");
+    }
+
+    @Test
+    void shouldRejectNewerSchemaVersionOnResume() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        // 当前版本与旧 checkpoint（无版本字段）均兼容
+        strategy.assertSchemaCompatible(new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_SCHEMA_VERSION, TeamGraphConstants.SCHEMA_VERSION)));
+        strategy.assertSchemaCompatible(new TeamGraphState(Map.of()));
+        // 更高版本拒绝恢复
+        assertThatThrownBy(() -> strategy.assertSchemaCompatible(new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_SCHEMA_VERSION, TeamGraphConstants.SCHEMA_VERSION + 1))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("高于当前支持的");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void shouldPersistSchemaMigrationBeforeResume() throws Exception {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        org.bsc.langgraph4j.CompiledGraph<TeamGraphState> compiledGraph =
+                mock(org.bsc.langgraph4j.CompiledGraph.class);
+        LangGraphTeamRuntimeAdapter adapter = org.mockito.Mockito.spy(new LangGraphTeamRuntimeAdapter());
+        RunnableConfig original = RunnableConfig.builder().threadId("team-parent").build();
+        RunnableConfig migrated = RunnableConfig.builder().threadId("team-parent").build();
+        doReturn(java.util.Optional.of(new TeamGraphState(Map.of()))).when(adapter).lastStateOf(compiledGraph, original);
+        when(compiledGraph.updateState(original,
+                Map.of(TeamGraphConstants.STATE_SCHEMA_VERSION, TeamGraphConstants.SCHEMA_VERSION)))
+                .thenReturn(migrated);
+        AgentExecutionInputDTO input = new AgentExecutionInputDTO();
+        input.setMessage("继续");
+        input.setOptions(Map.of());
+        doReturn(java.util.Optional.of(new TeamGraphState(Map.of()))).when(adapter)
+                .resume(compiledGraph, migrated, "继续", Map.of());
+        ReflectionTestUtils.setField(strategy, "langGraphRuntimeAdapter", adapter);
+        AgentExecution execution = new AgentExecution();
+        execution.setId("parent");
+
+        ReflectionTestUtils.invokeMethod(strategy, "resumeGraph", compiledGraph, original, execution, input);
+
+        var order = inOrder(adapter, compiledGraph);
+        order.verify(adapter).lastStateOf(compiledGraph, original);
+        order.verify(compiledGraph).updateState(original,
+                Map.of(TeamGraphConstants.STATE_SCHEMA_VERSION, TeamGraphConstants.SCHEMA_VERSION));
+        order.verify(adapter).resume(compiledGraph, migrated, "继续", Map.of());
+    }
+
+    @Test
+    void shouldTopologicallySortContributorsByDependencies() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        AgentTeamMember a = memberWithId("a");
+        AgentTeamMember b = memberWithId("b");
+        b.setDependsOn("a");
+        AgentTeamMember c = memberWithId("c");
+        c.setDependsOn("a,b");
+
+        List<AgentTeamMember> sorted = strategy.orderContributorsByDependencies(List.of(c, b, a));
+        assertThat(sorted).extracting(AgentTeamMember::getId).containsExactly("a", "b", "c");
+
+        // 依赖环（a->c, c->a）视为配置错误，快速失败而非退回原顺序
+        a.setDependsOn("c");
+        assertThatThrownBy(() -> strategy.orderContributorsByDependencies(List.of(a, b, c)))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("依赖声明存在环");
+
+        assertThat(strategy.parseDependencyIds(" a, b ,,c ")).containsExactly("a", "b", "c");
+        assertThat(strategy.parseDependencyIds(null)).isEmpty();
+        assertThat(strategy.hasDependencies(List.of(a))).isTrue();
+        assertThat(strategy.hasDependencies(List.of(memberWithId("x")))).isFalse();
+    }
+
+    @Test
+    void shouldFilterTeamMemberEvidenceByCanReadPeers() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        AgentTeamMember lead = memberWithId("lead");
+        lead.setRoleType("lead_agent");
+        AgentTeamMember reader = memberWithId("reader");
+        reader.setCanReadPeers("peer-a,peer-b");
+
+        AgentExecutionContext context = AgentExecutionContext.builder()
+                .teamMemberEvidenceIds(List.of("exec-a", "exec-b", "exec-c"))
+                .teamMemberExecutionByMemberId(Map.of("peer-a", "exec-a", "peer-b", "exec-b", "peer-c", "exec-c"))
+                .build();
+
+        // Leader 读取全队
+        assertThat(strategy.resolveTeamMemberEvidenceIds(lead, context))
+                .containsExactly("exec-a", "exec-b", "exec-c");
+        // 贡献者仅读取 can_read_peers 显式声明的成员执行 ID（白名单不可扩大为全队）
+        assertThat(strategy.resolveTeamMemberEvidenceIds(reader, context)).containsExactly("exec-a", "exec-b");
+        // 未声明 can_read_peers 的成员不可读
+        assertThat(strategy.resolveTeamMemberEvidenceIds(memberWithId("plain"), context)).isNull();
+        // 声明了 can_read_peers 但映射缺失 → null
+        assertThat(strategy.resolveTeamMemberEvidenceIds(reader, AgentExecutionContext.builder().build())).isNull();
+        assertThat(strategy.hasReadablePeers(List.of(reader))).isTrue();
+        assertThat(strategy.hasReadablePeers(List.of(memberWithId("x")))).isFalse();
+    }
+
+    @Test
+    void shouldParseAdvisorDecisions() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+
+        var decisions = strategy.parseAdvisorDecisions("""
+                TEAM_ADVISOR SKIP member-b 结果与任务无关
+                协调摘要
+                TEAM_ADVISOR APPEND member-a 补齐缺失证据
+                """);
+
+        assertThat(decisions).hasSize(2);
+        assertThat(decisions.get(0).action()).isEqualTo("SKIP");
+        assertThat(decisions.get(0).memberId()).isEqualTo("member-b");
+        assertThat(decisions.get(0).reason()).isEqualTo("结果与任务无关");
+        assertThat(decisions.get(1).action()).isEqualTo("APPEND");
+        assertThat(decisions.get(1).memberId()).isEqualTo("member-a");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void shouldApplyAdvisorDecisionsOnceBeforeLead() {
+        var executions = mock(AgentExecutionMapper.class);
+        var engine = mock(AgentExecutionEngine.class);
+        var logs = mock(AgentLogService.class);
+        var strategy = createStrategy(executions, logs, mock(ExecutionEventStreamService.class));
+        ReflectionTestUtils.setField(strategy, "agentExecutionEngine", engine);
+        var agent = new Agent();
+        agent.setId("team");
+        var parent = new AgentExecution();
+        parent.setId("parent");
+        parent.setTenantId("tenant");
+        parent.setAgentId(agent.getId());
+        parent.setInputPrompt("完成团队任务");
+        var contributorA = memberWithId("member-a");
+        var contributorB = memberWithId("member-b");
+        var advisor = memberWithId("advisor");
+        advisor.setRoleType(TeamMemberRoleTypeEnum.ADVISOR.getCode());
+        var lead = memberWithId("lead");
+        lead.setRoleType(TeamMemberRoleTypeEnum.LEAD_AGENT.getCode());
+        var members = List.of(contributorA, contributorB, advisor, lead);
+        var context = AgentExecutionContext.builder()
+                .executionId("parent").tenantId("tenant").agentId("team").inputPrompt("完成团队任务").build();
+        context.setTeamEffectiveUserInput("");
+        when(logs.createTeamChildWhileParentRunning(any())).thenAnswer(invocation -> {
+            AgentExecution child = invocation.getArgument(0);
+            child.setId("exec-" + child.getTeamMemberId());
+            return true;
+        });
+        when(engine.execute(any())).thenAnswer(invocation -> {
+            AgentExecutionContext child = invocation.getArgument(0);
+            return CompletableFuture.completedFuture(AgentExecutionResult.builder()
+                    .status(AgentExecutionStatusEnum.COMPLETED.getCode())
+                    .outputResult("lead".equals(child.getTeamMemberId()) ? "最终终稿" : "追加执行完成")
+                    .conversationId("conversation-" + child.getTeamMemberId())
+                    .build());
+        });
+        List<Map<String, Object>> initial = List.of(
+                Map.of(TeamGraphConstants.RESULT_MEMBER_ID, "member-a",
+                        TeamGraphConstants.RESULT_ROLE_NAME, "成员A", TeamGraphConstants.RESULT_ROLE_TYPE, "member",
+                        TeamGraphConstants.RESULT_EXECUTION_ID, "exec-a", TeamGraphConstants.RESULT_STATUS, "failed",
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT, "证据不足"),
+                Map.of(TeamGraphConstants.RESULT_MEMBER_ID, "member-b",
+                        TeamGraphConstants.RESULT_ROLE_NAME, "成员B", TeamGraphConstants.RESULT_ROLE_TYPE, "member",
+                        TeamGraphConstants.RESULT_EXECUTION_ID, "exec-b", TeamGraphConstants.RESULT_STATUS, "completed",
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT, "无关结果"),
+                Map.of(TeamGraphConstants.RESULT_MEMBER_ID, "advisor",
+                        TeamGraphConstants.RESULT_ROLE_NAME, "协调顾问", TeamGraphConstants.RESULT_ROLE_TYPE, "advisor",
+                        TeamGraphConstants.RESULT_EXECUTION_ID, "exec-advisor", TeamGraphConstants.RESULT_STATUS, "completed",
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT,
+                        "TEAM_ADVISOR SKIP member-b 结果无关\nTEAM_ADVISOR APPEND member-a 补齐证据"));
+        var state = new TeamGraphState(Map.of(TeamGraphConstants.STATE_MEMBER_RESULTS, initial));
+
+        Map<String, Object> decisionPatch = ReflectionTestUtils.invokeMethod(strategy,
+                "applyAdvisorDecisions", agent, parent, context, members, state);
+        var adjusted = (List<Map<String, Object>>) decisionPatch.get(TeamGraphConstants.STATE_MEMBER_RESULTS);
+        var adjustedState = new TeamGraphState(decisionPatch);
+        var completed = ReflectionTestUtils.<List<Map<String, Object>>>invokeMethod(strategy,
+                "executeLeadMember", agent, parent, context, members, adjustedState, false);
+        var aggregate = strategy.aggregate(completed, 0);
+
+        assertThat(adjusted).extracting(result -> result.get(TeamGraphConstants.RESULT_MEMBER_ID))
+                .containsExactly("advisor", "member-a");
+        assertThat(decisionPatch.get(TeamGraphConstants.STATE_ADVISOR_PROCESSED_EXECUTION_IDS))
+                .isEqualTo(List.of("exec-advisor"));
+        assertThat(decisionPatch.get(TeamGraphConstants.STATE_ADVISOR_SKIPPED_MEMBER_IDS))
+                .isEqualTo(List.of("member-b"));
+        var runs = ArgumentCaptor.forClass(AgentExecutionContext.class);
+        verify(engine, times(2)).execute(runs.capture());
+        assertThat(runs.getAllValues()).extracting(AgentExecutionContext::getTeamMemberId)
+                .containsExactly("member-a", "lead");
+        assertThat(aggregate).containsEntry(TeamGraphConstants.STATE_FINAL_STATUS, "completed")
+                .containsEntry(TeamGraphConstants.STATE_FINAL_OUTPUT, "最终终稿");
+
+        ReflectionTestUtils.invokeMethod(strategy, "applyAdvisorDecisions", agent, parent, context, members,
+                new TeamGraphState(decisionPatch));
+        List<Map<String, Object>> nextCycle = ReflectionTestUtils.invokeMethod(strategy, "executeMembers",
+                agent, parent, context, members, new TeamGraphState(decisionPatch), null, false);
+        assertThat(nextCycle).extracting(result -> result.get(TeamGraphConstants.RESULT_MEMBER_ID))
+                .doesNotContain("member-b");
+        verifyNoMoreInteractions(engine);
+    }
+
+    @Test
+    void shouldNotExecuteLeadAfterParentExecutionStopped() {
+        var engine = mock(AgentExecutionEngine.class);
+        var strategy = createStrategy();
+        ReflectionTestUtils.setField(strategy, "agentExecutionEngine", engine);
+        var lead = memberWithId("lead");
+        lead.setRoleType(TeamMemberRoleTypeEnum.LEAD_AGENT.getCode());
+        var state = new TeamGraphState(Map.of(TeamGraphConstants.STATE_MEMBER_RESULTS,
+                List.of(Map.of(TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.STOPPED.getCode()))));
+
+        List<Map<String, Object>> results = ReflectionTestUtils.invokeMethod(strategy, "executeLeadMember",
+                new Agent(), new AgentExecution(), AgentExecutionContext.builder().build(), List.of(lead), state, false);
+
+        assertThat(results).hasSize(1);
+        verifyNoInteractions(engine);
+    }
+
+    @Test
+    void shouldValidateMemberReferencesAndAdvisorConfiguration() {
+        TeamAgentRuntimeStrategy strategy = createStrategy();
+        var lead = memberWithId("lead");
+        lead.setRoleType(TeamMemberRoleTypeEnum.LEAD_AGENT.getCode());
+        var advisor = memberWithId("advisor");
+        advisor.setRoleType(TeamMemberRoleTypeEnum.ADVISOR.getCode());
+        var secondAdvisor = memberWithId("advisor-2");
+        secondAdvisor.setRoleType(TeamMemberRoleTypeEnum.ADVISOR.getCode());
+        var a = memberWithId("a");
+        var b = memberWithId("b");
+        a.setDependsOn("b");
+        a.setCanReadPeers("b");
+        var contexts = Map.<String, Long>of("lead", 1L, "advisor", 1L, "advisor-2", 1L, "a", 1L, "b", 1L);
+
+        assertThat(strategy.validateRuntimeMembers(List.of(lead, advisor, a, b), contexts)).isNull();
+
+        a.setDependsOn("missing");
+        a.setCanReadPeers("lead");
+        assertThat(strategy.validateRuntimeMembers(List.of(lead, advisor, a, b), contexts))
+                .contains("未知成员: missing", "只能引用普通贡献者: lead");
+
+        a.setDependsOn("b");
+        b.setDependsOn("a");
+        assertThat(strategy.validateRuntimeMembers(List.of(lead, advisor, secondAdvisor, a, b), contexts))
+                .contains("最多只能配置一个 Advisor 角色", "成员依赖声明存在环");
+    }
+
+    private AgentTeamMember memberWithId(String id) {
+        AgentTeamMember member = new AgentTeamMember();
+        member.setId(id);
+        member.setRoleName("member-" + id);
+        member.setRoleType("member");
+        return member;
+    }
+
+    @Test
     void shouldMakeTeamDeliveryFormatRespectSingleValueRequests() {
         TeamAgentRuntimeStrategy strategy = createStrategy();
         AgentTeamMember member = new AgentTeamMember();
@@ -369,6 +724,7 @@ class TeamAgentRuntimeStrategyTest {
         member.setRoleName("测试员");
         member.setRoleType("member");
         var binding = new AgentTeamMemberToolBinding();
+        binding.setMemberId(member.getId());
         binding.setSourceType(hasDesktopShell ? "builtin" : "mcp");
         binding.setToolCode("sys.bash");
         binding.setEnabled(true);
@@ -905,6 +1261,103 @@ class TeamAgentRuntimeStrategyTest {
     }
 
     @Test
+    void shouldKeepRuleBasedFallbackWhenFailedLeaderHasPersistedOutput() {
+        AgentExecutionMapper executionMapper = mock(AgentExecutionMapper.class);
+        AgentExecution failedLead = new AgentExecution();
+        failedLead.setId("lead-exec");
+        failedLead.setOutputResult("未验证的终稿");
+        when(executionMapper.selectById("lead-exec")).thenReturn(failedLead);
+        AgentLogService logs = mock(AgentLogService.class);
+        when(logs.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
+        TeamAgentRuntimeStrategy strategy = createStrategy(executionMapper, logs, mock(ExecutionEventStreamService.class));
+        List<Map<String, Object>> results = List.of(
+                Map.of(TeamGraphConstants.RESULT_ROLE_NAME, "领队",
+                        TeamGraphConstants.RESULT_ROLE_TYPE, TeamMemberRoleTypeEnum.LEAD_AGENT.getCode(),
+                        TeamGraphConstants.RESULT_EXECUTION_ID, "lead-exec",
+                        TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.FAILED.getCode(),
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT, "未验证的终稿",
+                        TeamGraphConstants.RESULT_ERROR_MESSAGE, "SocketException: connection reset"),
+                Map.of(TeamGraphConstants.RESULT_ROLE_NAME, "编码",
+                        TeamGraphConstants.RESULT_ROLE_TYPE, "member",
+                        TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.FAILED.getCode(),
+                        TeamGraphConstants.RESULT_ERROR_MESSAGE, "SocketException: connection reset"));
+        Map<String, Object> graphData = strategy.aggregate(results, 0);
+        graphData.put(TeamGraphConstants.STATE_MEMBER_RESULTS, results);
+        AgentExecution execution = new AgentExecution();
+        execution.setId("parent");
+
+        AgentExecutionResult result = strategy.finalizeExecution(execution,
+                AgentExecutionContext.builder().build(), new TeamGraphState(graphData));
+
+        assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode());
+        assertThat(result.getOutputResult()).contains("规则化兜底").doesNotContain("未验证的终稿");
+    }
+
+    @Test
+    void shouldRestoreFullOutputForSuccessfulTruncatedLeader() {
+        AgentExecutionMapper executionMapper = mock(AgentExecutionMapper.class);
+        AgentLogService logs = mock(AgentLogService.class);
+        when(logs.tryFinalizeWithEvent(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(true);
+        TeamAgentRuntimeStrategy strategy = createStrategy(executionMapper, logs, mock(ExecutionEventStreamService.class));
+        AgentTeamMember leadMember = new AgentTeamMember();
+        leadMember.setRoleType(TeamMemberRoleTypeEnum.LEAD_AGENT.getCode());
+        String fullOutput = "完整终稿" + "x".repeat(9_000);
+        String cappedOutput = strategy.capStateMemberOutput(leadMember, fullOutput);
+        AgentExecution leadChild = new AgentExecution();
+        leadChild.setId("lead-exec");
+        leadChild.setOutputResult(fullOutput);
+        when(executionMapper.selectById("lead-exec")).thenReturn(leadChild);
+        List<Map<String, Object>> results = List.of(
+                Map.of(TeamGraphConstants.RESULT_ROLE_NAME, "领队",
+                        TeamGraphConstants.RESULT_ROLE_TYPE, TeamMemberRoleTypeEnum.LEAD_AGENT.getCode(),
+                        TeamGraphConstants.RESULT_EXECUTION_ID, "lead-exec",
+                        TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT, cappedOutput),
+                Map.of(TeamGraphConstants.RESULT_ROLE_NAME, "编码",
+                        TeamGraphConstants.RESULT_ROLE_TYPE, "member",
+                        TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT, "可信产物"));
+        Map<String, Object> graphData = strategy.aggregate(results, 0);
+        graphData.put(TeamGraphConstants.STATE_MEMBER_RESULTS, results);
+        AgentExecution execution = new AgentExecution();
+        execution.setId("parent");
+
+        AgentExecutionResult result = strategy.finalizeExecution(execution,
+                AgentExecutionContext.builder().build(), new TeamGraphState(graphData));
+
+        assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.COMPLETED.getCode());
+        assertThat(result.getOutputResult()).isEqualTo(fullOutput);
+    }
+
+    @Test
+    void shouldRejectTruncatedLeaderOutputWhenFullTextIsUnavailable() {
+        AgentExecutionMapper executionMapper = mock(AgentExecutionMapper.class);
+        TeamAgentRuntimeStrategy strategy = createStrategy(executionMapper);
+        AgentTeamMember leadMember = new AgentTeamMember();
+        leadMember.setRoleType(TeamMemberRoleTypeEnum.LEAD_AGENT.getCode());
+        String cappedOutput = strategy.capStateMemberOutput(leadMember, "x".repeat(9_000));
+        List<Map<String, Object>> results = List.of(
+                Map.of(TeamGraphConstants.RESULT_ROLE_NAME, "领队",
+                        TeamGraphConstants.RESULT_ROLE_TYPE, TeamMemberRoleTypeEnum.LEAD_AGENT.getCode(),
+                        TeamGraphConstants.RESULT_EXECUTION_ID, "missing-lead-exec",
+                        TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT, cappedOutput),
+                Map.of(TeamGraphConstants.RESULT_ROLE_NAME, "编码",
+                        TeamGraphConstants.RESULT_ROLE_TYPE, "member",
+                        TeamGraphConstants.RESULT_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                        TeamGraphConstants.RESULT_OUTPUT_RESULT, "可信产物"));
+        Map<String, Object> graphData = strategy.aggregate(results, 0);
+        graphData.put(TeamGraphConstants.STATE_MEMBER_RESULTS, results);
+        AgentExecution execution = new AgentExecution();
+        execution.setId("parent");
+
+        assertThatThrownBy(() -> strategy.finalizeExecution(execution,
+                AgentExecutionContext.builder().build(), new TeamGraphState(graphData)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("拒绝交付截断内容");
+    }
+
+    @Test
     void shouldPublishFallbackUsedEventWhenFinalizingExecutionLevelFallback() throws Exception {
         AgentExecutionMapper executionMapper = mock(AgentExecutionMapper.class);
         AgentLogService agentLogService = mock(AgentLogService.class);
@@ -932,6 +1385,71 @@ class TeamAgentRuntimeStrategyTest {
                 isNull(), eq(0L), eq(0L), any(), isNull(), eventCaptor.capture());
         assertThat(eventCaptor.getValue().getEventType())
                 .isEqualTo(AgentExecutionEventTypeEnum.FALLBACK_USED.getCode());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = (Map<String, Object>) eventCaptor.getValue().getPayload();
+        assertThat(payload).containsEntry("reviewRequired", false);
+    }
+
+    @Test
+    void shouldBlockTeamOutputBeforeFinalStatePersistence() {
+        var logs = mock(AgentLogService.class);
+        var strategy = createStrategy(mock(AgentExecutionMapper.class), logs, mock(ExecutionEventStreamService.class));
+        useOutputDecision(strategy, SecurityComplianceConstant.DECISION_BLOCK, "终稿命中阻断规则");
+        var execution = new AgentExecution();
+        execution.setId("parent");
+        execution.setTenantId("tenant");
+        when(logs.tryFinalizeWithEvent(eq("parent"), eq("failed"), any(), any(), any(), isNull(), any(), any()))
+                .thenReturn(true);
+        var state = new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                TeamGraphConstants.STATE_FINAL_OUTPUT, "将被阻断的终稿"));
+
+        AgentExecutionResult result = strategy.finalizeExecution(execution, AgentExecutionContext.builder().build(), state);
+
+        assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.FAILED.getCode());
+        assertThat(result.getOutputResult()).isNull();
+    }
+
+    @Test
+    void shouldPauseTeamOutputWhenGuardRequiresReview() {
+        var logs = mock(AgentLogService.class);
+        var strategy = createStrategy(mock(AgentExecutionMapper.class), logs, mock(ExecutionEventStreamService.class));
+        useOutputDecision(strategy, SecurityComplianceConstant.DECISION_PAUSE, "终稿需要人工复核");
+        var execution = new AgentExecution();
+        execution.setId("parent");
+        execution.setTenantId("tenant");
+        when(logs.tryTransitionExecutionStatus(eq("parent"), eq("running"), eq("paused"), any(), any(), any(), any()))
+                .thenReturn(true);
+        var state = new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED.getCode(),
+                TeamGraphConstants.STATE_FINAL_OUTPUT, "待复核终稿"));
+
+        AgentExecutionResult result = strategy.finalizeExecution(execution, AgentExecutionContext.builder().build(), state);
+
+        assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.PAUSED.getCode());
+        assertThat(result.getErrorMessage()).contains("人工复核");
+    }
+
+    @Test
+    void shouldPauseHighRiskFallbackUntilReview() {
+        var logs = mock(AgentLogService.class);
+        var strategy = createStrategy(mock(AgentExecutionMapper.class), logs, mock(ExecutionEventStreamService.class));
+        var execution = new AgentExecution();
+        execution.setId("parent");
+        execution.setTenantId("tenant");
+        when(logs.tryTransitionExecutionStatus(eq("parent"), eq("running"), eq("paused"), any(), any(), any(), any()))
+                .thenReturn(true);
+        var context = AgentExecutionContext.builder()
+                .inputContext(Map.of("riskLevel", "high"))
+                .build();
+        var state = new TeamGraphState(Map.of(
+                TeamGraphConstants.STATE_FINAL_STATUS, AgentExecutionStatusEnum.COMPLETED_WITH_FALLBACK.getCode(),
+                TeamGraphConstants.STATE_FINAL_OUTPUT, "兜底草案"));
+
+        AgentExecutionResult result = strategy.finalizeExecution(execution, context, state);
+
+        assertThat(result.getStatus()).isEqualTo(AgentExecutionStatusEnum.PAUSED.getCode());
+        assertThat(result.getErrorMessage()).contains("高风险", "人工复核");
     }
 
     @Test
@@ -1544,7 +2062,7 @@ class TeamAgentRuntimeStrategyTest {
                                                     Executor executor,
                                                     AgentTeamMemberToolBindingMapper bindingMapper,
                                                     TeamConversationArchive conversationArchive) {
-        return new TeamAgentRuntimeStrategy(
+        TeamAgentRuntimeStrategy strategy = new TeamAgentRuntimeStrategy(
                 agentExecutionMapper,
                 agentTeamMemberMapper,
                 bindingMapper,
@@ -1565,5 +2083,30 @@ class TeamAgentRuntimeStrategyTest {
                 mock(TeamChildApprovalService.class), mock(TeamExecutionBudget.class),
                 executor
         );
+        useAllowedOutputGuard(strategy);
+        return strategy;
+    }
+
+    private void useAllowedOutputGuard(TeamAgentRuntimeStrategy strategy) {
+        @SuppressWarnings("unchecked")
+        ObjectProvider<SecurityRuntimeGuardService> provider = mock(ObjectProvider.class);
+        SecurityRuntimeGuardService guard = mock(SecurityRuntimeGuardService.class);
+        SecurityCheckDecisionVO allow = new SecurityCheckDecisionVO();
+        allow.setDecision(SecurityComplianceConstant.DECISION_ALLOW);
+        when(guard.evaluate(any(), isNull())).thenReturn(allow);
+        when(provider.getIfAvailable()).thenReturn(guard);
+        strategy.setSecurityRuntimeGuardServiceProvider(provider);
+    }
+
+    private void useOutputDecision(TeamAgentRuntimeStrategy strategy, String decision, String message) {
+        @SuppressWarnings("unchecked")
+        ObjectProvider<SecurityRuntimeGuardService> provider = mock(ObjectProvider.class);
+        SecurityRuntimeGuardService guard = mock(SecurityRuntimeGuardService.class);
+        SecurityCheckDecisionVO result = new SecurityCheckDecisionVO();
+        result.setDecision(decision);
+        result.setMessage(message);
+        when(guard.evaluate(any(), isNull())).thenReturn(result);
+        when(provider.getIfAvailable()).thenReturn(guard);
+        strategy.setSecurityRuntimeGuardServiceProvider(provider);
     }
 }

@@ -72,7 +72,10 @@ public class AgentLoopDetectionService {
      * 将当前轮次工具序列摘要加入队列，若连续 TOOL_SEQ_REPEAT_THRESHOLD 轮完全相同则告警
      */
     boolean detectByToolSequence(AgentLoopState state, List<ToolExecutionRequest> requests) {
-        if (requests == null || requests.isEmpty()) return false;
+        if (requests == null || requests.isEmpty()) {
+            state.getRecentToolSequences().clear();
+            return false;
+        }
         String seq = buildToolSequenceKey(requests);
         state.getRecentToolSequences().addLast(seq);
         if (state.getRecentToolSequences().size() > TOOL_SEQ_REPEAT_THRESHOLD) {

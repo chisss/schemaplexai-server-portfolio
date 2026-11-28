@@ -1,6 +1,8 @@
 package com.schemaplexai.service.integration.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.schemaplexai.common.util.SecurityUtil;
+import java.util.concurrent.atomic.AtomicInteger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.schemaplexai.model.entity.McpServer;
@@ -86,6 +88,49 @@ class LangChain4jMcpClientFactoryTest {
                 closed.countDown();
                 http.stop(0);
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"user-scoped", "stateless", "authenticated"})
+    void reusesMcpSessionsOnlyWithinTheirConfiguredIdentityScope(String mode) throws Exception {
+        var http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        http.createContext("/mcp", exchange -> respond(exchange, null));
+        http.start();
+        try {
+            var server = new McpServer();
+            server.setId("test-mcp");
+            server.setTenantId("tenant-1");
+            server.setTransportType("streamable_http");
+            if (!"user-scoped".equals(mode)) server.setTransportConfig(Map.of("stateless", true));
+            if ("authenticated".equals(mode)) {
+                server.setAuthType("oauth");
+                server.setAuthConfig(Map.of("token", "fixture-token"));
+            }
+            server.setUrl("http://127.0.0.1:" + http.getAddress().getPort() + "/mcp");
+            var materializer = mock(DatabaseCredentialMaterializer.class);
+            var created = new AtomicInteger();
+            when(materializer.materialize(server)).thenAnswer(invocation -> {
+                created.incrementAndGet();
+                return server;
+            });
+            var factory = new LangChain4jMcpClientFactory(mock(DatabaseMcpPresetResolver.class), materializer);
+            try {
+                var service = new McpClientService(JSON, factory);
+                SecurityUtil.setCurrentTenantId("tenant-1");
+                SecurityUtil.setCurrentUserId("user-1");
+                assertThat(service.discoverTools(server)).hasSize(1);
+                assertThat(service.toolsCall(server, "lookup", Map.of()).toString()).contains("fixture response");
+                assertThat(created).hasValue(1);
+                SecurityUtil.setCurrentUserId("user-2");
+                assertThat(service.discoverTools(server)).hasSize(1);
+                assertThat(created).hasValue("stateless".equals(mode) ? 1 : 2);
+            } finally {
+                factory.shutdown();
+                SecurityUtil.clear();
+            }
+        } finally {
+            http.stop(0);
         }
     }
 

@@ -13,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
@@ -39,6 +40,13 @@ public class AgentLogService {
     private final AgentExecutionMapper agentExecutionMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
     private final AgentTerminalEventOutbox terminalOutbox;
+
+    private ExecutionStopSignal executionStopSignal;
+
+    @Autowired
+    void setExecutionStopSignal(ExecutionStopSignal executionStopSignal) {
+        this.executionStopSignal = executionStopSignal;
+    }
     private static final List<String> TERMINAL_STATUSES = List.of("completed", "completed_with_fallback",
             "failed", "stopped", "cancelled");
 
@@ -178,6 +186,32 @@ public class AgentLogService {
         return true;
     }
 
+    @Transactional(rollbackFor = Exception.class)
+    public boolean tryResumeTeamChild(AgentExecutionContext context) {
+        // 与父执行停止及回收遵循相同锁顺序，避免父子记录交叉持锁。
+        AgentExecution parent = agentExecutionMapper.selectOne(new LambdaQueryWrapper<AgentExecution>()
+                .select(AgentExecution::getId)
+                .eq(AgentExecution::getId, context.getParentExecutionId())
+                .eq(AgentExecution::getTenantId, context.getTenantId())
+                .eq(AgentExecution::getAgentId, context.getAgentId())
+                .eq(AgentExecution::getStatus, AgentExecutionStatusEnum.RUNNING.getCode())
+                .last("FOR SHARE"));
+        if (parent == null) return false;
+        String paused = AgentExecutionStatusEnum.PAUSED.getCode();
+        AgentExecution child = agentExecutionMapper.selectOne(new LambdaQueryWrapper<AgentExecution>()
+                .select(AgentExecution::getId)
+                .eq(AgentExecution::getId, context.getExecutionId())
+                .eq(AgentExecution::getTenantId, context.getTenantId())
+                .eq(AgentExecution::getAgentId, context.getAgentId())
+                .eq(AgentExecution::getParentExecutionId, context.getParentExecutionId())
+                .eq(AgentExecution::getTeamMemberId, context.getTeamMemberId())
+                .eq(AgentExecution::getConversationId, context.getConversationId())
+                .eq(AgentExecution::getStatus, paused)
+                .last("FOR UPDATE SKIP LOCKED"));
+        return child != null && updateExecutionStatus(child.getId(), paused, AgentExecutionStatusEnum.RUNNING.getCode(),
+                null, null, null, null, null);
+    }
+
     /** 暂停状态、有效执行时间和累计 Token 一起提交，供下一次恢复读取。 */
     @Transactional(rollbackFor = Exception.class)
     public boolean tryPauseExecution(String executionId, String errorMessage, long tokenInput, long tokenOutput,
@@ -259,6 +293,9 @@ public class AgentLogService {
             log.info("执行状态未更新: executionId={}, expectedStatus={}, targetStatus={}",
                     executionId, expectedStatus, status);
             return false;
+        }
+        if (AgentExecutionStatusEnum.STOPPED.getCode().equals(status) && executionStopSignal != null) {
+            executionStopSignal.publishAfterCommit(executionId);
         }
         if (TERMINAL_STATUSES.contains(status)) {
             terminalOutbox.enqueue(terminalEvent == null ? defaultTerminalEvent(executionId, status, errorMessage, outputResult)

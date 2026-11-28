@@ -44,9 +44,14 @@ public class QualityGateEvaluator {
         }
 
         boolean taskFailed = "failed".equalsIgnoreCase(asText(ctx.qualityResult().get("qualityTaskStatus")));
+        String rawGateDecision = asText(ctx.qualityResult().get("qualityGateDecision"));
         Integer score = readInteger(ctx.qualityResult().get("qualityScore"));
         int deviationCount = readIntOrDefault(ctx.qualityResult().get("qualityDeviationCount"), 0);
         int warningCount = readIntOrDefault(ctx.qualityResult().get("qualityWarningCount"), deviationCount);
+        Map<?, ?> coverage = readMap(ctx.qualityResult().get("qualityCoverage"));
+        if (coverage.isEmpty()) {
+            coverage = readMap(ctx.qualityResult().get("coverage"));
+        }
 
         Integer minQualityScore = readInteger(ctx.nodeConfig().get("minQualityScore"));
         if (minQualityScore == null && useDefaultThresholds) {
@@ -54,14 +59,23 @@ public class QualityGateEvaluator {
         }
         Integer maxDeviationCount = readInteger(ctx.nodeConfig().get("maxDeviationCount"));
         Integer maxWarningCount = readInteger(ctx.nodeConfig().get("maxWarningCount"));
-        Boolean blockOnTaskFailedConfig = readBoolean(ctx.nodeConfig().get("blockOnQualityTaskFailed"));
-        boolean blockOnTaskFailed = blockOnTaskFailedConfig != null ? blockOnTaskFailedConfig : useDefaultThresholds;
-
         List<String> reasons = new ArrayList<>();
         boolean scoreBelow = false;
+        boolean coverageIncomplete = false;
 
-        if (taskFailed && blockOnTaskFailed) {
+        if (taskFailed) {
             reasons.add("质量任务执行失败");
+        }
+        if (GateDecisionEnum.ERROR.getCode().equalsIgnoreCase(rawGateDecision)) {
+            reasons.add("质量检查返回错误");
+            coverageIncomplete = true;
+        }
+        if (!coverage.isEmpty()) {
+            List<String> coverageReasons = coverageReasons(coverage);
+            if (!coverageReasons.isEmpty()) {
+                reasons.addAll(coverageReasons);
+                coverageIncomplete = true;
+            }
         }
         if (minQualityScore != null && score != null && score < minQualityScore) {
             reasons.add("质量分低于阈值(" + score + "<" + minQualityScore + ")");
@@ -79,9 +93,14 @@ public class QualityGateEvaluator {
         }
 
         String summary = String.join("；", reasons);
+        boolean protectedFailure = taskFailed || coverageIncomplete
+                || GateDecisionEnum.ERROR.getCode().equalsIgnoreCase(rawGateDecision);
+        if (protectedFailure && !hasExplicitGateMode) {
+            return QualityGateDecision.pause("命中质量覆盖保护: " + summary);
+        }
 
         // retry 判定：仅在 score 接近阈值、且还有重试次数时触发
-        if (scoreBelow && canRetry(ctx, score, minQualityScore)) {
+        if (scoreBelow && !coverageIncomplete && canRetry(ctx, score, minQualityScore)) {
             String retryPrompt = buildRetryPrompt(ctx.qualityResult());
             log.info("质量闸门触发 retry: score={}, minScore={}, retryCount={}/{}",
                     score, minQualityScore, ctx.retryCount(), ctx.maxRetryCount());
@@ -98,6 +117,28 @@ public class QualityGateEvaluator {
             return QualityGateDecision.pause("命中默认质量闸门: " + summary);
         }
         return QualityGateDecision.warn(summary);
+    }
+
+    private List<String> coverageReasons(Map<?, ?> coverage) {
+        List<String> reasons = new ArrayList<>();
+        if (Boolean.TRUE.equals(coverage.get("requiredIncomplete"))
+                || "error".equalsIgnoreCase(String.valueOf(coverage.get("status")))) {
+            reasons.add("质量检查覆盖不完整");
+        }
+        Map<?, ?> dimensions = readMap(coverage.get("dimensions"));
+        dimensions.forEach((key, value) -> {
+            Map<?, ?> dimension = readMap(value);
+            String status = asText(dimension.get("status"));
+            if (Boolean.TRUE.equals(dimension.get("required")) && !"passed".equalsIgnoreCase(status)) {
+                reasons.add("必需质量维度未通过(" + key + "=" + status + ")");
+            }
+        });
+        Map<?, ?> model = readMap(coverage.get("model"));
+        String modelStatus = asText(model.get("status"));
+        if (Boolean.TRUE.equals(model.get("required")) && !"passed".equalsIgnoreCase(modelStatus)) {
+            reasons.add("必需模型质量评估未完成(" + modelStatus + ")");
+        }
+        return reasons.stream().distinct().toList();
     }
 
     /**
@@ -187,6 +228,10 @@ public class QualityGateEvaluator {
             case "false", "0", "no", "off" -> false;
             default -> null;
         };
+    }
+
+    private Map<?, ?> readMap(Object value) {
+        return value instanceof Map<?, ?> map ? map : Map.of();
     }
 
     private String asText(Object value) {

@@ -2,7 +2,6 @@ package com.schemaplexai.service.agent.execution;
 
 import com.schemaplexai.common.enums.SandboxProfileEnum;
 import com.schemaplexai.common.exception.BusinessException;
-import com.schemaplexai.service.agent.tool.ToolApprovalAmendmentService;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -14,9 +13,6 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
 
 class SandboxGuardTest {
 
@@ -61,31 +57,26 @@ class SandboxGuardTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"mvn --version", "mvn '-Dlabel=a&b'", "mvn \"-Dlabel=a&b\"", "mvn '-Dlabel=a\nb'"})
-    void shouldHonorAnAmendmentForOneCommand(String command) {
+    void shouldRejectAnUnlistedCommand(String command) {
         SandboxGuard guard = createGuard();
-        mockMatchingAmendment(guard, command);
 
-        assertThat(guard.checkCommand(command, amendmentPolicy(SandboxProfileEnum.STANDARD))).isNull();
+        assertThat(guard.checkCommand(command, amendmentPolicy(SandboxProfileEnum.STANDARD))).contains("白名单");
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"sudo --help", "/usr/bin/sudo --help", "echo $(pwd)", "echo text > receipt", "LANG=C"})
     void shouldRejectHardViolationsBeforeCheckingAmendments(String command) {
         SandboxGuard guard = createGuard();
-        ToolApprovalAmendmentService amendmentService = mockMatchingAmendment(guard, command);
 
         assertThat(guard.checkCommand(command, amendmentPolicy(SandboxProfileEnum.STANDARD))).isNotBlank();
-        verifyNoInteractions(amendmentService);
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"echo text | mvn --version", "echo text\nmvn --version", "echo text & mvn --version"})
     void shouldRequireEveryChainedCommandOnTheWhitelist(String command) {
         SandboxGuard guard = createGuard();
-        ToolApprovalAmendmentService amendmentService = mockMatchingAmendment(guard, command);
 
         assertThat(guard.checkCommand(command, amendmentPolicy(SandboxProfileEnum.STANDARD))).contains("白名单");
-        verifyNoInteractions(amendmentService);
     }
 
     @Test
@@ -99,10 +90,8 @@ class SandboxGuardTest {
     void shouldRejectAmendmentsInStrictMode() {
         String command = "mvn --version";
         SandboxGuard guard = createGuard();
-        ToolApprovalAmendmentService amendmentService = mockMatchingAmendment(guard, command);
 
         assertThat(guard.checkCommand(command, amendmentPolicy(SandboxProfileEnum.STRICT))).contains("STRICT 沙箱禁止");
-        verifyNoInteractions(amendmentService);
     }
 
     @Test
@@ -132,13 +121,6 @@ class SandboxGuardTest {
                 .sandboxProfile(profile)
                 .allowedCommands(Set.of("echo", "wc"))
                 .build();
-    }
-
-    private ToolApprovalAmendmentService mockMatchingAmendment(SandboxGuard guard, String command) {
-        ToolApprovalAmendmentService amendmentService = mock(ToolApprovalAmendmentService.class);
-        when(amendmentService.isAutoApproved("tenant-1", "agent-1", "sys.bash", command)).thenReturn(true);
-        ReflectionTestUtils.setField(guard, "amendmentService", amendmentService);
-        return amendmentService;
     }
 
     @Test

@@ -11,6 +11,8 @@ public final class TeamGraphConstants {
     public static final String NODE_PLAN = "plan";
     public static final String NODE_MEMBER_CYCLE = "member_cycle";
     public static final String NODE_EXECUTE_MEMBERS = "execute_members";
+    public static final String NODE_ADVISOR = "advisor";
+    public static final String NODE_LEAD = "lead";
     public static final String NODE_AGGREGATE = "aggregate";
     public static final String NODE_QUALITY_GATE = "quality_gate";
     public static final String NODE_RETRY = "retry";
@@ -30,6 +32,12 @@ public final class TeamGraphConstants {
     public static final String STATE_USER_OPTIONS = "userOptions";
     public static final String STATE_QUALITY_GATE_DECISION = "qualityGateDecision";
     public static final String STATE_QUALITY_GATE_SUMMARY = "qualityGateSummary";
+    public static final String STATE_ADVISOR_PROCESSED_EXECUTION_IDS = "advisorProcessedExecutionIds";
+    public static final String STATE_ADVISOR_SKIPPED_MEMBER_IDS = "advisorSkippedMemberIds";
+
+    /** State schema 版本字段（审计 LA-10）：反序列化时据此判断 checkpoint 是否与当前代码兼容并触发迁移。 */
+    public static final String STATE_SCHEMA_VERSION = "_schemaVersion";
+    public static final int SCHEMA_VERSION = 2;
 
     public static final String RESULT_MEMBER_ID = "memberId";
     public static final String RESULT_ROLE_NAME = "roleName";

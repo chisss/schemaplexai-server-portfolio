@@ -6,6 +6,7 @@ import com.schemaplexai.common.enums.TaskStatusEnum;
 import com.schemaplexai.service.quality.strategy.QualityEvaluationStrategy;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -33,32 +34,70 @@ public record QualityCheckResult(
         /** 偏离数量 */
         int deviationCount,
         /** 预警数量 */
-        int warningCount
+        int warningCount,
+        /** 必需检查维度、规则和模型评估的覆盖状态 */
+        Map<String, Object> coverage
 ) {
+
+    public QualityCheckResult {
+        coverage = coverage == null ? Map.of() : Map.copyOf(coverage);
+    }
+
+    /** 兼容旧调用方；未传 coverage 时按任务状态生成最小可审计覆盖。 */
+    public QualityCheckResult(String taskId, String gateDecision,
+                              List<QualityEvaluationStrategy.Finding> findings, int score, String summary,
+                              String crossReviewId, long executionDurationMs, String executionStrategy,
+                              String taskStatus, int deviationCount, int warningCount) {
+        this(taskId, gateDecision, findings, score, summary, crossReviewId, executionDurationMs,
+                executionStrategy, taskStatus, deviationCount, warningCount,
+                legacyCoverage(taskStatus));
+    }
 
     /** 转换为 Map（兼容原有返回格式） */
     public Map<String, Object> toOutputMap() {
-        Map<String, Object> output = new java.util.LinkedHashMap<>();
+        Map<String, Object> output = new LinkedHashMap<>();
         output.put("qualityTaskId", taskId);
         output.put("qualityTaskStatus", taskStatus);
+        output.put("qualityGateDecision", gateDecision);
         output.put("qualityScore", score);
         output.put("qualitySummary", summary);
         output.put("qualityDeviationCount", deviationCount);
         output.put("qualityWarningCount", warningCount);
         output.put("qualityCheckedAt", java.time.LocalDateTime.now().toString());
         output.put("qualityExecutionStrategy", executionStrategy);
+        output.put("qualityCoverage", coverage);
+        output.put("qualityCoverageComplete", coverageComplete());
         if (crossReviewId != null) {
             output.put("crossReviewId", crossReviewId);
         }
         return output;
     }
 
+    public boolean coverageComplete() {
+        return !Boolean.TRUE.equals(coverage.get("requiredIncomplete"))
+                && !"error".equalsIgnoreCase(String.valueOf(coverage.get("status")));
+    }
+
     /** 空结果 */
     public static QualityCheckResult empty(String taskId) {
         return new QualityCheckResult(
-                taskId, GateDecisionEnum.PASS.getCode(), List.of(), 100,
-                "未发现问题", null, 0, ExecutionStrategyEnum.SYNC.getCode(),
-                TaskStatusEnum.SUCCEEDED.getCode(), 0, 0
+                taskId, GateDecisionEnum.ERROR.getCode(), List.of(), 0,
+                "未获得质量检查结果", null, 0, ExecutionStrategyEnum.SYNC.getCode(),
+                TaskStatusEnum.FAILED.getCode(), 0, 0,
+                Map.of("status", "error", "requiredIncomplete", true,
+                        "dimensions", Map.of(), "rules", Map.of(),
+                        "model", Map.of("status", "unknown", "required", false, "reason", "no_result"))
+        );
+    }
+
+    private static Map<String, Object> legacyCoverage(String taskStatus) {
+        boolean failed = TaskStatusEnum.FAILED.getCode().equalsIgnoreCase(taskStatus);
+        return Map.of(
+                "status", failed ? "error" : "complete",
+                "requiredIncomplete", failed,
+                "dimensions", Map.of(),
+                "rules", Map.of(),
+                "model", Map.of("status", "unknown", "required", false, "reason", "legacy_result")
         );
     }
 }

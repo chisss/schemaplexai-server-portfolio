@@ -33,13 +33,14 @@ import dev.langchain4j.agent.tool.SearchBehavior;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ChatMessage;
-import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.invocation.InvocationContext;
 import dev.langchain4j.invocation.InvocationParameters;
 import dev.langchain4j.mcp.McpToolProvider;
 import dev.langchain4j.mcp.client.McpClient;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
+import com.schemaplexai.service.agent.execution.AgentExecutionEvidenceService;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.service.tool.ToolProvider;
 import dev.langchain4j.service.tool.ToolProviderRequest;
@@ -94,6 +95,13 @@ public class AgentToolSessionFactory {
     private final ApiGatewayToolExecutor apiGatewayToolExecutor;
     private final LangChain4jToolSpecProvider toolSpecProvider;
     private final LangChain4jMcpClientFactory mcpClientFactory;
+
+    private AgentExecutionEvidenceService evidenceService;
+
+    @Autowired
+    void setEvidenceService(AgentExecutionEvidenceService evidenceService) {
+        this.evidenceService = evidenceService;
+    }
     private final SandboxGuard sandboxGuard;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
     private final DesktopToolBroker desktopToolBroker;
@@ -150,7 +158,11 @@ public class AgentToolSessionFactory {
                 .effectiveTools(toolSpecifications)
                 .toolExecutors(executors)
                 .build();
-        return new AgentToolSession(baseContext, toolSearchAdapter, ctx, conversationId, skillPromptBlock, closeables, lazyLoadedSkillTools, ioTypeIndex);
+        AgentToolSession session = new AgentToolSession(baseContext, toolSearchAdapter, ctx, conversationId,
+                skillPromptBlock, closeables, lazyLoadedSkillTools, ioTypeIndex);
+        session.evidenceService = evidenceService;
+        session.objectMapper = objectMapper;
+        return session;
     }
 
     private String mergeSkillProviders(AgentExecutionContext ctx,
@@ -265,13 +277,16 @@ public class AgentToolSessionFactory {
         for (Map.Entry<String, List<String>> entry : serverToolNames.entrySet()) {
             McpServer server = mcpServerMapper.selectOne(new LambdaQueryWrapper<McpServer>()
                     .eq(McpServer::getId, entry.getKey())
+                    .eq(McpServer::getTenantId, ctx.getTenantId())
                     .last("LIMIT 1"));
             if (server == null) {
                 continue;
             }
+            LangChain4jMcpClientFactory.ClientLease lease = null;
             try {
-                McpClient mcpClient = mcpClientFactory.create(server);
-                closeables.add(mcpClient);
+                lease = mcpClientFactory.borrow(ctx.getTenantId(), ctx.getUserId(), server);
+                closeables.add(lease);
+                McpClient mcpClient = lease.client();
                 McpToolProvider provider = McpToolProvider.builder()
                         .mcpClients(mcpClient)
                         .failIfOneServerFails(false)
@@ -282,6 +297,7 @@ public class AgentToolSessionFactory {
                         .build();
                 mergeProviderResult(provider, providerRequest, availableTools, executors, ctx, SourceTypeEnum.MCP.getCode());
             } catch (Exception exception) {
+                if (lease != null) lease.invalidate();
                 log.warn("MCP 工具提供器初始化失败: serverId={}, error={}", entry.getKey(), exception.getMessage());
             }
         }
@@ -719,6 +735,8 @@ public class AgentToolSessionFactory {
         private final List<AutoCloseable> closeables;
         private final Map<String, List<ExecutableSkillTool>> lazyLoadedSkillTools;
         private final Map<String, ToolIoTypeEnum> ioTypeIndex;
+        private AgentExecutionEvidenceService evidenceService;
+        private ObjectMapper objectMapper;
 
         public RoundToolContext buildRoundContext(ChatMemory chatMemory, int round) {
             InvocationContext invocationContext = InvocationContext.builder()
@@ -743,10 +761,84 @@ public class AgentToolSessionFactory {
                 }
             });
             effectiveContext = mergeActivatedSkillTools(effectiveContext, chatMemory);
+            if (evidenceService != null) {
+                effectiveContext = withEvidenceTools(effectiveContext, chatMemory, effectiveIoTypes);
+            }
             return new RoundToolContext(effectiveContext, invocationContext, effectiveIoTypes);
         }
 
+        private ToolServiceContext withEvidenceTools(ToolServiceContext context, ChatMemory memory,
+                                                     Map<String, ToolIoTypeEnum> ioTypes) {
+            boolean hasArtifacts = memory.messages().stream().anyMatch(message ->
+                    message instanceof ToolExecutionResultMessage result
+                            && result.attributes().containsKey(AgentExecutionEvidenceService.ARTIFACT_ATTRIBUTE));
+            List<String> members = executionContext.getTeamMemberEvidenceIds();
+            if (!hasArtifacts && (members == null || members.isEmpty())) return context;
+
+            var executors = new LinkedHashMap<>(context.toolExecutors());
+            var effective = new ArrayList<>(context.effectiveTools());
+            var available = new ArrayList<>(context.availableTools());
+            if (hasArtifacts) {
+                addEvidenceTool(executors, effective, ioTypes, "read_agent_artifact",
+                        "读取当前执行的产物。传入 artifact_ref:// 后的 ID，从 offset=0 开始，按返回的 nextOffset 翻页。",
+                        (id, offset) -> objectMapper.writeValueAsString(evidenceService.readArtifactPage(
+                                executionContext.getTenantId(), executionContext.getExecutionId(), id, offset)));
+            }
+            if (members != null && !members.isEmpty()) {
+                addEvidenceTool(executors, effective, ioTypes, "read_team_member_evidence",
+                        "按需读取本队成员的实际输出，每次最多 4000 字符。可用执行 ID " + String.join(", ", members),
+                        (id, offset) -> objectMapper.writeValueAsString(evidenceService.readMemberEvidencePage(executionContext, id, offset)));
+            }
+            effective.stream().filter(spec -> available.stream().noneMatch(existing -> existing.name().equals(spec.name())))
+                    .toList().forEach(available::add);
+            return context.toBuilder().toolExecutors(executors).effectiveTools(effective)
+                    .availableTools(available).toolSpecifications(available).build();
+        }
+
+        private void addEvidenceTool(Map<String, dev.langchain4j.service.tool.ToolExecutor> executors,
+                                     List<ToolSpecification> tools, Map<String, ToolIoTypeEnum> ioTypes,
+                                     String name, String description, EvidenceReader reader) {
+            var spec = ToolSpecification.builder().name(name).description(description)
+                    .parameters(JsonObjectSchema.builder().addStringProperty("id").addIntegerProperty("offset")
+                            .required("id").build()).build();
+            executors.put(name, new dev.langchain4j.service.tool.ToolExecutor() {
+                @Override
+                public String execute(ToolExecutionRequest request, Object memoryId) {
+                    return executeWithContext(request, null).resultText();
+                }
+
+                @Override
+                public ToolExecutionResult executeWithContext(ToolExecutionRequest request, InvocationContext invocationContext) {
+                    try {
+                        var args = objectMapper.readTree(request.arguments());
+                        var offset = args.path("offset");
+                        if (!offset.isMissingNode() && (!offset.isIntegralNumber() || !offset.canConvertToInt())) {
+                            throw new IllegalArgumentException("偏移无效");
+                        }
+                        return ToolExecutionResult.builder()
+                                .resultText(reader.read(args.path("id").asText(), offset.asInt())).isError(false).build();
+                    } catch (Exception failure) {
+                        return ToolExecutionResult.builder().isError(true).resultText("引用不可用或超出本次执行范围").build();
+                    }
+                }
+            });
+            tools.removeIf(existing -> name.equals(existing.name()));
+            tools.add(spec);
+            ioTypes.put(name, ToolIoTypeEnum.READ);
+        }
+
+        @FunctionalInterface
+        private interface EvidenceReader {
+            String read(String id, int offset) throws Exception;
+        }
+
         public String augmentSystemPrompt(String systemPrompt, int maxToolCallsPerRound) {
+            if (evidenceService != null && executionContext.getTeamMemberEvidenceIds() != null
+                    && !executionContext.getTeamMemberEvidenceIds().isEmpty()) {
+                systemPrompt += "\n\n## 成员交付查证\n"
+                        + "成员摘要可能省略细节。需要精确数字、原文或完整依据时，使用 read_team_member_evidence 按成员执行 ID 读取。"
+                        + "从 offset=0 开始，按返回的 nextOffset 翻页，直到为 null。";
+            }
             if (DesktopExecutionTarget.from(executionContext.getInputContext()) != null) {
                 boolean supportsExactEdit = baseContext.availableTools().stream().anyMatch(tool ->
                         "sys_edit".equals(tool.name()) && tool.parameters() instanceof JsonObjectSchema schema

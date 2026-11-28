@@ -61,6 +61,17 @@ public class AgentEngineParams {
     @Builder.Default
     private final int maxParallelTools = 4;
 
+    /** 单个 Team 成员的主动执行时间上限 */
+    @Builder.Default
+    private final int memberExecutionTimeoutMinutes = 10;
+
+    /** Team 质量闸门允许的重试次数 */
+    @Builder.Default
+    private final int teamMaxMemberRetries = 2;
+
+    /** 历史摘要系统指令 */
+    private final String compactionPrompt;
+
     /** 循环检测 WARNING 累积触发强制收敛的阈值 */
     @Builder.Default
     private final int maxLoopWarnings = 5;

@@ -80,7 +80,16 @@ public class CompositeChatMemoryStore implements ChatMemoryStore {
     @Override
     public void updateMessages(Object memoryId, List<ChatMessage> messages) {
         List<ChatMessage> snapshot = List.copyOf(messages);
-        postgresChatMemoryStore.updateMessages(memoryId, snapshot);
+        try {
+            postgresChatMemoryStore.updateMessages(memoryId, snapshot);
+        } catch (RuntimeException failure) {
+            try {
+                redisChatMemoryStore.deleteMessages(memoryId);
+            } catch (RuntimeException cacheFailure) {
+                failure.addSuppressed(cacheFailure);
+            }
+            throw failure;
+        }
         afterCommit(() -> redisChatMemoryStore.updateMessages(memoryId, snapshot));
     }
 

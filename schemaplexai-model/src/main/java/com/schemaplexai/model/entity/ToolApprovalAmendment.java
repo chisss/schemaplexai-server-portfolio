@@ -35,6 +35,9 @@ public class ToolApprovalAmendment extends BaseEntity {
     /** 过期时间 */
     private LocalDateTime expiresAt;
 
+    /** 最大使用次数 */
+    private Integer maxUses;
+
     /** 使用次数 */
     private Integer useCount;
 

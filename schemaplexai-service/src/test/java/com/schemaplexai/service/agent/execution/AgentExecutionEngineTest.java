@@ -1955,6 +1955,44 @@ class AgentExecutionEngineTest {
     }
 
     @Test
+    void shouldFailClosedWhenOutputGuardThrows() {
+        ExecutionFixture fixture = executionFixture();
+        SecurityRuntimeGuardService guard = mock(SecurityRuntimeGuardService.class);
+        when(fixture.guardProvider().getIfAvailable()).thenReturn(guard);
+        when(guard.evaluate(any(), isNull())).thenThrow(new IllegalStateException("policy store unavailable"));
+        when(fixture.model().chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("候选内容")).build());
+
+        AgentExecutionResult result = fixture.engine().execute(fixture.context()).join();
+
+        assertThat(result.getStatus()).isEqualTo("failed");
+        assertThat(result.getEndReason()).isEqualTo(AgentLoopEndReason.INTERNAL_ERROR);
+        assertThat(result.getErrorMessage()).contains("输出安全检查失败");
+    }
+
+    @Test
+    void shouldGuardRawCandidateAndPersistSanitizedDisplayContent() {
+        AgentLoopQualityChecker checker = spy(new AgentLoopQualityChecker(null));
+        ExecutionFixture fixture = executionFixture(checker, 0);
+        doReturn("已清洗展示内容").when(checker).sanitize("原始候选 /tmp/internal.txt");
+        SecurityRuntimeGuardService guard = mock(SecurityRuntimeGuardService.class);
+        SecurityCheckDecisionVO allow = new SecurityCheckDecisionVO();
+        allow.setDecision(SecurityComplianceConstant.DECISION_ALLOW);
+        when(guard.evaluate(any(), isNull())).thenReturn(allow);
+        when(fixture.guardProvider().getIfAvailable()).thenReturn(guard);
+        when(fixture.model().chat(any(ChatRequest.class)))
+                .thenReturn(ChatResponse.builder().aiMessage(AiMessage.from("原始候选 /tmp/internal.txt")).build());
+
+        AgentExecutionResult result = fixture.engine().execute(fixture.context()).join();
+
+        ArgumentCaptor<com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest> checked =
+                ArgumentCaptor.forClass(com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest.class);
+        verify(guard).evaluate(checked.capture(), isNull());
+        assertThat(checked.getValue().getContent()).isEqualTo("原始候选 /tmp/internal.txt");
+        assertThat(result.getOutputResult()).isEqualTo("已清洗展示内容");
+    }
+
+    @Test
     void shouldSkipConvergenceWhenRoundLimitHasNoEvidence() {
         ExecutionFixture fixture = executionFixture();
         when(fixture.model().chat(any(ChatRequest.class)))
@@ -2193,6 +2231,11 @@ class AgentExecutionEngineTest {
         AgentHookExecutor hooks = new AgentHookExecutor(List.of(), null);
         @SuppressWarnings("unchecked")
         ObjectProvider<SecurityRuntimeGuardService> guardProvider = mock(ObjectProvider.class);
+        SecurityRuntimeGuardService defaultOutputGuard = mock(SecurityRuntimeGuardService.class);
+        SecurityCheckDecisionVO allow = new SecurityCheckDecisionVO();
+        allow.setDecision(SecurityComplianceConstant.DECISION_ALLOW);
+        when(defaultOutputGuard.evaluate(any(), isNull())).thenReturn(allow);
+        when(guardProvider.getIfAvailable()).thenReturn(defaultOutputGuard);
         AgentModelInvoker invoker = buildModelInvoker();
         CompositeChatMemoryStore store = mock(CompositeChatMemoryStore.class);
         List<ChatMessage> persistedMessages = new ArrayList<>();

@@ -9,6 +9,8 @@ import com.schemaplexai.service.agent.execution.SandboxGuard;
 import com.schemaplexai.service.agent.execution.SandboxPolicy;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.invocation.InvocationContext;
+import org.mockito.ArgumentCaptor;
 import dev.langchain4j.service.tool.ToolExecutionResult;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -27,6 +29,23 @@ import static org.mockito.Mockito.when;
 class GuardedToolExecutorTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void legacyExecutePreservesTenantExecutionAndMemoryIds() {
+        var delegate = mock(dev.langchain4j.service.tool.ToolExecutor.class);
+        when(delegate.executeWithContext(any(), any()))
+                .thenReturn(ToolExecutionResult.builder().resultText("ok").build());
+        var executor = new GuardedToolExecutor(delegate, objectMapper, "tenant-1", "agent-1",
+                null, "builtin", policy(), new SandboxGuard(), null, "execution-1");
+
+        assertThat(executor.execute(request("sys.read"), "conversation-1")).isEqualTo("ok");
+        var context = ArgumentCaptor.forClass(InvocationContext.class);
+        verify(delegate).executeWithContext(any(), context.capture());
+        assertThat(context.getValue().chatMemoryId()).isEqualTo("conversation-1");
+        assertThat(context.getValue().invocationParameters().asMap())
+                .containsEntry("tenantId", "tenant-1").containsEntry("agentId", "agent-1")
+                .containsEntry("executionId", "execution-1");
+    }
 
     @Test
     void shouldRejectExecutionWhenSandboxPolicyMissing() {
@@ -133,6 +152,54 @@ class GuardedToolExecutorTest {
 
         assertThat(result).isSameAs(ok);
         verify(delegate, times(1)).executeWithContext(any(), any());
+    }
+
+    @Test
+    void shouldRejectMalformedJsonBeforeDelegate() {
+        dev.langchain4j.service.tool.ToolExecutor delegate = mock(dev.langchain4j.service.tool.ToolExecutor.class);
+        SecurityRuntimeGuardService guardService = mock(SecurityRuntimeGuardService.class);
+        GuardedToolExecutor executor = new GuardedToolExecutor(
+                delegate, objectMapper, "tenant-1", "agent-1", null, "builtin",
+                policy(), new SandboxGuard(), guardService);
+        ToolExecutionRequest malformed = ToolExecutionRequest.builder()
+                .id("call-1")
+                .name("sys.write")
+                .arguments("{\"path\":")
+                .build();
+
+        ToolExecutionResult result = executor.executeWithContext(malformed, null);
+
+        assertThat(result.isError()).isTrue();
+        assertThat(((ToolResult) result.result()).getErrorMessage()).contains("JSON 非法");
+        verify(delegate, never()).executeWithContext(any(), any());
+        verify(guardService, never()).evaluate(any(), any());
+    }
+
+    @Test
+    void shouldPassTheSameCanonicalArgumentsToGuardAndDelegate() {
+        dev.langchain4j.service.tool.ToolExecutor delegate = mock(dev.langchain4j.service.tool.ToolExecutor.class);
+        when(delegate.executeWithContext(any(), any()))
+                .thenReturn(ToolExecutionResult.builder().resultText("ok").build());
+        SecurityRuntimeGuardService guardService = mock(SecurityRuntimeGuardService.class);
+        GuardedToolExecutor executor = new GuardedToolExecutor(
+                delegate, objectMapper, "tenant-1", "agent-1", null, "builtin",
+                policy(), new SandboxGuard(), guardService);
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call-1")
+                .name("sys.write")
+                .arguments(" { \"path\" : \"README.md\" } ")
+                .build();
+
+        executor.executeWithContext(request, null);
+
+        ArgumentCaptor<ToolExecutionRequest> delegated = ArgumentCaptor.forClass(ToolExecutionRequest.class);
+        verify(delegate).executeWithContext(delegated.capture(), any());
+        assertThat(delegated.getValue().arguments()).isEqualTo("{\"path\":\"README.md\"}");
+        ArgumentCaptor<com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest> checked =
+                ArgumentCaptor.forClass(com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest.class);
+        verify(guardService, times(2)).evaluate(checked.capture(), any());
+        assertThat(checked.getAllValues()).allSatisfy(call ->
+                assertThat(call.getArguments()).containsEntry("path", "README.md"));
     }
 
     private SandboxPolicy policy() {

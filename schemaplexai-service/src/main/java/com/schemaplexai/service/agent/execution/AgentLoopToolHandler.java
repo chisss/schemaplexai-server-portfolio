@@ -11,8 +11,11 @@ import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.service.tool.ToolExecutionResult;
+import io.micrometer.core.instrument.Metrics;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
 
 import com.schemaplexai.common.enums.ToolIoTypeEnum;
@@ -25,8 +28,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.function.BooleanSupplier;
@@ -42,6 +49,16 @@ import java.util.stream.Collectors;
 public class AgentLoopToolHandler {
 
     private final ObjectMapper objectMapper;
+
+    private AgentExecutionEvidenceService evidenceService;
+
+    @Autowired
+    void setEvidenceService(AgentExecutionEvidenceService evidenceService) {
+        this.evidenceService = evidenceService;
+    }
+
+    @Value("${schemaplexai.agent.tools.parallel-timeout-seconds:70}")
+    private long parallelTimeoutSeconds = 70;
 
     /**
      * 从模型返回的工具调用列表中，过滤出当前轮次允许执行的工具请求
@@ -109,12 +126,23 @@ public class AgentLoopToolHandler {
         try {
             ToolExecutionResult result = executor.executeWithContext(request, roundToolContext.invocationContext());
             ToolResult toolResult = toPlatformResult(request, result);
-            return buildOutcome(request, toolResult,
-                    result != null ? result.attributes() : Map.of(),
-                    result != null ? result.isError() : !toolResult.isSuccess(),
-                    result != null ? result.resultText() : null,
-                    options,
-                    startedAt);
+            String rendered = result != null ? result.resultText() : null;
+            Map<String, Object> attributes = result != null ? result.attributes() : Map.of();
+            if (evidenceService != null && !roundToolContext.isDesktopTool(request.name()) && rendered != null
+                    && rendered.length() > 32_000 && toolResult.isSuccess() && roundToolContext.invocationContext() != null) {
+                var parameters = roundToolContext.invocationContext().invocationParameters();
+                try {
+                    String artifactId = evidenceService.store(parameters.get("tenantId"), parameters.get("executionId"), rendered);
+                    attributes = new LinkedHashMap<>(attributes == null ? Map.of() : attributes);
+                    attributes.put(AgentExecutionEvidenceService.ARTIFACT_ATTRIBUTE, artifactId);
+                    rendered = "大结果已归档至 artifact_ref://" + artifactId + "（" + rendered.length()
+                            + " 字符）。可用 read_agent_artifact 按需读取。";
+                } catch (RuntimeException storageFailure) {
+                    Metrics.counter("agent.tool.artifact.failure").increment();
+                }
+            }
+            return buildOutcome(request, toolResult, attributes,
+                    result != null ? result.isError() : !toolResult.isSuccess(), rendered, options, startedAt);
         } catch (Exception e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             ToolResult failure = buildFailureResult(request.id(), request.name(), "工具执行异常: " + msg);
@@ -355,7 +383,7 @@ public class AgentLoopToolHandler {
         while (index < requests.size()) {
             ToolExecutionRequest request = requests.get(index);
             if (interrupted) {
-                outcomes.add(notDispatched(request, compressionOptions, "SKIPPED", "同轮工具触发安全中断，此调用已跳过"));
+                outcomes.add(notDispatched(request, compressionOptions, "SKIPPED", "本批次有工具超时或触发安全中断，后续调用已跳过"));
                 index++;
                 continue;
             }
@@ -376,7 +404,8 @@ public class AgentLoopToolHandler {
             List<ToolExecutionOutcome> batch = submitReadBatch(requests.subList(index, end),
                     compressionOptions, parallelExecutor, canDispatch, execute);
             outcomes.addAll(batch);
-            interrupted = batch.stream().anyMatch(this::isSecurityInterrupt);
+            interrupted = batch.stream().anyMatch(outcome -> isSecurityInterrupt(outcome)
+                    || "TIMEOUT".equals(outcome.resultMessage().attributes().get("dispatchStatus")));
             index = end;
         }
         return outcomes;
@@ -401,8 +430,26 @@ public class AgentLoopToolHandler {
         List<CompletableFuture<ToolExecutionOutcome>> futures = new ArrayList<>(requests.size());
         for (ToolExecutionRequest request : requests) {
             try {
-                futures.add(CompletableFuture.supplyAsync(
-                        () -> executeIfAllowed(request, options, canDispatch, execute), executor));
+                var completion = new CompletableFuture<ToolExecutionOutcome>();
+                var task = new FutureTask<Void>(() -> {
+                    try {
+                        completion.complete(executeIfAllowed(request, options, canDispatch, execute));
+                    } catch (RuntimeException failure) {
+                        completion.completeExceptionally(failure);
+                    }
+                    return null;
+                });
+                executor.execute(task);
+                futures.add(completion.orTimeout(parallelTimeoutSeconds, TimeUnit.SECONDS)
+                        .exceptionally(failure -> {
+                            if (!(failure instanceof TimeoutException)) {
+                                throw new CompletionException(failure);
+                            }
+                            task.cancel(true);
+                            ToolResult result = buildFailureResult(request.id(), request.name(), "只读工具执行超时");
+                            return buildOutcome(request, result, Map.of("dispatchStatus", "TIMEOUT"), true,
+                                    null, options, LocalDateTime.now());
+                        }));
             } catch (RejectedExecutionException rejected) {
                 // 已提交的请求仍可完成，拒绝只影响当前未提交的工具。
                 futures.add(CompletableFuture.completedFuture(

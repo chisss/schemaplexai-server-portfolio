@@ -35,8 +35,6 @@ import com.schemaplexai.service.agent.execution.policy.ToolExecutionGateDecision
 import com.schemaplexai.service.agent.execution.policy.ToolExecutionGateRequest;
 import com.schemaplexai.service.agent.tool.langchain4j.AgentToolSessionFactory;
 import com.schemaplexai.service.agent.tool.langchain4j.GuardedToolExecutor;
-import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
-import com.schemaplexai.model.vo.security.SecurityCheckDecisionVO;
 import com.schemaplexai.service.agent.hook.AgentHookContext;
 import com.schemaplexai.service.agent.hook.AgentHookExecutor;
 import com.schemaplexai.service.agent.hook.AgentHookType;
@@ -51,6 +49,10 @@ import com.schemaplexai.service.memory.ArchivedChatMemory;
 import com.schemaplexai.service.memory.CompositeChatMemoryStore;
 import com.schemaplexai.service.monitor.AgentTraceService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard.Decision;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard.OutputGuardContext;
+import com.schemaplexai.service.security.AgentOutputSecurityGuard.OutputGuardResult;
 import com.schemaplexai.service.user.impl.UserMemoryExtractionService;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -64,6 +66,9 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Metrics;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.StatusCode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -178,6 +183,7 @@ public class AgentExecutionEngine {
     private final AgentContextBudgetService    agentContextBudgetService;
     private final MultimodalMessageBuilder     multimodalMessageBuilder;
     private final ObjectProvider<SecurityRuntimeGuardService> securityRuntimeGuardServiceProvider;
+    private AgentOutputSecurityGuard outputSecurityGuard;
     private final ToolExecutionGate            toolExecutionGate;
     private final ExecutionModePolicyResolver  executionModePolicyResolver;
     private final ExecutionModePromptContributor executionModePromptContributor;
@@ -251,6 +257,20 @@ public class AgentExecutionEngine {
     }
 
     private AgentExecutionResult runClaimed(AgentExecutionContext ctx, AgentExecutionInputDTO input, boolean recovering) {
+        var span = AgentTelemetry.execution(StringUtils.hasText(ctx.getParentExecutionId()) ? "member" : "solo", ctx);
+        try (var scope = span.makeCurrent()) {
+            var result = runWithLease(ctx, input, recovering);
+            AgentTelemetry.outcome(span, result);
+            return result;
+        } catch (RuntimeException failure) {
+            AgentTelemetry.failure(span, failure);
+            throw failure;
+        } finally {
+            span.end();
+        }
+    }
+
+    private AgentExecutionResult runWithLease(AgentExecutionContext ctx, AgentExecutionInputDTO input, boolean recovering) {
         String executionId = ctx.getExecutionId();
         String expected = recovering ? STATUS_RUNNING : input == null ? STATUS_QUEUED : STATUS_PAUSED;
         boolean root = !StringUtils.hasText(ctx.getParentExecutionId());
@@ -266,8 +286,10 @@ public class AgentExecutionEngine {
             ctx.setRecovering(recovering);
             long startMs = System.currentTimeMillis();
             AgentExecution previous = input != null || recovering ? agentExecutionMapper.selectById(executionId) : null;
-            if (!recovering && !agentLogService.tryTransitionExecutionStatus(executionId, expected, STATUS_RUNNING,
-                    null, null, null, null)) {
+            if (!recovering && !(root || input == null
+                    ? agentLogService.tryTransitionExecutionStatus(executionId, expected, STATUS_RUNNING,
+                            null, null, null, null)
+                    : agentLogService.tryResumeTeamChild(ctx))) {
                 return currentExecutionResult(executionId, 0);
             }
             AgentLoopState state = newLoopState(ctx, startMs, previous);
@@ -355,7 +377,6 @@ public class AgentExecutionEngine {
         // 每次执行构建独立压缩器（compactionModel 执行级隔离，避免并发执行互相覆盖）
         AiModelConfig compactModelConfig = aiModelRouter.resolveCompactModel(tenantId);
         ChatModel compactModel = compactModelConfig != null ? aiModelRouter.buildChatModelForExecution(compactModelConfig) : null;
-        AgentChatMemoryCompactor chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport);
         LangChain4jResolution compactResolution = compactModel == null
                 ? null : new LangChain4jResolution(compactModel, compactModelConfig);
 
@@ -375,6 +396,7 @@ public class AgentExecutionEngine {
                 agentId, extraContext, tenantId, ctx.getTeamAgentId(), systemContexts, first.config(),
                 userId, ctx.getProjectId(), ctx.isTemporaryChat(), ctx.getExecutionId());
         String systemPrompt  = promptBuildResult.prompt();
+        AgentChatMemoryCompactor chatMemoryCompactor = new AgentChatMemoryCompactor(tokenEstimatorSupport, null, systemPrompt);
         logSystemPromptBuilt(executionId, agentId, tenantId, promptBuildResult, ctx.getModel(), startMs);
         persistContextBudgetSnapshot(ctx, promptBuildResult, first.config());
 
@@ -456,6 +478,7 @@ public class AgentExecutionEngine {
         boolean verificationBudgetReminderSent = false;
         boolean finalVerificationBudgetReminderSent = false;
         long lastModelTokens = 0;
+        var requestPlanner = new AgentModelRequestPlanner(tokenEstimatorSupport);
 
         if (isStopped(executionId)) {
             return buildStoppedResult(executionId, agentId, tenantId, 0, startMs);
@@ -554,16 +577,6 @@ public class AgentExecutionEngine {
                                             + maskResult.savedChars() + " 字符", null, elapsed(startMs));
                         }
                     }
-                    AgentChatMemoryCompactor.CompactionResult compactionResult =
-                            chatMemoryCompactor.compactIfNeeded(chatMemory, params, activeModelConfig, isApprovalResume(resumeInput),
-                                    verifiedDesktop, initialUserMessage,
-                                    compactResolution == null ? null : request -> {
-                                        logModelPhase(executionId, modelRound, "compaction");
-                                        return modelInvoker.invokeWithRetry(compactResolution, request, params, executionId,
-                                                agentId, tenantId, modelRound, startMs, agentLogService, budget, "compaction");
-                                    }, budget.remainingTokens());
-                    AgentChatMemoryCompactor.NormalizationResult normalizationResult =
-                            chatMemoryCompactor.normalizeForRequest(chatMemory);
                     SystemMessage modelSystem = "reflection".equals(modelPhase) && ctx.getTeamTaskContextProjection() != null
                             ? canonicalSystem : requestSystem;
                     if (verificationReminder != null) {
@@ -574,6 +587,18 @@ public class AgentExecutionEngine {
                     if (verifiedDesktop && "reasoning".equals(modelPhase) && !isApprovalResume(resumeInput)) {
                         modelSystem = AgentModelRequestPlanner.markDesktopEvidenceProjection(modelSystem, initialUserMessage);
                     }
+                    long requestOverhead = tokenEstimatorSupport.estimateMessage(activeModelConfig, modelSystem)
+                            + requestPlanner.estimateToolSchemas(activeModelConfig, effectiveTools);
+                    AgentChatMemoryCompactor.CompactionResult compactionResult =
+                            chatMemoryCompactor.compactIfNeeded(chatMemory, params, activeModelConfig, isApprovalResume(resumeInput),
+                                    verifiedDesktop, initialUserMessage,
+                                    compactResolution == null ? null : request -> {
+                                        logModelPhase(executionId, modelRound, "compaction");
+                                        return modelInvoker.invokeWithRetry(compactResolution, request, params, executionId,
+                                                agentId, tenantId, modelRound, startMs, agentLogService, budget, "compaction");
+                                    }, budget.remainingTokens(), requestOverhead);
+                    AgentChatMemoryCompactor.NormalizationResult normalizationResult =
+                            chatMemoryCompactor.normalizeForRequest(chatMemory);
                     List<ChatMessage> messages = buildMessages(modelSystem, chatMemory);
                     logContextBudget(executionId, agentId, tenantId, round,
                             effectiveSystemPrompt, chatMemory, messages, activeModelConfig,
@@ -585,6 +610,13 @@ public class AgentExecutionEngine {
                             ctx.isStream() ? progress -> executionEventStreamService.publishActivityProgress(
                                     activityExecutionId(ctx), analysis.progress(progress.summary())) : null);
                     lastModelTokens = remainingBeforeModel - budget.remainingTokens();
+                    executionEventStreamService.publishWithPayload(activityExecutionId(ctx),
+                            AgentExecutionEventTypeEnum.BUDGET_UPDATE.getCode(), round,
+                            "Token 已用 " + (state.getTotalTokenInput() + state.getTotalTokenOutput())
+                                    + "，剩余 " + Math.max(0L, budget.remainingTokens()),
+                            Map.of("used", state.getTotalTokenInput() + state.getTotalTokenOutput(),
+                                    "remaining", Math.max(0L, budget.remainingTokens()),
+                                    "elapsedMs", elapsed(startMs), "executionId", executionId), startMs);
                 } catch (Exception e) {
                     publishActivity(ctx, analysis.finish(false, "本轮模型请求未完成", null, Map.of()));
                     if (isStopped(executionId)) {
@@ -632,6 +664,15 @@ public class AgentExecutionEngine {
                 List<ToolExecutionRequest> allRequests = aiMsg != null && aiMsg.toolExecutionRequests() != null
                         ? aiMsg.toolExecutionRequests() : List.of();
                 List<ToolExecutionRequest> executableRequests = toolHandler.filterExecutable(allRequests, effectiveTools);
+                if (executableRequests.size() > params.getMaxToolCallsPerRound()) {
+                    state.setConsecutiveToolLimitRounds(state.getConsecutiveToolLimitRounds() + 1);
+                    if (state.getConsecutiveToolLimitRounds() >= 2) {
+                        state.setEndReason(AgentLoopEndReason.REPEATED_LOOP);
+                        break;
+                    }
+                } else {
+                    state.setConsecutiveToolLimitRounds(0);
+                }
                 List<ToolExecutionRequest> rejectedRequests   = allRequests.stream()
                         .filter(r -> !executableRequests.contains(r)).toList();
 
@@ -645,6 +686,11 @@ public class AgentExecutionEngine {
                 // 循环检测（哈希 + 工具序列双层检测）
                 AgentLoopDetectionService.LoopDetectionResult loopResult =
                         loopDetectionService.check(state, lastContent, allRequests);
+                if (loopResult != AgentLoopDetectionService.LoopDetectionResult.NORMAL) {
+                    Metrics.counter("agent.loop.detection", "outcome", loopResult.name()).increment();
+                } else {
+                    state.setLoopWarningCount(0);
+                }
                 if (loopResult == AgentLoopDetectionService.LoopDetectionResult.CONFIRMED_LOOP) {
                     agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
                             AgentLoopLogTypeEnum.LOOP_CONFIRMED.getCode(), round, null,
@@ -657,8 +703,9 @@ public class AgentExecutionEngine {
                     agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
                             AgentLoopLogTypeEnum.LOOP_WARNING.getCode(), round, null,
                             "循环检测告警（单层），累计告警次数=" + state.getLoopWarningCount(), null, elapsed(startMs));
-                    // WARNING 累积超过阈值也触发强制收敛
+                    // 单层告警按连续轮次累计，正常进展会清零。
                     if (state.getLoopWarningCount() >= params.getMaxLoopWarnings()) {
+                        Metrics.counter("agent.loop.detection", "outcome", "WARNING_THRESHOLD").increment();
                         agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
                                 AgentLoopLogTypeEnum.LOOP_CONFIRMED.getCode(), round, null,
                                 "循环检测告警累积达到阈值(" + params.getMaxLoopWarnings() + ")，触发强制收敛",
@@ -1998,71 +2045,80 @@ public class AgentExecutionEngine {
 
     private AgentExecutionResult validateCandidateOutput(AgentExecutionContext ctx, AgentLoopState state,
                                                         long startMs, String conversationId) {
-        String sanitized = qualityChecker.sanitize(state.getLastContent());
-        if (Objects.equals(state.getSecurityCheckedContent(), sanitized)) {
+        String rawContent = state.getLastContent();
+        String sanitized = qualityChecker.sanitize(rawContent);
+        if (Objects.equals(state.getSecurityCheckedRawContent(), rawContent)) {
             return null;
         }
-        state.setSecurityCheckedContent(sanitized);
         String executionId = ctx.getExecutionId();
         String agentId = ctx.getAgentId();
         String tenantId = ctx.getTenantId();
-        SecurityCheckDecisionVO securityDecision = evaluateOutputSecurity(agentId, executionId, tenantId, sanitized);
-        if (securityDecision != null) {
-            String decision = securityDecision.getDecision();
-            String message = StringUtils.hasText(securityDecision.getMessage())
-                    ? securityDecision.getMessage() : "输出内容命中安全策略";
-            if (SecurityComplianceConstant.DECISION_BLOCK.equals(decision)) {
-                state.setEndReason(AgentLoopEndReason.SECURITY_BLOCKED);
-                if (!tryFinalize(executionId, STATUS_FAILED, message, null, state,
-                        AgentExecutionEventTypeEnum.FAILED, "输出安全检查阻断: " + message, startMs)) {
-                    return currentExecutionResult(executionId, state.getLastRound());
-                }
-                // 终态清理：执行失败后残留的 pending 引导不再消费
-                discardPendingSteeringOnTerminal(executionId);
-                agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
-                        AgentLoopLogTypeEnum.SECURITY_BLOCKED.getCode(), state.getLastRound(), null,
-                        "输出安全检查阻断: " + message, null, elapsed(startMs));
-                recordAgentTrace(executionId, tenantId, agentId, startMs,
-                        state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
-                return AgentExecutionResult.builder()
-                        .status(STATUS_FAILED)
-                        .endReason(state.getEndReason())
-                        .errorMessage("输出安全检查阻断: " + message)
-                        .tokenInput(state.getTotalTokenInput())
-                        .tokenOutput(state.getTotalTokenOutput())
-                        .rounds(state.getLastRound())
-                        .build();
-            }
-            if (SecurityComplianceConstant.DECISION_PAUSE.equals(decision)) {
-                state.setEndReason(AgentLoopEndReason.SECURITY_PAUSED);
-                if (!pauseExecution(executionId, message, state, sanitized)) {
-                    return currentExecutionResult(executionId, state.getLastRound());
-                }
-                agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
-                        AgentLoopLogTypeEnum.SECURITY_PAUSED.getCode(), state.getLastRound(), null,
-                        "输出安全检查暂停: " + message, null, elapsed(startMs));
-                publishEndReason(executionId, AgentExecutionEventTypeEnum.REQUIRE_INPUT, state, "输出安全检查暂停: " + message, startMs);
-                recordAgentTrace(executionId, tenantId, agentId, startMs,
-                        state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_PAUSED);
-                return AgentExecutionResult.builder()
-                        .status(STATUS_PAUSED)
-                        .endReason(state.getEndReason())
-                        .outputResult(sanitized)
-                        .errorMessage("输出安全检查暂停: " + message)
-                        .conversationId(conversationId)
-                        .tokenInput(state.getTotalTokenInput())
-                        .tokenOutput(state.getTotalTokenOutput())
-                        .rounds(state.getLastRound())
-                        .build();
-            }
-            if (SecurityComplianceConstant.DECISION_WARN.equals(decision)) {
+        OutputGuardResult guardResult = outputSecurityGuard().evaluate(new OutputGuardContext(
+                tenantId, agentId, executionId,
+                SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION,
+                executionId, null, null, null, ctx.getProjectId(),
+                rawContent, sanitized, null
+        ));
+        String message = StringUtils.hasText(guardResult.message())
+                ? guardResult.message() : "输出内容未通过安全终检";
+        if (guardResult.decision() == Decision.ALLOW || guardResult.decision() == Decision.WARN) {
+            if (guardResult.decision() == Decision.WARN) {
                 agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
                         AgentLoopLogTypeEnum.SECURITY_PAUSED.getCode(), state.getLastRound(), null,
                         "输出安全检查警告: " + message, null, elapsed(startMs));
             }
+            state.setSecurityCheckedRawContent(rawContent);
+            state.setSecurityCheckedContent(sanitized);
+            return null;
         }
-
-        return null;
+        if (guardResult.blocked()) {
+            boolean guardError = guardResult.decision() == Decision.ERROR;
+            String failurePrefix = guardError ? "输出安全检查失败: " : "输出安全检查阻断: ";
+            state.setEndReason(guardError ? AgentLoopEndReason.INTERNAL_ERROR : AgentLoopEndReason.SECURITY_BLOCKED);
+            if (!tryFinalize(executionId, STATUS_FAILED, message, null, state,
+                    AgentExecutionEventTypeEnum.FAILED, failurePrefix + message, startMs)) {
+                return currentExecutionResult(executionId, state.getLastRound());
+            }
+            // 终态清理：执行失败后残留的 pending 引导不再消费
+            discardPendingSteeringOnTerminal(executionId);
+            agentLogService.appendLog(executionId, agentId, tenantId, "ERROR",
+                    guardError ? AgentLoopLogTypeEnum.EXECUTION_FAILED.getCode()
+                            : AgentLoopLogTypeEnum.SECURITY_BLOCKED.getCode(),
+                    state.getLastRound(), null, failurePrefix + message, null, elapsed(startMs));
+            recordAgentTrace(executionId, tenantId, agentId, startMs,
+                    state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_FAILED);
+            return AgentExecutionResult.builder()
+                    .status(STATUS_FAILED)
+                    .endReason(state.getEndReason())
+                    .errorMessage(failurePrefix + message)
+                    .tokenInput(state.getTotalTokenInput())
+                    .tokenOutput(state.getTotalTokenOutput())
+                    .rounds(state.getLastRound())
+                    .build();
+        }
+        state.setEndReason(AgentLoopEndReason.SECURITY_PAUSED);
+        state.setSecurityCheckedRawContent(rawContent);
+        state.setSecurityCheckedContent(sanitized);
+        if (!pauseExecution(executionId, message, state, sanitized)) {
+            return currentExecutionResult(executionId, state.getLastRound());
+        }
+        agentLogService.appendLog(executionId, agentId, tenantId, "WARN",
+                AgentLoopLogTypeEnum.SECURITY_PAUSED.getCode(), state.getLastRound(), null,
+                "输出安全检查暂停: " + message, null, elapsed(startMs));
+        publishEndReason(executionId, AgentExecutionEventTypeEnum.REQUIRE_INPUT, state,
+                "输出安全检查暂停: " + message, startMs);
+        recordAgentTrace(executionId, tenantId, agentId, startMs,
+                state.getTotalTokenInput(), state.getTotalTokenOutput(), STATUS_PAUSED);
+        return AgentExecutionResult.builder()
+                .status(STATUS_PAUSED)
+                .endReason(state.getEndReason())
+                .outputResult(sanitized)
+                .errorMessage("输出安全检查暂停: " + message)
+                .conversationId(conversationId)
+                .tokenInput(state.getTotalTokenInput())
+                .tokenOutput(state.getTotalTokenOutput())
+                .rounds(state.getLastRound())
+                .build();
     }
 
     private boolean tryFinalize(String executionId, String status, String error, String output,
@@ -2121,7 +2177,11 @@ public class AgentExecutionEngine {
     /** 返回已提交的停止结果，由停止请求的胜者发送取消事件。 */
     private AgentExecutionResult buildStoppedResult(String executionId, String agentId, String tenantId,
                                                      int round, long startMs) {
-        // 终态清理：执行停止后残留的 pending 引导不再消费
+        // 回收信号用于阻止派发，数据库中的失败终态仍是权威结果。
+        AgentExecution execution = agentExecutionMapper.selectById(executionId);
+        if (execution != null && STATUS_FAILED.equals(execution.getStatus())) {
+            return currentExecutionResult(executionId, round);
+        }
         discardPendingSteeringOnTerminal(executionId);
         agentLogService.appendLog(executionId, agentId, tenantId, "INFO",
                 AgentLoopLogTypeEnum.EXECUTION_STOPPED.getCode(), round, null, "用户已停止执行", null, elapsed(startMs));
@@ -2335,9 +2395,11 @@ public class AgentExecutionEngine {
                         fields.getOrDefault("program", request.name())),
                 ctx.getTeamMemberRoleName(), round, fields);
         publishActivity(ctx, activity);
-        try {
+        var span = AgentTelemetry.operation("agent.tool", SpanKind.CLIENT, "agent.tool.name", request.name());
+        try (var scope = span.makeCurrent()) {
             ToolExecutionOutcome outcome = toolHandler.executeOne(roundContext, request, options);
             ToolResult result = outcome.toolResult();
+            if (!result.isSuccess()) span.setStatus(StatusCode.ERROR);
             Map<String, String> finishedFields = new LinkedHashMap<>(fields);
             finishedFields.put("durationMs", Long.toString(outcome.durationMs()));
             if (kind == AgentExecutionActivity.Kind.COMMAND) {
@@ -2346,8 +2408,11 @@ public class AgentExecutionEngine {
             publishActivity(ctx, activity.finish(result.isSuccess(), activity.summary(), null, finishedFields));
             return outcome;
         } catch (RuntimeException e) {
+            AgentTelemetry.failure(span, e);
             publishActivity(ctx, activity.finish(false, activity.summary(), null, fields));
             throw e;
+        } finally {
+            span.end();
         }
     }
 
@@ -2651,8 +2716,18 @@ public class AgentExecutionEngine {
     //  状态检测与工具辅助
     // =========================================================================
 
-    /** 检查执行是否已被用户停止 */
+    private ExecutionStopSignal executionStopSignal;
+
+    @Autowired(required = false)
+    void setExecutionStopSignal(ExecutionStopSignal executionStopSignal) {
+        this.executionStopSignal = executionStopSignal;
+    }
+
+    /** 检查执行是否已被用户停止。 */
     private boolean isStopped(String executionId) {
+        if (executionStopSignal != null) {
+            return executionStopSignal.isStopped(executionId);
+        }
         AgentExecution execution = agentExecutionMapper.selectById(executionId);
         return execution != null && STATUS_STOPPED.equals(execution.getStatus());
     }
@@ -2790,31 +2865,11 @@ public class AgentExecutionEngine {
                 : e != null ? e.getClass().getSimpleName() : "unknown";
     }
 
-    /** 评估 Agent 输出内容的安全合规性（PII、敏感信息、有害内容、合规风险） */
-    private SecurityCheckDecisionVO evaluateOutputSecurity(String agentId, String executionId,
-                                                           String tenantId, String content) {
-        try {
-            SecurityRuntimeGuardService guard = securityRuntimeGuardServiceProvider.getIfAvailable();
-            if (guard == null || !StringUtils.hasText(content)) {
-                return null;
-            }
-            SecurityRuntimeCheckRequest request = new SecurityRuntimeCheckRequest();
-            request.setTenantId(tenantId);
-            request.setScene(SecurityComplianceConstant.CHECK_SCENE_OUTPUT);
-            request.setDomainCode(SecurityComplianceConstant.DOMAIN_RUNTIME);
-            request.setResourceType(SecurityComplianceConstant.RESOURCE_TYPE_AGENT_EXECUTION);
-            request.setResourceId(executionId);
-            request.setAgentId(agentId);
-            request.setContent(content);
-            SecurityCheckDecisionVO decision = guard.evaluate(request, null);
-            if (decision == null || SecurityComplianceConstant.DECISION_ALLOW.equals(decision.getDecision())) {
-                return null;
-            }
-            return decision;
-        } catch (Exception e) {
-            log.warn("输出安全检查异常，默认放行: executionId={}", executionId, e);
-            return null;
+    private AgentOutputSecurityGuard outputSecurityGuard() {
+        if (outputSecurityGuard == null) {
+            outputSecurityGuard = new AgentOutputSecurityGuard(securityRuntimeGuardServiceProvider);
         }
+        return outputSecurityGuard;
     }
 
     private void scheduleShadowReviewIfNeeded(AgentExecutionContext ctx,

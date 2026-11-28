@@ -1,7 +1,11 @@
 package com.schemaplexai.service.monitor.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.schemaplexai.dao.mapper.AgentMapper;
+import com.schemaplexai.dao.mapper.AgentExecutionMapper;
+import com.schemaplexai.model.entity.AgentExecution;
 import com.schemaplexai.dao.mapper.AgentTraceSpanMapper;
 import com.schemaplexai.model.entity.Agent;
 import com.schemaplexai.model.entity.AgentTraceSpan;
@@ -15,10 +19,13 @@ import com.schemaplexai.service.monitor.TraceFailureClassification;
 import com.schemaplexai.service.monitor.TraceFailureClassifier;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.Duration;
+import java.util.Optional;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,6 +43,17 @@ public class AgentTraceServiceImpl implements AgentTraceService {
     private final AgentMapper agentMapper;
     private final TraceFailureClassifier traceFailureClassifier;
 
+    private AgentExecutionMapper agentExecutionMapper;
+    private final Cache<ExecutionKey, Optional<String>> parentIdCache = Caffeine.newBuilder()
+            .maximumSize(10_000).expireAfterWrite(Duration.ofMinutes(5)).build();
+
+    private record ExecutionKey(String tenantId, String executionId) { }
+
+    @Autowired
+    void setAgentExecutionMapper(AgentExecutionMapper agentExecutionMapper) {
+        this.agentExecutionMapper = agentExecutionMapper;
+    }
+
     @Override
     public void recordAgentSpan(String traceId,
                                 String tenantId,
@@ -45,35 +63,22 @@ public class AgentTraceServiceImpl implements AgentTraceService {
                                 long inputTokens,
                                 long outputTokens,
                                 String status) {
-        AgentTraceSpan span = agentTraceSpanMapper.selectOne(new LambdaQueryWrapper<AgentTraceSpan>()
-                .eq(AgentTraceSpan::getTraceId, traceId)
-                .eq(AgentTraceSpan::getSpanType, "AGENT")
-                .last("limit 1"));
-        if (span == null) {
-            span = new AgentTraceSpan();
-            span.setTenantId(tenantId);
-            span.setTraceId(traceId);
-            span.setSpanId(traceId);
-            span.setParentSpanId(null);
-            span.setAgentId(agentId);
-            span.setSpanType("AGENT");
-            span.setName("Agent Execution");
-            span.setStartedAt(startedAt);
-            span.setDurationMs(durationMs);
-            span.setInputTokens(inputTokens);
-            span.setOutputTokens(outputTokens);
-            span.setStatus(status);
-            applyFailureClassification(span, null);
-            agentTraceSpanMapper.insert(span);
-            return;
-        }
+        AgentTraceSpan span = new AgentTraceSpan();
+        span.setTenantId(tenantId);
+        String parent = parentExecutionId(traceId, tenantId);
+        span.setTraceId(parent == null ? traceId : parent);
+        span.setSpanId(traceId);
+        span.setParentSpanId(parent);
+        span.setAgentId(agentId);
+        span.setSpanType("AGENT");
+        span.setName("Agent Execution");
         span.setStartedAt(startedAt);
         span.setDurationMs(durationMs);
         span.setInputTokens(inputTokens);
         span.setOutputTokens(outputTokens);
         span.setStatus(status);
-        applyFailureClassification(span, span.getFailureReason());
-        agentTraceSpanMapper.updateById(span);
+        applyFailureClassification(span, null);
+        agentTraceSpanMapper.upsertAgentSpan(span);
     }
 
     @Override
@@ -157,7 +162,9 @@ public class AgentTraceServiceImpl implements AgentTraceService {
     @Override
     public List<AgentTraceSpanVO> listTraceSpans(String traceId) {
         return agentTraceSpanMapper.selectList(new LambdaQueryWrapper<AgentTraceSpan>()
-                        .eq(AgentTraceSpan::getTraceId, traceId)
+                        .and(query -> query.eq(AgentTraceSpan::getTraceId, traceId)
+                                .or().eq(AgentTraceSpan::getSpanId, traceId)
+                                .or().eq(AgentTraceSpan::getParentSpanId, traceId))
                         .orderByAsc(AgentTraceSpan::getStartedAt)
                         .orderByAsc(AgentTraceSpan::getCreatedAt))
                 .stream()
@@ -191,7 +198,9 @@ public class AgentTraceServiceImpl implements AgentTraceService {
     @Override
     public AgentTraceFailureSummaryVO summarizeFailures(String traceId) {
         List<TraceFailureClassification> classifications = agentTraceSpanMapper.selectList(
-                        new LambdaQueryWrapper<AgentTraceSpan>().eq(AgentTraceSpan::getTraceId, traceId))
+                        new LambdaQueryWrapper<AgentTraceSpan>().and(query -> query.eq(AgentTraceSpan::getTraceId, traceId)
+                                .or().eq(AgentTraceSpan::getSpanId, traceId)
+                                .or().eq(AgentTraceSpan::getParentSpanId, traceId)))
                 .stream()
                 .map(item -> traceFailureClassifier.inferExisting(item.getSpanType(), item.getName(), item.getStatus(),
                         item.getFailureCategory(), item.getFailureReason(), item.getRecoverable()))
@@ -231,7 +240,8 @@ public class AgentTraceServiceImpl implements AgentTraceService {
                                           String status) {
         AgentTraceSpan span = new AgentTraceSpan();
         span.setTenantId(tenantId);
-        span.setTraceId(traceId);
+        String root = parentExecutionId(traceId, tenantId);
+        span.setTraceId(root == null ? traceId : root);
         span.setSpanId(UUID.randomUUID().toString());
         span.setParentSpanId(traceId);
         span.setAgentId(agentId);
@@ -241,6 +251,18 @@ public class AgentTraceServiceImpl implements AgentTraceService {
         span.setDurationMs(durationMs);
         span.setStatus(status);
         return span;
+    }
+
+    private String parentExecutionId(String executionId, String tenantId) {
+        if (agentExecutionMapper == null || !StringUtils.hasText(tenantId) || !StringUtils.hasText(executionId)) return null;
+        Optional<String> parent = parentIdCache.get(new ExecutionKey(tenantId, executionId), key -> {
+            AgentExecution execution = agentExecutionMapper.selectOne(new LambdaQueryWrapper<AgentExecution>()
+                    .select(AgentExecution::getParentExecutionId)
+                    .eq(AgentExecution::getTenantId, key.tenantId())
+                    .eq(AgentExecution::getId, key.executionId()));
+            return execution == null ? null : Optional.ofNullable(execution.getParentExecutionId());
+        });
+        return parent == null ? null : parent.orElse(null);
     }
 
     private void applyFailureClassification(AgentTraceSpan span, String reason) {

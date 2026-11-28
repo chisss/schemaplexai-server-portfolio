@@ -17,6 +17,8 @@ import java.util.concurrent.CompletableFuture;
 @Data
 public class AgentLoopState {
 
+    private int consecutiveToolLimitRounds;
+
     @ToString.Exclude
     @EqualsAndHashCode.Exclude
     private AgentExecutionBudget budget;
@@ -49,6 +51,10 @@ public class AgentLoopState {
 
     @ToString.Exclude
     private String securityCheckedContent;
+
+    /** 已完成安全终检的原始候选；展示清洗内容不能替代该指纹。 */
+    @ToString.Exclude
+    private String securityCheckedRawContent;
 
     /** 当前轮次是否处于质量反思待处理状态 */
     private boolean qualityReflectionPending;

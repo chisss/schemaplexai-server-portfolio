@@ -29,6 +29,19 @@ class WasmSandboxServiceTest {
     }
 
     @Test
+    void rejectsLocalExecutionWhenIsolationIsRequired() {
+        var properties = new CodeExecProperties();
+        properties.setRequireWorker(true);
+        var sandbox = new WasmSandboxService(properties);
+
+        var result = sandbox.execute(CodeExecRequest.builder().language("javascript").code("console.log(42)").build());
+
+        assertEquals(4, result.getExitCode());
+        assertTrue(result.getStderr().contains("隔离"));
+        assertTrue(result.getStdout().isEmpty());
+    }
+
+    @Test
     @DisplayName("正常执行: console.log 输出")
     void shouldExecuteConsoleLog() {
         CodeExecResult result = service.execute(CodeExecRequest.builder()

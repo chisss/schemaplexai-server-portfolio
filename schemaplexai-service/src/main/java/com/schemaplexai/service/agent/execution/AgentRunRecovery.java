@@ -26,8 +26,8 @@ public class AgentRunRecovery {
     private static final ThreadLocal<Lease> CURRENT = new ThreadLocal<>();
 
     private final JdbcTemplate jdbc;
-    private final ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor(
-            Thread.ofPlatform().daemon().name("agent-run-heartbeat").factory());
+    private final ScheduledExecutorService heartbeat = Executors.newScheduledThreadPool(4,
+            Thread.ofPlatform().daemon().name("agent-run-heartbeat-", 0).factory());
 
     public boolean canRecover(String tenantId, String executionId) {
         return Boolean.TRUE.equals(jdbc.queryForObject("""
@@ -38,6 +38,10 @@ public class AgentRunRecovery {
                        AND harness_lease_until <= clock_timestamp()
                 )
                 """, Boolean.class, tenantId, executionId));
+    }
+
+    public Lease claimTeam(AgentExecutionContext context) {
+        return claim(context, "running", false);
     }
 
     Lease claim(AgentExecutionContext context, String status, boolean recovering) {
@@ -83,7 +87,7 @@ public class AgentRunRecovery {
             this.renewal = heartbeat.scheduleWithFixedDelay(this::renew, 15, 15, TimeUnit.SECONDS);
         }
 
-        void bind() {
+        public void bind() {
             CURRENT.set(this);
         }
 

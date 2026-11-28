@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.exception.RetriableException;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
 import dev.langchain4j.model.chat.ChatModel;
@@ -62,6 +63,17 @@ class LangChain4jModelFactoryTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void usesExplicitCacheRoutingOnlyWithTheOfficialOpenAiEndpoint() {
+        var nativeModel = AiModelConfig.builder().provider("openai").protocol("openai")
+                .modelId("gpt-4.1").baseUrl("https://api.openai.com/v1").build();
+        var compatible = AiModelConfig.builder().provider("openai").protocol("openai")
+                .modelId("gpt-4.1").baseUrl("https://gateway.example/v1").build();
+
+        assertThat(LangChain4jModelFactory.openAiPromptCacheKey(nativeModel)).startsWith("schemaplex-");
+        assertThat(LangChain4jModelFactory.openAiPromptCacheKey(compatible)).isNull();
     }
 
     @Test
@@ -207,7 +219,10 @@ class LangChain4jModelFactoryTest {
             ChatModel chat = new LangChain4jModelFactory().getOrCreate(AiModelConfig.from(config));
             var user = UserMessage.from("读取测试记录");
             var tool = ToolSpecification.builder().name("lookup").build();
-            var first = chat.chat(ChatRequest.builder().messages(user).toolSpecifications(tool).build());
+            var first = chat.chat(ChatRequest.builder().messages(SystemMessage.from("固定系统提示"), user)
+                    .toolSpecifications(tool).build());
+            assertThat(lastRequest.get().path("system").path(0).path("cache_control").path("type").asText())
+                    .isEqualTo("ephemeral");
             assertThat(first.aiMessage().toolExecutionRequests()).singleElement().satisfies(call -> {
                 assertThat(call.id()).isEqualTo("toolu_fixture");
                 assertThat(call.name()).isEqualTo("lookup");

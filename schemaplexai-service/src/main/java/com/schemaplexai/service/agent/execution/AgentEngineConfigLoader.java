@@ -88,9 +88,10 @@ public class AgentEngineConfigLoader {
     public AgentEngineParams load(String agentId, AgentExecutionContext ctx) {
         Map<String, String> configMap = loadConfigMap(agentId);
 
+        int defaultRounds = resolveDefaultRounds(ctx);
         int maxRounds = ctx.getMaxRounds() > 0
                 ? ctx.getMaxRounds()
-                : getInt(configMap, KEY_MAX_ROUNDS, DEFAULT_MAX_ROUNDS);
+                : getInt(configMap, KEY_MAX_ROUNDS, defaultRounds);
 
         int maxToolCallsPerRound = ctx.getMaxToolCallsPerRound() > 0
                 ? ctx.getMaxToolCallsPerRound()
@@ -118,7 +119,19 @@ public class AgentEngineConfigLoader {
                 .parallelToolExecution(getBoolean(configMap, KEY_PARALLEL_TOOL_EXECUTION, DEFAULT_PARALLEL_TOOL_EXECUTION))
                 .maxParallelTools(getInt(configMap, KEY_MAX_PARALLEL_TOOLS, DEFAULT_MAX_PARALLEL_TOOLS))
                 .maxLoopWarnings(getInt(configMap, KEY_MAX_LOOP_WARNINGS, DEFAULT_MAX_LOOP_WARNINGS))
+                .memberExecutionTimeoutMinutes(Math.min(120, getInt(configMap, "engine.memberExecutionTimeoutMinutes", 10)))
+                .teamMaxMemberRetries("0".equals(configMap.get("engine.teamMaxMemberRetries"))
+                        ? 0 : Math.min(10, getInt(configMap, "engine.teamMaxMemberRetries", 2)))
+                .compactionPrompt(configMap.get("engine.compactionPrompt"))
                 .build();
+    }
+
+    private int resolveDefaultRounds(AgentExecutionContext context) {
+        if (context.isOntologyPrivate()) return Math.min(12, DEFAULT_MAX_ROUNDS);
+        if ("suggest".equalsIgnoreCase(context.getExecutionMode()) || "plan".equalsIgnoreCase(context.getExecutionMode())) {
+            return Math.min(20, DEFAULT_MAX_ROUNDS);
+        }
+        return DEFAULT_MAX_ROUNDS;
     }
 
     // ---- 私有辅助方法 ----

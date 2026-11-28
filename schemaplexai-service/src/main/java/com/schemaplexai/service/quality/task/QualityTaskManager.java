@@ -95,6 +95,13 @@ public class QualityTaskManager {
     @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public void completeManualDeviationTask(String taskId, QualityCheckRequest request,
                                             List<Finding> findings, Map<String, Object> resultSummary) {
+        completeManualDeviationTask(taskId, request, findings, resultSummary, false);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public void completeManualDeviationTask(String taskId, QualityCheckRequest request,
+                                            List<Finding> findings, Map<String, Object> resultSummary,
+                                            boolean coverageIncomplete) {
         for (Finding finding : findings) {
             var deviation = new QualityDeviation();
             deviation.setTenantId(request.tenantId());
@@ -110,7 +117,11 @@ public class QualityTaskManager {
             deviation.setDescription(buildDescription(finding));
             deviationMapper.insert(deviation);
         }
-        updateSucceeded(taskId, findings.size(), findings.size(), 0, resultSummary);
+        if (coverageIncomplete) {
+            updateFailed(taskId, "质量检查覆盖不完整", resultSummary);
+        } else {
+            updateSucceeded(taskId, findings.size(), findings.size(), 0, resultSummary);
+        }
     }
 
     private void updateSucceeded(String taskId, int totalItems, int successItems, int failedItems,
@@ -168,11 +179,21 @@ public class QualityTaskManager {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public void markFailed(String taskId, String errorMessage) {
+        markFailed(taskId, errorMessage, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public void markFailed(String taskId, String errorMessage, Map<String, Object> resultSummary) {
+        updateFailed(taskId, errorMessage, resultSummary);
+    }
+
+    private void updateFailed(String taskId, String errorMessage, Map<String, Object> resultSummary) {
         QualityTask patch = new QualityTask();
         patch.setId(taskId);
         patch.setStatus(TaskStatusEnum.FAILED.getCode());
         patch.setProgress(100);
         patch.setErrorMessage(errorMessage);
+        patch.setResultSummary(resultSummary);
         patch.setCompletedAt(LocalDateTime.now());
         qualityTaskMapper.updateById(patch);
     }

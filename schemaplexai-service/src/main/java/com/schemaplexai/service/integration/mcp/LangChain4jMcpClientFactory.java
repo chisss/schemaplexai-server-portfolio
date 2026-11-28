@@ -4,6 +4,13 @@ import com.schemaplexai.common.enums.McpServerTypeEnum;
 import com.schemaplexai.common.enums.McpTransportTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
+import com.schemaplexai.common.util.HashUtils;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.RemovalCause;
+import jakarta.annotation.PreDestroy;
+import org.springframework.scheduling.annotation.Scheduled;
+import java.nio.charset.StandardCharsets;
 import com.schemaplexai.model.entity.McpServer;
 import com.schemaplexai.service.database.credential.DatabaseCredentialMaterializer;
 import dev.langchain4j.mcp.client.DefaultMcpClient;
@@ -27,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Pattern;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * LangChain4j MCP Client 工厂
@@ -43,6 +51,106 @@ public class LangChain4jMcpClientFactory {
 
     private final DatabaseMcpPresetResolver databaseMcpPresetResolver;
     private final DatabaseCredentialMaterializer databaseCredentialMaterializer;
+
+    private final Cache<PoolKey, McpClient> idleClients = Caffeine.newBuilder()
+            .maximumSize(64)
+            .expireAfterWrite(Duration.ofMinutes(2))
+            .executor(Runnable::run)
+            .removalListener((PoolKey key, McpClient client, RemovalCause cause) -> {
+                if (cause != RemovalCause.EXPLICIT) closeClient(client);
+            })
+            .build();
+    private boolean closed;
+
+    /** 复用远程通道，独占租借保证两个执行不会同时复用同一会话。 */
+    public ClientLease borrow(String tenantId, String userId, McpServer server) {
+        return borrow(tenantId, userId, server, null);
+    }
+
+    public ClientLease borrow(String tenantId, String userId, McpServer server, Duration timeout) {
+        if (server == null) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "MCP Server 配置不能为空");
+        }
+        var type = McpTransportTypeEnum.fromCode(server.getTransportType());
+        if (!StringUtils.hasText(tenantId) || !StringUtils.hasText(userId) || !tenantId.equals(server.getTenantId())
+                || !StringUtils.hasText(server.getId()) || type == McpTransportTypeEnum.STDIO
+                || server.getConnectionConfig() != null && !server.getConnectionConfig().isEmpty()) {
+            return new ClientLease(null, create(server, effectiveTimeout(timeout)));
+        }
+        String version = HashUtils.sha256Hex(Objects.toString(List.of(
+                Objects.toString(server.getUpdatedAt(), ""), Objects.toString(server.getUrl(), ""),
+                Objects.toString(server.getTransportType(), ""), Objects.toString(server.getHeaders(), ""),
+                Objects.toString(server.getAuthType(), ""), Objects.toString(server.getAuthConfig(), "")))
+                .getBytes(StandardCharsets.UTF_8));
+        Duration toolTimeout = effectiveTimeout(timeout);
+        String sessionUser = sharesStatelessSession(server, type) ? null : userId;
+        PoolKey key = new PoolKey(tenantId, sessionUser, server.getId(), version, toolTimeout);
+        McpClient client = idleClients.asMap().remove(key);
+        return new ClientLease(key, client != null ? client : create(server, toolTimeout));
+    }
+
+    private boolean sharesStatelessSession(McpServer server, McpTransportTypeEnum type) {
+        var transportConfig = server.getTransportConfig();
+        String authType = server.getAuthType();
+        return type == McpTransportTypeEnum.STREAMABLE_HTTP
+                && transportConfig != null && Boolean.TRUE.equals(transportConfig.get("stateless"))
+                && (!StringUtils.hasText(authType) || "none".equalsIgnoreCase(authType.strip()))
+                && CollectionUtils.isEmpty(server.getAuthConfig()) && CollectionUtils.isEmpty(server.getHeaders());
+    }
+
+    private Duration effectiveTimeout(Duration timeout) {
+        return timeout == null ? DEFAULT_TOOL_TIMEOUT : timeout;
+    }
+
+    @Scheduled(fixedDelay = 30_000)
+    void evictIdleClients() {
+        idleClients.cleanUp();
+    }
+
+    @PreDestroy
+    synchronized void shutdown() {
+        closed = true;
+        idleClients.asMap().values().forEach(this::closeClient);
+        idleClients.invalidateAll();
+    }
+
+    private void closeClient(McpClient client) {
+        try {
+            client.close();
+        } catch (Exception e) {
+            log.debug("关闭 MCP 客户端失败: {}", e.getClass().getSimpleName());
+        }
+    }
+
+    private synchronized void returnClient(PoolKey key, McpClient client) {
+        if (closed || key == null || idleClients.asMap().putIfAbsent(key, client) != null) {
+            closeClient(client);
+        }
+    }
+
+    private record PoolKey(String tenantId, String userId, String serverId, String version, Duration toolTimeout) { }
+
+    public final class ClientLease implements AutoCloseable {
+        private final PoolKey key;
+        private final McpClient client;
+        private final AtomicBoolean returned = new AtomicBoolean();
+
+        private ClientLease(PoolKey key, McpClient client) {
+            this.key = key;
+            this.client = client;
+        }
+
+        public McpClient client() { return client; }
+
+        public void invalidate() {
+            if (returned.compareAndSet(false, true)) closeClient(client);
+        }
+
+        @Override
+        public void close() {
+            if (returned.compareAndSet(false, true)) returnClient(key, client);
+        }
+    }
 
     public McpClient create(McpServer server) {
         return create(server, DEFAULT_TOOL_TIMEOUT);

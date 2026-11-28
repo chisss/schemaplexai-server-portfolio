@@ -66,6 +66,8 @@ import com.schemaplexai.model.dto.agent.AgentUpdateRequest;
 import com.schemaplexai.model.dto.security.SecurityRuntimeCheckRequest;
 import com.schemaplexai.service.agent.execution.AgentAcceptance;
 import com.schemaplexai.service.agent.execution.AgentRunRecovery;
+import com.schemaplexai.service.agent.execution.ExecutionStopSignal;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.schemaplexai.service.agent.execution.AgentTerminalEventOutbox;
 import com.schemaplexai.service.agent.execution.AgentExecutionContext;
 import com.schemaplexai.service.agent.execution.AgentExecutionEvent;
@@ -112,6 +114,7 @@ import com.schemaplexai.service.agent.AgentService;
 import com.schemaplexai.service.agent.execution.AgentLogService;
 import com.schemaplexai.service.agent.execution.approval.PendingToolApprovalService;
 import com.schemaplexai.service.agent.runtime.team.TeamChildApprovalService;
+import com.schemaplexai.service.agent.runtime.team.TeamMemberConfigurationValidator;
 import com.schemaplexai.service.agent.execution.steering.ExecutionSteeringApplicationService;
 import com.schemaplexai.service.agent.runtime.AgentRuntimeOrchestrator;
 import com.schemaplexai.service.agent.validator.AgentValidator;
@@ -498,11 +501,17 @@ public class AgentServiceImpl implements AgentService {
                 var dto = request.getMembers().get(i);
                 var member = new AgentTeamMember();
                 member.setAgentId(agentId);
+                // 保留客户端提供的成员 ID，使 depends_on/can_read_peers 引用的成员 ID 在「全量覆盖保存」后保持稳定
+                if (StringUtils.hasText(dto.getId())) {
+                    member.setId(dto.getId());
+                }
                 member.setRoleName(dto.getRoleName());
                 member.setRoleType(dto.getRoleType());
                 member.setQuantity(dto.getQuantity());
                 member.setModelOverride(dto.getModelOverride());
                 member.setDescription(dto.getDescription());
+                member.setDependsOn(dto.getDependsOn());
+                member.setCanReadPeers(dto.getCanReadPeers());
                 member.setSortOrder(dto.getSortOrder() != null ? dto.getSortOrder() : i);
                 agentTeamMemberMapper.insert(member);
             }
@@ -1208,6 +1217,17 @@ public class AgentServiceImpl implements AgentService {
         if (leaderCount != 1) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "Team Agent 必须且只能配置一个 Leader 角色");
         }
+        List<TeamMemberConfigurationValidator.MemberRef> memberRefs = request.getMembers() == null ? List.of()
+                : request.getMembers().stream()
+                .filter(member -> member != null)
+                .map(member -> new TeamMemberConfigurationValidator.MemberRef(member.getId(), member.getRoleName(),
+                        member.getRoleType(), member.getDependsOn(), member.getCanReadPeers()))
+                .toList();
+        List<String> referenceErrors = TeamMemberConfigurationValidator.validate(memberRefs);
+        if (!referenceErrors.isEmpty()) {
+            throw new BusinessException(ResultCode.BAD_REQUEST,
+                    "Team Agent 配置不完整：" + StringUtils.collectionToDelimitedString(referenceErrors, "；"));
+        }
     }
 
     private TeamConfigStatus evaluateTeamConfigStatus(String agentId) {
@@ -1809,7 +1829,7 @@ public class AgentServiceImpl implements AgentService {
                             tenantId, agent.getId(), toolCode,
                             toolCommand, SecurityUtil.getCurrentUserId(),
                             AmendmentScopeEnum.AGENT, null);
-                    log.info("渐进信任: 工具[{}]已设为始终批准", toolCode);
+                    log.info("渐进信任: 工具[{}]已配置限时限次自动审批", toolCode);
                 }
                 executionEventStreamService.publish(AgentExecutionEvent.builder()
                         .eventType(AgentExecutionEventTypeEnum.APPROVAL_GRANTED.getCode())
@@ -1989,7 +2009,15 @@ public class AgentServiceImpl implements AgentService {
         return childIds;
     }
 
+    private ExecutionStopSignal executionStopSignal;
+
+    @Autowired
+    void setExecutionStopSignal(ExecutionStopSignal executionStopSignal) {
+        this.executionStopSignal = executionStopSignal;
+    }
+
     private void recordExecutionCancelled(String executionId) {
+        if (executionStopSignal != null) executionStopSignal.publishAfterCommit(executionId);
         AgentExecutionEvent cancelled = AgentExecutionEvent.builder()
                 .eventType(AgentExecutionEventTypeEnum.CANCELLED.getCode())
                 .executionId(executionId)

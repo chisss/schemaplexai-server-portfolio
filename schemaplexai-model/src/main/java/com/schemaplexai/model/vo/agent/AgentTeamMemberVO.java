@@ -18,6 +18,10 @@ public class AgentTeamMemberVO {
     private Integer quantity;
     private String modelOverride;
     private String description;
+    /** 依赖的前置成员ID（逗号分隔，声明 DAG 依赖） */
+    private String dependsOn;
+    /** 允许读取的同队成员ID（逗号分隔，对等读取） */
+    private String canReadPeers;
     private Integer sortOrder;
     /** 该成员已绑定的工具数 */
     private Integer boundToolCount;

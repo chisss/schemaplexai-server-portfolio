@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.schemaplexai.common.util.HashUtils;
 import com.schemaplexai.service.ai.AiModelConfig;
+import com.schemaplexai.service.ai.ChatMessageText;
 import com.schemaplexai.service.ai.ToolNameNormalizer;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -99,8 +100,9 @@ final class AgentModelRequestPlanner {
         List<ToolSpecification> tools = request.toolSpecifications() == null ? List.of() : request.toolSpecifications();
         int margin = margin(totalBudget);
         long inputTokens = estimateInput(config, messages, tools) + margin;
+        List<String> discardedContext = new ArrayList<>();
         while (inputTokens + outputReserve > totalBudget) {
-            int discarded = discardOldestTurn(config, messages);
+            int discarded = discardOldestTurn(config, messages, discardedContext);
             if (discarded == 0) {
                 break;
             }
@@ -116,6 +118,16 @@ final class AgentModelRequestPlanner {
                 throw new IncompatibleCandidateException("剩余 Token 预算不足以发送模型请求", true);
             }
             throw new IncompatibleCandidateException("候选模型窗口无法容纳当前任务、工具定义和最小输出");
+        }
+        if (!discardedContext.isEmpty()) {
+            UserMessage summary = UserMessage.from("[早期对话节选]\n" + String.join("\n", discardedContext));
+            long summaryTokens = estimator.estimateMessage(config, summary);
+            if (inputTokens + summaryTokens + requestedOutput <= totalBudget) {
+                int index = 0;
+                while (index < messages.size() && messages.get(index) instanceof SystemMessage) index++;
+                messages.add(index, summary);
+                inputTokens += summaryTokens;
+            }
         }
         if (!config.isMultimodal() && messages.stream().anyMatch(this::containsMedia)) {
             throw new IncompatibleCandidateException("当前会话包含多模态内容，请使用支持该内容的模型");
@@ -753,7 +765,11 @@ final class AgentModelRequestPlanner {
     }
 
     long estimateInput(AiModelConfig config, List<ChatMessage> messages, List<ToolSpecification> tools) {
-        long tokens = estimator.estimateMessages(config, messages);
+        return estimator.estimateMessages(config, messages) + estimateToolSchemas(config, tools);
+    }
+
+    long estimateToolSchemas(AiModelConfig config, List<ToolSpecification> tools) {
+        long tokens = 0;
         if (tools != null) {
             for (ToolSpecification tool : tools) {
                 tokens += TOOL_SCHEMA_OVERHEAD + estimator.estimateText(config, tool.name())
@@ -764,7 +780,7 @@ final class AgentModelRequestPlanner {
         return tokens;
     }
 
-    private int discardOldestTurn(AiModelConfig config, List<ChatMessage> messages) {
+    private int discardOldestTurn(AiModelConfig config, List<ChatMessage> messages, List<String> discardedContext) {
         int begin = 0;
         while (begin < messages.size() && messages.get(begin) instanceof SystemMessage) {
             begin++;
@@ -774,6 +790,14 @@ final class AgentModelRequestPlanner {
                 // 只在用户轮次边界淘汰整段。AI 工具请求和结果留在同一组。
                 var oldestTurn = messages.subList(begin, index);
                 int removed = oldestTurn.stream().mapToInt(message -> estimator.estimateMessage(config, message)).sum();
+                for (ChatMessage message : oldestTurn) {
+                    if (discardedContext.size() >= 6) break;
+                    if (!(message instanceof UserMessage || message instanceof AiMessage)) continue;
+                    String text = ChatMessageText.textOf(message);
+                    if (text.isBlank()) continue;
+                    int end = text.offsetByCodePoints(0, Math.min(160, text.codePointCount(0, text.length())));
+                    discardedContext.add((message instanceof UserMessage ? "用户 " : "助手 ") + text.substring(0, end));
+                }
                 oldestTurn.clear();
                 return removed;
             }

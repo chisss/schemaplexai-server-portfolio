@@ -41,7 +41,15 @@ import dev.langchain4j.model.chat.response.StreamingHandle;
 import dev.langchain4j.model.anthropic.AnthropicTokenUsage;
 import dev.langchain4j.model.openai.OpenAiTokenUsage;
 import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Metrics;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.context.Context;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -62,6 +70,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -80,15 +89,40 @@ import java.util.function.Consumer;
 public class AgentModelInvoker {
 
     private static final int MAX_CONCURRENT_MODEL_CALLS = 50;
-    private static final Semaphore EVAL_MODEL_CALL_SEMAPHORE = new Semaphore(4, true);
-    private static final ExecutorService MODEL_CALL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
-    private static final Semaphore MODEL_CALL_SEMAPHORE = new Semaphore(MAX_CONCURRENT_MODEL_CALLS, true);
+    private static final int MAX_CONCURRENT_EVAL_CALLS = 4;
+    private static final long PERMIT_TTL_MILLIS = TimeUnit.SECONDS.toMillis(90);
+    private static final DefaultRedisScript<Long> CLAIM_MODEL_PERMIT = new DefaultRedisScript<>("""
+            local clock = redis.call('TIME')
+            local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
+            redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+            if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
+            local expires = now + tonumber(ARGV[2])
+            redis.call('ZADD', KEYS[1], expires, ARGV[3])
+            local last = redis.call('ZRANGE', KEYS[1], 0, 0, 'REV', 'WITHSCORES')
+            redis.call('PEXPIREAT', KEYS[1], last[2])
+            return 1
+            """, Long.class);
+    private static final DefaultRedisScript<Long> RENEW_MODEL_PERMIT = new DefaultRedisScript<>("""
+            local clock = redis.call('TIME')
+            local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
+            local current = redis.call('ZSCORE', KEYS[1], ARGV[2])
+            if not current or tonumber(current) <= now then return 0 end
+            redis.call('ZADD', KEYS[1], 'XX', now + tonumber(ARGV[1]), ARGV[2])
+            local last = redis.call('ZRANGE', KEYS[1], 0, 0, 'REV', 'WITHSCORES')
+            redis.call('PEXPIREAT', KEYS[1], last[2])
+            return 1
+            """, Long.class);
+    private final ScheduledExecutorService permitHeartbeat = Executors.newScheduledThreadPool(2,
+            Thread.ofPlatform().daemon().name("agent-model-permit-", 0).factory());
+    private final Semaphore evaluationPermits = new Semaphore(MAX_CONCURRENT_EVAL_CALLS, true);
+    private final ExecutorService modelCallExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    private final Semaphore modelCallPermits = new Semaphore(MAX_CONCURRENT_MODEL_CALLS, true);
     private static final long TEMP_UNAVAILABLE_ON_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(2);
     private static final long TEMP_UNAVAILABLE_ON_FATAL_MILLIS = TimeUnit.MINUTES.toMillis(10);
     /** 降级链中的前置候选只做快速探测，避免真实工作流被长超时拖住。 */
     private static final long FALLBACK_CANDIDATE_TIMEOUT_CAP_MILLIS = TimeUnit.SECONDS.toMillis(30);
     private static final long CANCELLATION_POLL_MILLIS = 500L;
-    private static final Cache<CooldownKey, Long> TEMP_UNAVAILABLE_UNTIL = Caffeine.newBuilder()
+    private final Cache<CooldownKey, Long> temporaryUnavailableUntil = Caffeine.newBuilder()
             .expireAfterWrite(Duration.ofMillis(TEMP_UNAVAILABLE_ON_FATAL_MILLIS))
             .maximumSize(200)
             .build();
@@ -100,6 +134,19 @@ public class AgentModelInvoker {
     private final LangChain4jModelFactory modelFactory;
     private final TokenEstimatorSupport tokenEstimator = new TokenEstimatorSupport();
     private final AgentModelRequestPlanner requestPlanner = new AgentModelRequestPlanner(tokenEstimator);
+
+    private StringRedisTemplate cooldownRedis;
+
+    @Autowired(required = false)
+    void setCooldownRedis(StringRedisTemplate cooldownRedis) {
+        this.cooldownRedis = cooldownRedis;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        permitHeartbeat.shutdownNow();
+        modelCallExecutor.shutdownNow();
+    }
 
     @Value("${schemaplexai.agent.model.request.components.enabled:false}")
     private boolean logRequestComponents;
@@ -158,9 +205,7 @@ public class AgentModelInvoker {
                                          String executionId, String agentId, String tenantId, int round, long startMs,
                                          AgentLogService agentLogService, AgentExecutionBudget budget,
                                          Consumer<ModelProgress> onProgress) throws Exception {
-        if (!acquirePermit(budget)) {
-            throw new BusinessException(ResultCode.AGENT_BUSY, "模型调用并发已达上限，请稍后重试");
-        }
+        Runnable release = acquirePermit(budget);
         try {
             // 触发 BEFORE_MODEL_CALL Hook
             AgentHookContext beforeCtx = AgentHookContext.builder()
@@ -179,7 +224,7 @@ public class AgentModelInvoker {
 
             return result;
         } finally {
-            modelSemaphore(budget).release();
+            release.run();
         }
     }
 
@@ -303,9 +348,7 @@ public class AgentModelInvoker {
                                          int round, long startMs,
                                          AgentLogService agentLogService) throws Exception {
         return invokeWithRetry(resolution, request, params,
-                executionId, agentId, tenantId, round, startMs, agentLogService,
-                resolveMaxRetries(resolution, params),
-                resolveTimeoutMillis(resolution, params.getModelCallTimeoutMillis()), null, "direct", null);
+                executionId, agentId, tenantId, round, startMs, agentLogService, null, "direct");
     }
 
     ChatResponse invokeWithRetry(LangChain4jResolution resolution, ChatRequest request, AgentEngineParams params,
@@ -318,15 +361,13 @@ public class AgentModelInvoker {
     ChatResponse invokeWithRetry(LangChain4jResolution resolution, ChatRequest request, AgentEngineParams params,
                                  String executionId, String agentId, String tenantId, int round, long startMs,
                                  AgentLogService agentLogService, AgentExecutionBudget budget, String phase) throws Exception {
-        if (!acquirePermit(budget)) {
-            throw new BusinessException(ResultCode.AGENT_BUSY, "模型调用并发已达上限，请稍后重试");
-        }
+        Runnable release = acquirePermit(budget);
         try {
             return invokeWithRetry(resolution, request, params, executionId, agentId, tenantId, round, startMs,
                     agentLogService, resolveMaxRetries(resolution, params),
                     resolveTimeoutMillis(resolution, params.getModelCallTimeoutMillis()), budget, phase, null);
         } finally {
-            modelSemaphore(budget).release();
+            release.run();
         }
     }
 
@@ -420,6 +461,20 @@ public class AgentModelInvoker {
     private ChatResponse invokeWithTimeout(LangChain4jResolution resolution, ChatRequest request,
                                             long timeoutMillis, AgentExecutionBudget budget, AttemptTrace trace,
                                             Consumer<ModelProgress> onProgress) throws Exception {
+        var span = AgentTelemetry.operation("agent.model", SpanKind.CLIENT, "gen_ai.request.model", modelIdOf(resolution));
+        try (var scope = span.makeCurrent()) {
+            return invokeTimedAttempt(resolution, request, timeoutMillis, budget, trace, onProgress);
+        } catch (Exception failure) {
+            AgentTelemetry.failure(span, failure);
+            throw failure;
+        } finally {
+            span.end();
+        }
+    }
+
+    private ChatResponse invokeTimedAttempt(LangChain4jResolution resolution, ChatRequest request,
+                                            long timeoutMillis, AgentExecutionBudget budget, AttemptTrace trace,
+                                            Consumer<ModelProgress> onProgress) throws Exception {
         if (budget != null) {
             budget.checkActive();
         }
@@ -472,17 +527,15 @@ public class AgentModelInvoker {
 
     private void authorizeDispatch(AgentExecutionBudget budget, AtomicBoolean dispatched) {
         if (budget != null) {
+            budget.checkTimeAndCancellation();
             budget.checkModelOwnership();
-            if (budget.remainingMillis() == 0) {
-                throw new AgentExecutionBudget.BudgetExceededException("执行截止时间已过");
-            }
         }
         dispatched.set(true);
     }
 
     private ChatResponse invokeSynchronous(LangChain4jResolution resolution, ChatRequest request, long timeoutMillis,
                                            AgentExecutionBudget budget, AtomicBoolean dispatched) throws Exception {
-        Future<ChatResponse> future = MODEL_CALL_EXECUTOR.submit(() -> {
+        Future<ChatResponse> future = Context.current().wrap(modelCallExecutor).submit(() -> {
             authorizeDispatch(budget, dispatched);
             return resolution.model().chat(request);
         });
@@ -498,7 +551,7 @@ public class AgentModelInvoker {
         var completion = new CompletableFuture<ChatResponse>();
         var handle = new AtomicReference<StreamingHandle>();
         var reported = new AtomicInteger(-1);
-        Future<?> dispatch = MODEL_CALL_EXECUTOR.submit(() -> {
+        Future<?> dispatch = Context.current().wrap(modelCallExecutor).submit(() -> {
             try {
                 var model = modelFactory.getOrCreateStreaming(resolution.config());
                 authorizeDispatch(budget, dispatched);
@@ -641,6 +694,7 @@ public class AgentModelInvoker {
                     model, startedAt, durationMs, usage.input(), usage.output(), cost, status, metadata);
         } catch (RuntimeException failure) {
             // 计量写入异常不得引起同一模型请求重放。
+            Metrics.counter("agent.trace.write.failure", "span", "model").increment();
             log.warn("模型追踪写入失败: executionId={}, attemptId={}", trace.executionId(), attemptId, failure);
         }
     }
@@ -648,21 +702,87 @@ public class AgentModelInvoker {
     private record AttemptTrace(String executionId, String agentId, String tenantId, int round, String phase, int attempt) {}
 
     private Semaphore modelSemaphore(AgentExecutionBudget budget) {
-        return budget != null && budget.evaluation() ? EVAL_MODEL_CALL_SEMAPHORE : MODEL_CALL_SEMAPHORE;
+        return budget != null && budget.evaluation() ? evaluationPermits : modelCallPermits;
     }
 
-    private boolean acquirePermit(AgentExecutionBudget budget) throws InterruptedException {
-        if (budget == null) {
-            return modelSemaphore(budget).tryAcquire(30, TimeUnit.SECONDS);
-        }
+    Runnable acquirePermit(AgentExecutionBudget budget) throws InterruptedException {
+        Semaphore semaphore = modelSemaphore(budget);
         long waitUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        long waitMillis;
-        while ((waitMillis = waitSliceMillis(waitUntil, budget)) > 0) {
-            if (modelSemaphore(budget).tryAcquire(waitMillis, TimeUnit.MILLISECONDS)) {
-                return true;
+        if (cooldownRedis != null) {
+            try {
+                return acquireSharedPermit(semaphore, waitUntil, budget);
+            } catch (DataAccessException e) {
+                Metrics.counter("agent.model.permit.redis.fallback").increment();
             }
         }
-        return false;
+        long waitMillis;
+        while ((waitMillis = permitWaitSlice(waitUntil, budget)) > 0) {
+            if (semaphore.tryAcquire(waitMillis, TimeUnit.MILLISECONDS)) {
+                return semaphore::release;
+            }
+        }
+        throw new BusinessException(ResultCode.AGENT_BUSY, "模型调用并发已达上限，请稍后重试");
+    }
+
+    private Runnable acquireSharedPermit(Semaphore semaphore, long waitUntil, AgentExecutionBudget budget)
+            throws InterruptedException {
+        boolean evaluation = budget != null && budget.evaluation();
+        String key = "exec:model:permits:" + (evaluation ? "evaluation" : "normal");
+        String limit = Integer.toString(evaluation ? MAX_CONCURRENT_EVAL_CALLS : MAX_CONCURRENT_MODEL_CALLS);
+        String ttl = Long.toString(PERMIT_TTL_MILLIS);
+        String ticket = UUID.randomUUID().toString();
+        long remaining;
+        while ((remaining = permitWaitSlice(waitUntil, budget)) > 0) {
+            // 等待共享配额期间不占本地席位。拿不到本地席位时立即归还刚领到的共享许可。
+            Long acquired = cooldownRedis.execute(CLAIM_MODEL_PERMIT, List.of(key), limit, ttl, ticket);
+            if (Long.valueOf(1L).equals(acquired)) {
+                boolean local = false;
+                try {
+                    local = permitWaitSlice(waitUntil, budget) > 0 && semaphore.tryAcquire(0, TimeUnit.MILLISECONDS);
+                    if (local) {
+                        var renewal = permitHeartbeat.scheduleWithFixedDelay(
+                                () -> renewSharedPermit(key, ticket, ttl), 20, 20, TimeUnit.SECONDS);
+                        return () -> {
+                            renewal.cancel(false);
+                            semaphore.release();
+                            releaseSharedPermit(key, ticket);
+                        };
+                    }
+                } catch (RuntimeException failure) {
+                    if (local) {
+                        semaphore.release();
+                        releaseSharedPermit(key, ticket);
+                    }
+                    throw failure;
+                } finally {
+                    if (!local) releaseSharedPermit(key, ticket);
+                }
+            }
+            Thread.sleep(Math.min(remaining, 100));
+        }
+        throw new BusinessException(ResultCode.AGENT_BUSY, "共享模型调用并发已达上限，请稍后重试");
+    }
+
+    private void renewSharedPermit(String key, String ticket, String ttl) {
+        try {
+            cooldownRedis.execute(RENEW_MODEL_PERMIT, List.of(key), ttl, ticket);
+        } catch (DataAccessException e) {
+            Metrics.counter("agent.model.permit.redis.renew.failure").increment();
+        }
+    }
+
+    private void releaseSharedPermit(String key, String ticket) {
+        try {
+            cooldownRedis.opsForZSet().remove(key, ticket);
+        } catch (DataAccessException e) {
+            log.warn("共享模型许可释放失败，将按租约到期回收");
+        }
+    }
+
+    private long permitWaitSlice(long waitUntil, AgentExecutionBudget budget) {
+        if (budget != null) return waitSliceMillis(waitUntil, budget);
+        long remaining = waitUntil - System.nanoTime();
+        return remaining <= 0 ? 0 : Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remaining));
     }
 
     private ChatResponse awaitResponse(Future<ChatResponse> future, long timeoutMillis, AgentExecutionBudget budget)
@@ -762,7 +882,7 @@ public class AgentModelInvoker {
     }
 
     void clearTemporaryUnavailableModels() {
-        TEMP_UNAVAILABLE_UNTIL.invalidateAll();
+        temporaryUnavailableUntil.invalidateAll();
     }
 
     private void appendFallbackLog(String executionId,
@@ -786,21 +906,37 @@ public class AgentModelInvoker {
         }
         long cooldownMillis = resolveCooldownMillis(error);
         if (cooldownMillis > 0) {
-            TEMP_UNAVAILABLE_UNTIL.asMap().merge(key, System.currentTimeMillis() + cooldownMillis, Math::max);
+            temporaryUnavailableUntil.asMap().merge(key, System.currentTimeMillis() + cooldownMillis, Math::max);
+            if (cooldownRedis != null) {
+                try {
+                    cooldownRedis.opsForValue().set(redisCooldownKey(key, cooldownMillis),
+                            "1", Duration.ofMillis(cooldownMillis));
+                } catch (DataAccessException e) {
+                    log.debug("共享模型冷却写入失败，保留本地冷却");
+                }
+            }
         }
     }
 
     private long remainingUnavailableMillis(CooldownKey key) {
-        Long unavailableUntil = key == null ? null : TEMP_UNAVAILABLE_UNTIL.getIfPresent(key);
-        if (unavailableUntil == null) {
-            return 0L;
+        Long unavailableUntil = key == null ? null : temporaryUnavailableUntil.getIfPresent(key);
+        long remaining = unavailableUntil == null ? 0L : unavailableUntil - System.currentTimeMillis();
+        if (key != null && cooldownRedis != null) {
+            try {
+                for (long duration : List.of(TEMP_UNAVAILABLE_ON_FATAL_MILLIS, TEMP_UNAVAILABLE_ON_TIMEOUT_MILLIS)) {
+                    Long ttl = cooldownRedis.getExpire(redisCooldownKey(key, duration), TimeUnit.MILLISECONDS);
+                    if (ttl != null) remaining = Math.max(remaining, ttl);
+                }
+            } catch (DataAccessException e) {
+                log.debug("共享模型冷却读取失败，使用本地冷却");
+            }
         }
-        long remaining = unavailableUntil - System.currentTimeMillis();
-        if (remaining <= 0) {
-            TEMP_UNAVAILABLE_UNTIL.asMap().remove(key, unavailableUntil);
-            return 0L;
-        }
-        return remaining;
+        return Math.max(0L, remaining);
+    }
+
+    private String redisCooldownKey(CooldownKey key, long duration) {
+        return "exec:model:cooldown:" + HashUtils.sha256Hex(key.toString().getBytes(StandardCharsets.UTF_8))
+                + ":" + duration;
     }
 
     private long resolveCooldownMillis(Exception error) {

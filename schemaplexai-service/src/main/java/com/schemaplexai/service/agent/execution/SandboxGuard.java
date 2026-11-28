@@ -5,28 +5,31 @@ import com.schemaplexai.common.enums.SourceTypeEnum;
 import com.schemaplexai.common.exception.BusinessException;
 import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.model.entity.AgentToolBinding;
-import com.schemaplexai.service.agent.tool.ToolApprovalAmendmentService;
 import com.schemaplexai.service.agent.tool.model.ToolCall;
 import jakarta.annotation.PostConstruct;
+import com.schemaplexai.service.security.SecurityAuditEventService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * 沙箱守卫（集成渐进式信任 Amendment 机制）
- */
+/** 沙箱守卫。 */
+@Slf4j
 @Component
 public class SandboxGuard {
 
@@ -35,6 +38,8 @@ public class SandboxGuard {
     private static final Pattern REDIRECTION_PATTERN = Pattern.compile("(^|\\s)(\\d*>>?|<<?|&>)");
     private static final Pattern SHELL_TOKEN_PATTERN = Pattern.compile(
             "'[^']*+'|\"[^\"\\\\]*+(?:\\\\[\\s\\S][^\"\\\\]*+)*+\"|\\\\[^\\r\\n]|([|;&\\r\\n])");
+    private static final Set<String> WORKSPACE_WRITES = Set.of(
+            "sys.write", "sys.edit", "sys.edit.exact", "sys.mkdir", "sys.rm", "sys.cp", "sys.mv");
     private static final Set<String> BLOCKED_SHELL_PREFIXES = Set.of("sudo", "su");
 
     @Value("${schemaplexai.sandbox.allowed-commands:ls,cat,head,tail,grep,find,wc,sort,uniq,diff,echo,pwd,date,whoami}")
@@ -46,9 +51,12 @@ public class SandboxGuard {
     @Value("${schemaplexai.sandbox.fail-open-on-null:false}")
     private boolean failOpenOnNull;
 
-    @Lazy
+    private SecurityAuditEventService securityAuditEventService;
+
     @Autowired(required = false)
-    private ToolApprovalAmendmentService amendmentService;
+    void setSecurityAuditEventService(SecurityAuditEventService securityAuditEventService) {
+        this.securityAuditEventService = securityAuditEventService;
+    }
 
     private Set<String> configuredAllowedCommands = Set.of();
 
@@ -65,18 +73,26 @@ public class SandboxGuard {
         String sourceType = binding != null && StringUtils.hasText(binding.getSourceType())
                 ? binding.getSourceType().trim().toLowerCase()
                 : SourceTypeEnum.BUILTIN.getCode();
-        return validateTool(policy, sourceType, toolCall);
+        return validateTool(policy, sourceType, toolCall, binding != null ? binding.getTenantId() : null);
     }
 
     /**
      * 校验工具调用（显式 sourceType，供无 AgentToolBinding 的 MCP/Skill 原生工具使用）。
      */
     public String validateTool(SandboxPolicy policy, String sourceType, ToolCall toolCall) {
+        return validateTool(policy, sourceType, toolCall, policy == null ? null : policy.getTenantId());
+    }
+
+    public String validateTool(SandboxPolicy policy, String sourceType, ToolCall toolCall, String tenantId) {
         if (toolCall == null || !StringUtils.hasText(toolCall.getToolCode())) {
             return null;
         }
         if (policy == null) {
-            return failOpenOnNull ? null : "沙箱策略缺失，工具执行被拒绝（fail-closed）";
+            if (!failOpenOnNull) {
+                return "沙箱策略缺失，工具执行被拒绝（fail-closed）";
+            }
+            auditFailOpen(tenantId, toolCall.getToolCode());
+            return null;
         }
         Set<String> allowedToolCodes = policy.getAllowedToolCodes();
         if (!CollectionUtils.isEmpty(allowedToolCodes) && !allowedToolCodes.contains(toolCall.getToolCode())) {
@@ -91,10 +107,15 @@ public class SandboxGuard {
         if (!policy.isNetworkEgressEnabled() && isNetworkBuiltinTool(toolCall.getToolCode())) {
             return "当前沙箱策略禁止外部网络访问: " + toolCall.getToolCode();
         }
-        if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "sys.bash".equalsIgnoreCase(toolCall.getToolCode())) {
+        String canonicalCode = toolCall.getToolCode().replace('_', '.').toLowerCase(Locale.ROOT);
+        if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT
+                && WORKSPACE_WRITES.contains(canonicalCode)) {
+            return "STRICT 沙箱禁止修改工作区文件";
+        }
+        if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "sys.bash".equals(canonicalCode)) {
             return "STRICT 沙箱禁止 sys.bash";
         }
-        if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "code.exec".equalsIgnoreCase(toolCall.getToolCode())) {
+        if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "code.exec".equals(canonicalCode)) {
             return "STRICT 沙箱禁止 code.exec";
         }
         return null;
@@ -105,6 +126,7 @@ public class SandboxGuard {
             if (!failOpenOnNull) {
                 throw new BusinessException(ResultCode.BAD_REQUEST, "沙箱策略缺失，禁止执行（fail-closed）");
             }
+            auditFailOpen(null, toolCode);
             return;
         }
         if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && "sys.bash".equalsIgnoreCase(toolCode)) {
@@ -116,18 +138,55 @@ public class SandboxGuard {
         if (!policy.isNetworkEgressEnabled() && isNetworkBuiltinTool(toolCode)) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "当前沙箱策略禁止外部网络访问");
         }
-        if (workingDirectory != null && !CollectionUtils.isEmpty(policy.getAllowedPathPrefixes())) {
-            boolean allowed = policy.getAllowedPathPrefixes().stream()
-                    .anyMatch(prefix -> workingDirectory.normalize().startsWith(prefix.normalize()));
-            if (!allowed) {
-                throw new BusinessException(ResultCode.WORKSPACE_PATH_CONFLICT, "工作目录超出沙箱允许范围");
-            }
+        if (workingDirectory != null) {
+            validateWorkspacePaths(policy, args, workingDirectory);
+        }
+        if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT && WORKSPACE_WRITES.contains(toolCode)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "STRICT 沙箱禁止修改工作区文件");
         }
         if ("sys.bash".equalsIgnoreCase(toolCode) && StringUtils.hasText(command)) {
             String violation = checkCommand(command, policy);
             if (StringUtils.hasText(violation)) {
                 throw new BusinessException(ResultCode.BAD_REQUEST, violation);
             }
+        }
+    }
+
+    private void validateWorkspacePaths(SandboxPolicy policy, Map<String, Object> args, Path directory) {
+        if (CollectionUtils.isEmpty(policy.getAllowedPathPrefixes())) {
+            if (policy.getSandboxProfile() == SandboxProfileEnum.STRICT) {
+                throw new BusinessException(ResultCode.WORKSPACE_PATH_CONFLICT, "STRICT 沙箱需要明确的工作区路径");
+            }
+            return;
+        }
+        List<Path> paths = new ArrayList<>();
+        paths.add(directory);
+        if (args != null) {
+            for (String field : List.of("path", "source", "target")) {
+                if (args.get(field) instanceof String path && StringUtils.hasText(path)) {
+                    paths.add(directory.resolve(path));
+                }
+            }
+        }
+        boolean allowed = paths.stream().allMatch(path -> policy.getAllowedPathPrefixes().stream()
+                .anyMatch(prefix -> resolvesWithin(path, prefix)));
+        if (!allowed) {
+            throw new BusinessException(ResultCode.WORKSPACE_PATH_CONFLICT, "实际文件路径超出沙箱允许范围");
+        }
+    }
+
+    private boolean resolvesWithin(Path path, Path prefix) {
+        Path root = prefix.toAbsolutePath().normalize();
+        Path candidate = path.toAbsolutePath().normalize();
+        if (!candidate.startsWith(root) || !Files.isDirectory(root)) return false;
+        try {
+            Path existing = candidate;
+            while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+                existing = existing.getParent();
+            }
+            return existing != null && existing.toRealPath().startsWith(root.toRealPath());
+        } catch (IOException e) {
+            return false;
         }
     }
 
@@ -157,9 +216,7 @@ public class SandboxGuard {
             if (BLOCKED_SHELL_PREFIXES.contains(executable)) {
                 return "禁止使用提权命令: " + baseCommand;
             }
-            // 审批修订只补充单条命令的白名单，命令链逐段校验。
-            if (!allowedCommands.contains(baseCommand)
-                    && (segments.size() != 1 || !hasAmendment(policy, command))) {
+            if (!allowedCommands.contains(baseCommand)) {
                 return "命令 [" + baseCommand + "] 不在白名单中";
             }
         }
@@ -181,9 +238,18 @@ public class SandboxGuard {
         return tokens[index].trim().toLowerCase();
     }
 
-    private boolean hasAmendment(SandboxPolicy policy, String command) {
-        return policy != null && amendmentService != null
-                && amendmentService.isAutoApproved(policy.getTenantId(), policy.getAgentId(), "sys.bash", command);
+    private void auditFailOpen(String tenantId, String toolCode) {
+        log.warn("sandbox_fail_open tenantId={}, toolCode={}", tenantId, toolCode);
+        if (securityAuditEventService == null || !StringUtils.hasText(tenantId)) {
+            return;
+        }
+        try {
+            securityAuditEventService.recordEvent(tenantId, null, "SANDBOX_FAIL_OPEN", "sandbox",
+                    "allowed", "high", "runtime", null, null, "tool", null,
+                    "沙箱策略缺失时放行", null, Map.of("toolCode", toolCode), null);
+        } catch (RuntimeException e) {
+            log.error("写入沙箱审计事件失败: tenantId={}, toolCode={}", tenantId, toolCode, e);
+        }
     }
 
     private boolean isNetworkBuiltinTool(String toolCode) {

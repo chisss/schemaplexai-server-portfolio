@@ -2,6 +2,7 @@ package com.schemaplexai.service.integration.mcp;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaplexai.model.entity.McpServer;
+import com.schemaplexai.common.util.SecurityUtil;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.internal.JsonSchemaElementJsonUtils;
@@ -35,9 +36,11 @@ public class McpClientService {
      * @return true 表示健康
      */
     public boolean healthCheck(McpServer server) {
-        try (McpClient mcpClient = mcpClientFactory.create(server)) {
-            mcpClient.checkHealth();
-            return true;
+        try {
+            return withClient(server, null, client -> {
+                client.checkHealth();
+                return true;
+            });
         } catch (Exception e) {
             log.warn("MCP Server 健康检查失败: serverId={}, error={}", server != null ? server.getId() : null, e.getMessage());
             return false;
@@ -49,19 +52,21 @@ public class McpClientService {
      * @return 工具列表
      */
     public List<Map<String, Object>> discoverTools(McpServer server) {
-        try (McpClient mcpClient = mcpClientFactory.create(server)) {
-            List<ToolSpecification> toolSpecifications = mcpClient.listTools();
-            List<Map<String, Object>> tools = new ArrayList<>(toolSpecifications.size());
-            for (ToolSpecification toolSpecification : toolSpecifications) {
-                Map<String, Object> payload = new HashMap<>();
-                payload.put("name", toolSpecification.name());
-                payload.put("description", toolSpecification.description());
-                payload.put("inputSchema", toolSpecification.parameters() == null
-                        ? Map.of() : JsonSchemaElementJsonUtils.toMap(toolSpecification.parameters()));
-                payload.put("metadata", toolSpecification.metadata());
-                tools.add(payload);
-            }
-            return tools;
+        try {
+            return withClient(server, null, mcpClient -> {
+                List<ToolSpecification> toolSpecifications = mcpClient.listTools();
+                List<Map<String, Object>> tools = new ArrayList<>(toolSpecifications.size());
+                for (ToolSpecification toolSpecification : toolSpecifications) {
+                    Map<String, Object> payload = new HashMap<>();
+                    payload.put("name", toolSpecification.name());
+                    payload.put("description", toolSpecification.description());
+                    payload.put("inputSchema", toolSpecification.parameters() == null
+                            ? Map.of() : JsonSchemaElementJsonUtils.toMap(toolSpecification.parameters()));
+                    payload.put("metadata", toolSpecification.metadata());
+                    tools.add(payload);
+                }
+                return tools;
+            });
         } catch (Exception e) {
             log.error("MCP Server 工具发现失败: serverId={}, error={}", server != null ? server.getId() : null, e.getMessage());
             return new ArrayList<>();
@@ -87,34 +92,53 @@ public class McpClientService {
     @SuppressWarnings("unchecked")
     private Map<String, Object> callTool(McpServer server, String toolName, Map<String, Object> arguments,
                                          Duration timeout) {
-        try (McpClient mcpClient = timeout == null
-                ? mcpClientFactory.create(server) : mcpClientFactory.create(server, timeout)) {
-            ToolExecutionRequest request = ToolExecutionRequest.builder()
-                    .id(UUID.randomUUID().toString())
-                    .name(toolName)
-                    .arguments(objectMapper.writeValueAsString(arguments != null ? arguments : Map.of()))
-                    .build();
-            ToolExecutionResult result = mcpClient.executeTool(request);
-            if (timeout != null && result.isError()) {
-                throw new IllegalStateException("MCP 查询工具执行失败");
-            }
-            if (result.result() instanceof Map<?, ?> resultMap) {
-                return (Map<String, Object>) resultMap;
-            }
-            if (result.result() != null) {
-                try {
-                    return objectMapper.convertValue(result.result(), Map.class);
-                } catch (IllegalArgumentException exception) {
-                    log.debug("MCP 工具结果不是对象结构，降级为文本封装: tool={}, error={}", toolName, exception.getMessage());
+        try {
+            return withClient(server, timeout, mcpClient -> {
+                ToolExecutionRequest request = ToolExecutionRequest.builder()
+                        .id(UUID.randomUUID().toString())
+                        .name(toolName)
+                        .arguments(objectMapper.writeValueAsString(arguments != null ? arguments : Map.of()))
+                        .build();
+                ToolExecutionResult result = mcpClient.executeTool(request);
+                if (timeout != null && result.isError()) {
+                    throw new IllegalStateException("MCP 查询工具执行失败");
                 }
-            }
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("content", result.resultText());
-            payload.put("attributes", result.attributes());
-            return payload;
+                if (result.result() instanceof Map<?, ?> resultMap) {
+                    return (Map<String, Object>) resultMap;
+                }
+                if (result.result() != null) {
+                    try {
+                        return objectMapper.convertValue(result.result(), Map.class);
+                    } catch (IllegalArgumentException exception) {
+                        log.debug("MCP 工具结果不是对象结构，降级为文本封装: tool={}, error={}", toolName, exception.getMessage());
+                    }
+                }
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("content", result.resultText());
+                payload.put("attributes", result.attributes());
+                return payload;
+            });
         } catch (Exception e) {
             log.error("MCP 工具调用失败: tool={}, error={}", toolName, e.getMessage());
             throw new RuntimeException("MCP 工具调用失败: " + e.getMessage(), e);
         }
     }
+
+    private <T> T withClient(McpServer server, Duration timeout, ClientOperation<T> operation) throws Exception {
+        try (var lease = mcpClientFactory.borrow(SecurityUtil.getCurrentTenantId(),
+                SecurityUtil.getCurrentUserId(), server, timeout)) {
+            try {
+                return operation.execute(lease.client());
+            } catch (Exception failure) {
+                lease.invalidate();
+                throw failure;
+            }
+        }
+    }
+
+    @FunctionalInterface
+    private interface ClientOperation<T> {
+        T execute(McpClient client) throws Exception;
+    }
+
 }

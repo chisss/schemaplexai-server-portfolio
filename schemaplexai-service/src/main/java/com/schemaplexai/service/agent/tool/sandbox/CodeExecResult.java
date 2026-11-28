@@ -2,6 +2,7 @@ package com.schemaplexai.service.agent.tool.sandbox;
 
 import lombok.Builder;
 import lombok.Data;
+import lombok.extern.jackson.Jacksonized;
 
 /**
  * 代码沙箱执行结果
@@ -16,6 +17,7 @@ import lombok.Data;
  */
 @Data
 @Builder
+@Jacksonized
 public class CodeExecResult {
 
     private String stdout;

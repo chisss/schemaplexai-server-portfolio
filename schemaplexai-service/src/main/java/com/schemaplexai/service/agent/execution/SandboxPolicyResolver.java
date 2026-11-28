@@ -28,8 +28,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicReference;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import java.time.Duration;
+import java.util.Optional;
 
 /**
  * 沙箱策略解析器（支持热重载）
@@ -55,7 +57,8 @@ public class SandboxPolicyResolver {
     private Set<String> defaultAllowedCommands = Set.of();
 
     /** 租户策略热缓存：tenantId -> TenantRuntimePolicy */
-    private final ConcurrentHashMap<String, AtomicReference<TenantRuntimePolicy>> policyCache = new ConcurrentHashMap<>();
+    private final Cache<String, Optional<TenantRuntimePolicy>> policyCache = Caffeine.newBuilder()
+            .expireAfterWrite(Duration.ofSeconds(30)).maximumSize(10_000).build();
 
     @PostConstruct
     void init() {
@@ -68,7 +71,7 @@ public class SandboxPolicyResolver {
     @TransactionalEventListener(fallbackExecution = true)
     public void onPolicyChanged(SandboxPolicyChangedEvent event) {
         if (event != null && StringUtils.hasText(event.tenantId())) {
-            policyCache.remove(event.tenantId());
+            policyCache.invalidate(event.tenantId());
             log.info("沙箱策略缓存已失效: tenantId={}", event.tenantId());
         }
     }
@@ -77,7 +80,7 @@ public class SandboxPolicyResolver {
      * 手动失效指定租户的策略缓存
      */
     public void evictPolicyCache(String tenantId) {
-        policyCache.remove(tenantId);
+        policyCache.invalidate(tenantId);
     }
 
     public SandboxPolicy resolve(Agent agent, AgentExecutionContext context) {
@@ -273,17 +276,8 @@ public class SandboxPolicyResolver {
         if (!StringUtils.hasText(tenantId)) {
             return null;
         }
-        AtomicReference<TenantRuntimePolicy> ref = policyCache.computeIfAbsent(tenantId,
-                k -> new AtomicReference<>());
-        TenantRuntimePolicy cached = ref.get();
-        if (cached != null) {
-            return cached;
-        }
-        TenantRuntimePolicy fromDb = tenantRuntimePolicyMapper.selectById(tenantId);
-        if (fromDb != null) {
-            ref.set(fromDb);
-        }
-        return fromDb;
+        return policyCache.get(tenantId, id -> Optional.ofNullable(tenantRuntimePolicyMapper.selectById(id)))
+                .orElse(null);
     }
 
     /**

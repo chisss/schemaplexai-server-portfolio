@@ -23,12 +23,12 @@ class CompositeChatMemoryStoreTest {
     private final List<ChatMessage> messages = List.of(UserMessage.from("图像待分析"));
 
     @Test
-    void shouldLeaveCacheAloneWhenPostgresWriteFails() {
+    void shouldInvalidateCacheWhenPostgresWriteFails() {
         doThrow(new IllegalStateException("写入失败")).when(postgres).updateMessages("conv", messages);
 
         assertThrows(IllegalStateException.class, () -> store.updateMessages("conv", messages));
 
-        verifyNoInteractions(redis);
+        verify(redis).deleteMessages("conv");
     }
 
     @Test

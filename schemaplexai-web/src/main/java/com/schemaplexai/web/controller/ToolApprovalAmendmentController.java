@@ -58,7 +58,7 @@ public class ToolApprovalAmendmentController {
     @DeleteMapping("/{id}")
     @Operation(summary = "删除修正规则")
     public R<Void> delete(@PathVariable String id) {
-        amendmentService.deleteAmendment(id);
+        amendmentService.deleteAmendment(SecurityUtil.getCurrentTenantId(), id);
         return R.ok();
     }
 }

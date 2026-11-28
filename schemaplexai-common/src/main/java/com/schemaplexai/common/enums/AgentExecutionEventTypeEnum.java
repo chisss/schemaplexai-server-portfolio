@@ -17,6 +17,7 @@ public enum AgentExecutionEventTypeEnum {
     TOOL_RUNNING("TOOL_RUNNING", "工具执行中"),
     CONTEXT_INJECT("CONTEXT_INJECT", "上下文注入"),
     ROUND_START("ROUND_START", "轮次开始"),
+    BUDGET_UPDATE("BUDGET_UPDATE", "Token 预算更新"),
     AI_RESPONSE("AI_RESPONSE", "模型响应"),
     TOOL_CALL("TOOL_CALL", "工具调用"),
     TOOL_RESULT("TOOL_RESULT", "工具结果"),

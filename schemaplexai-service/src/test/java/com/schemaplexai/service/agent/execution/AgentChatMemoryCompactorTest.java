@@ -31,6 +31,23 @@ import static org.mockito.Mockito.when;
 class AgentChatMemoryCompactorTest {
 
     @Test
+    void deductsTheActualPromptAndToolSchemaEstimate() {
+        var compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport());
+        var config = buildModelConfig(4_096);
+        assertThat(compactor.resolveMemoryBudgetTokens(config, 0)).isEqualTo(2_048);
+        assertThat(compactor.resolveMemoryBudgetTokens(config, 700)).isEqualTo(1_348);
+        assertThat(compactor.resolveMemoryBudgetTokens(config, 8_000)).isEqualTo(1);
+    }
+
+    @Test
+    void scalesConfiguredMemoryWindowsWithinTheOutputReserve() {
+        var compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport());
+        assertThat(compactor.resolveMemoryBudgetTokens(null, buildModelConfig(128_000))).isEqualTo(108_800);
+        assertThat(compactor.resolveMemoryBudgetTokens(null, buildModelConfig(32_000))).isEqualTo(24_000);
+        assertThat(compactor.resolveMemoryBudgetTokens(null, null)).isEqualTo(8192);
+    }
+
+    @Test
     void shouldKeepToolInteractionChainIntactAfterCompaction() {
         AgentChatMemoryCompactor compactor = new AgentChatMemoryCompactor(new TokenEstimatorSupport());
         InMemoryChatMemory chatMemory = new InMemoryChatMemory(List.of(

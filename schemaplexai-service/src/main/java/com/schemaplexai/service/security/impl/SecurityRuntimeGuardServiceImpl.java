@@ -23,16 +23,21 @@ import com.schemaplexai.service.security.SecurityIncidentService;
 import com.schemaplexai.service.security.SecurityRuntimeGuardService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 /**
@@ -44,6 +49,10 @@ import java.util.regex.Pattern;
 public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardService {
 
     private static final Set<String> INPUT_LENGTH_CONTROL_POINTS = Set.of("input", "system_prompt", "instruction_chain");
+    private static final Set<String> USAGE_BOUNDARY_SCENES = Set.of(
+            SecurityComplianceConstant.CHECK_SCENE_AGENT_EXECUTE,
+            SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_START
+    );
     private static final Set<String> RUNTIME_SCENES = Set.of(
             SecurityComplianceConstant.CHECK_SCENE_AGENT_EXECUTE,
             SecurityComplianceConstant.CHECK_SCENE_WORKFLOW_START,
@@ -60,6 +69,19 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
     private final SecurityIncidentService securityIncidentService;
     private final SecurityAuditEventService securityAuditEventService;
     private final ObjectMapper objectMapper;
+    private final Map<String, WindowCounter> qpsWindows = new ConcurrentHashMap<>();
+    private final Map<String, DailyCounter> dailyUsage = new ConcurrentHashMap<>();
+
+    @Value("${schemaplexai.security.runtime-facts.region:cn-hz}")
+    private String trustedRegion = "cn-hz";
+    @Value("${schemaplexai.security.runtime-facts.transport-protocol:TLS1.3}")
+    private String trustedTransportProtocol = "TLS1.3";
+    @Value("${schemaplexai.security.runtime-facts.storage-algorithm:AES-256}")
+    private String trustedStorageAlgorithm = "AES-256";
+    @Value("${schemaplexai.security.runtime-facts.session-ttl-minutes:0}")
+    private int trustedSessionTtlMinutes = 0;
+    @Value("${schemaplexai.security.runtime-facts.active-sessions:1}")
+    private int trustedActiveSessions = 1;
 
     @Override
     public SecurityCheckDecisionVO evaluate(SecurityRuntimeCheckRequest request, SecurityAuditContext auditContext) {
@@ -71,9 +93,10 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         String resourceType = StringUtils.hasText(request.getResourceType())
                 ? request.getResourceType()
                 : SecurityComplianceConstant.RESOURCE_TYPE_POLICY;
+        Map<String, Object> trustedFacts = resolveTrustedFacts(request, tenantId);
 
-        List<SecurityMatchedRuleVO> matchedPolicies = matchPolicies(request, tenantId, content);
-        List<SecurityMatchedRuleVO> matchedRulePacks = matchRulePacks(request, tenantId, content);
+        List<SecurityMatchedRuleVO> matchedPolicies = matchPolicies(request, tenantId, content, trustedFacts);
+        List<SecurityMatchedRuleVO> matchedRulePacks = matchRulePacks(request, tenantId, content, trustedFacts);
 
         String decision = resolveDecision(matchedPolicies, matchedRulePacks);
         var result = new SecurityCheckDecisionVO();
@@ -98,7 +121,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
             result.setIncidentId(incidentId);
         }
 
-        recordAuditEvent(request, auditContext, result, tenantId, traceId, resourceType);
+        recordAuditEvent(request, auditContext, result, tenantId, traceId, resourceType, trustedFacts);
         return result;
     }
 
@@ -111,7 +134,8 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         return currentTenantId;
     }
 
-    private List<SecurityMatchedRuleVO> matchPolicies(SecurityRuntimeCheckRequest request, String tenantId, String corpus) {
+    private List<SecurityMatchedRuleVO> matchPolicies(SecurityRuntimeCheckRequest request, String tenantId,
+                                                      String corpus, Map<String, Object> trustedFacts) {
         var wrapper = new LambdaQueryWrapper<SecurityPolicy>()
                 .eq(SecurityPolicy::getTenantId, tenantId)
                 .eq(SecurityPolicy::getStatus, SecurityComplianceConstant.STATUS_ACTIVE)
@@ -124,7 +148,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
             if (!matchesScene(policy, request.getScene()) || !matchesTarget(policy, request, tenantId)) {
                 continue;
             }
-            String hitReason = evaluatePolicy(policy, request, corpus);
+            String hitReason = evaluatePolicy(policy, request, corpus, trustedFacts);
             if (!StringUtils.hasText(hitReason)) {
                 continue;
             }
@@ -141,7 +165,8 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         return results;
     }
 
-    private List<SecurityMatchedRuleVO> matchRulePacks(SecurityRuntimeCheckRequest request, String tenantId, String corpus) {
+    private List<SecurityMatchedRuleVO> matchRulePacks(SecurityRuntimeCheckRequest request, String tenantId,
+                                                       String corpus, Map<String, Object> trustedFacts) {
         List<SecurityRulePack> packs = securityRulePackMapper.selectList(
                 new LambdaQueryWrapper<SecurityRulePack>()
                         .eq(SecurityRulePack::getTenantId, tenantId)
@@ -266,7 +291,8 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
         return tenantId;
     }
 
-    private String evaluatePolicy(SecurityPolicy policy, SecurityRuntimeCheckRequest request, String corpus) {
+    private String evaluatePolicy(SecurityPolicy policy, SecurityRuntimeCheckRequest request, String corpus,
+                                  Map<String, Object> trustedFacts) {
         Map<String, Object> config = policy.getPolicyConfig() == null ? Map.of() : policy.getPolicyConfig();
         List<String> keywords = stringList(config.get("keywords"));
         if (!keywords.isEmpty()) {
@@ -323,54 +349,73 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
 
         List<String> allowedRegions = stringList(config.get("allowedRegions"));
         if (!allowedRegions.isEmpty()) {
-            String currentRegion = contextString(request.getContext(), "region", "workspaceRegion", "storageRegion");
-            if (StringUtils.hasText(currentRegion) && !allowedRegions.contains(currentRegion.trim().toLowerCase())) {
+            String currentRegion = factString(trustedFacts, "region");
+            if (isNotApplicable(currentRegion)) {
+                log.debug("区域限制不适用于当前检查: tenantId={}", request.getTenantId());
+            } else if (!StringUtils.hasText(currentRegion) || isUnknownFact(currentRegion)) {
+                return "区域合规事实不可用: " + safeFact(currentRegion);
+            } else if (!allowedRegions.contains(currentRegion.trim().toLowerCase())) {
                 return "命中区域限制: " + currentRegion;
             }
         }
 
         String transportProtocol = stringValue(config.get("transportProtocol"));
         if (Boolean.TRUE.equals(config.get("encryptTransport")) && StringUtils.hasText(transportProtocol)) {
-            String currentTransport = contextString(request.getContext(), "transportProtocol");
-            if (StringUtils.hasText(currentTransport)
-                    && !transportProtocol.equalsIgnoreCase(currentTransport.trim())) {
+            String currentTransport = factString(trustedFacts, "transportProtocol");
+            if (isNotApplicable(currentTransport)) {
+                log.debug("传输协议限制不适用于当前检查");
+            } else if (!StringUtils.hasText(currentTransport) || isUnknownFact(currentTransport)) {
+                return "传输协议合规事实不可用: " + safeFact(currentTransport);
+            } else if (!transportProtocol.equalsIgnoreCase(currentTransport.trim())) {
                 return "传输协议不符合要求: " + currentTransport;
             }
         }
 
         String storageAlgorithm = stringValue(config.get("storageAlgorithm"));
         if (Boolean.TRUE.equals(config.get("encryptStorage")) && StringUtils.hasText(storageAlgorithm)) {
-            String currentStorageAlgorithm = contextString(request.getContext(), "storageAlgorithm");
-            if (StringUtils.hasText(currentStorageAlgorithm)
-                    && !storageAlgorithm.equalsIgnoreCase(currentStorageAlgorithm.trim())) {
+            String currentStorageAlgorithm = factString(trustedFacts, "storageAlgorithm");
+            if (isNotApplicable(currentStorageAlgorithm)) {
+                log.debug("存储算法限制不适用于当前检查");
+            } else if (!StringUtils.hasText(currentStorageAlgorithm) || isUnknownFact(currentStorageAlgorithm)) {
+                return "存储加密合规事实不可用: " + safeFact(currentStorageAlgorithm);
+            } else if (!storageAlgorithm.equalsIgnoreCase(currentStorageAlgorithm.trim())) {
                 return "存储加密算法不符合要求: " + currentStorageAlgorithm;
             }
         }
 
         Number sessionTtlMinutes = numberValue(config.get("sessionTtlMinutes"));
-        Number currentSessionTtl = contextNumber(request.getContext(), "sessionTtlMinutes", "currentSessionTtlMinutes");
-        if (sessionTtlMinutes != null && currentSessionTtl != null
-                && currentSessionTtl.intValue() > sessionTtlMinutes.intValue()) {
+        Number currentSessionTtl = factNumber(trustedFacts, "sessionTtlMinutes");
+        if (sessionTtlMinutes != null && currentSessionTtl == null) {
+            return "会话时长合规事实不可用";
+        }
+        if (sessionTtlMinutes != null && currentSessionTtl.intValue() > sessionTtlMinutes.intValue()) {
             return "会话时长超出限制: " + currentSessionTtl;
         }
 
         Number maxSessions = numberValue(config.get("maxSessions"));
-        Number currentSessionCount = contextNumber(request.getContext(), "sessionCount", "activeSessions");
-        if (maxSessions != null && currentSessionCount != null
-                && currentSessionCount.intValue() > maxSessions.intValue()) {
+        Number currentSessionCount = factNumber(trustedFacts, "activeSessions");
+        if (maxSessions != null && currentSessionCount == null) {
+            return "活跃会话合规事实不可用";
+        }
+        if (maxSessions != null && currentSessionCount.intValue() > maxSessions.intValue()) {
             return "活跃会话数超出限制: " + currentSessionCount;
         }
 
         Number tenantQps = numberValue(config.get("tenantQps"));
-        Number currentQps = contextNumber(request.getContext(), "tenantQps", "currentQps", "qps");
-        if (tenantQps != null && currentQps != null && currentQps.intValue() > tenantQps.intValue()) {
+        Number currentQps = factNumber(trustedFacts, "tenantQps");
+        if (tenantQps != null && currentQps == null) {
+            return "租户请求速率事实不可用";
+        }
+        if (tenantQps != null && currentQps.intValue() > tenantQps.intValue()) {
             return "租户请求速率超限: " + currentQps;
         }
 
         Number userDailyQuota = numberValue(config.get("userDailyQuota"));
-        Number currentDailyUsage = contextNumber(request.getContext(), "userDailyUsage", "dailyUsage");
-        if (userDailyQuota != null && currentDailyUsage != null
-                && currentDailyUsage.intValue() > userDailyQuota.intValue()) {
+        Number currentDailyUsage = factNumber(trustedFacts, "userDailyUsage");
+        if (userDailyQuota != null && currentDailyUsage == null) {
+            return "用户日配额事实不可用";
+        }
+        if (userDailyQuota != null && currentDailyUsage.intValue() > userDailyQuota.intValue()) {
             return "用户日配额超限: " + currentDailyUsage;
         }
 
@@ -462,13 +507,26 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
                                   SecurityCheckDecisionVO result,
                                   String tenantId,
                                   String traceId,
-                                  String resourceType) {
+                                  String resourceType,
+                                  Map<String, Object> trustedFacts) {
         String eventStatus = switch (result.getDecision()) {
             case SecurityComplianceConstant.DECISION_BLOCK -> SecurityComplianceConstant.AUDIT_STATUS_BLOCKED;
             case SecurityComplianceConstant.DECISION_PAUSE, SecurityComplianceConstant.DECISION_WARN ->
                     SecurityComplianceConstant.AUDIT_STATUS_WARNING;
             default -> SecurityComplianceConstant.AUDIT_STATUS_SUCCESS;
         };
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("scene", safeValue(request.getScene()));
+        payload.put("decision", result.getDecision());
+        payload.put("incidentId", safeValue(result.getIncidentId()));
+        payload.put("matchedPolicies", result.getMatchedPolicies() == null ? List.of() : result.getMatchedPolicies());
+        payload.put("matchedRulePacks", result.getMatchedRulePacks() == null ? List.of() : result.getMatchedRulePacks());
+        payload.put("resourceName", safeValue(request.getResourceName()));
+        payload.put("factSource", "server");
+        payload.put("trustedFacts", trustedFacts);
+        payload.put("guardPhase", contextValue(request, "guardPhase"));
+        payload.put("contentSha256", contextValue(request, "contentSha256"));
+        payload.put("displayContentSha256", contextValue(request, "displayContentSha256"));
         securityAuditEventService.recordEvent(
                 tenantId,
                 traceId,
@@ -483,14 +541,7 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
                 request.getResourceId(),
                 "运行时安全检查",
                 result.getMessage(),
-                Map.of(
-                        "scene", safeValue(request.getScene()),
-                        "decision", result.getDecision(),
-                        "incidentId", safeValue(result.getIncidentId()),
-                        "matchedPolicies", result.getMatchedPolicies() == null ? List.of() : result.getMatchedPolicies(),
-                        "matchedRulePacks", result.getMatchedRulePacks() == null ? List.of() : result.getMatchedRulePacks(),
-                        "resourceName", safeValue(request.getResourceName())
-                ),
+                payload,
                 auditContext
         );
     }
@@ -560,6 +611,107 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
             case SecurityComplianceConstant.DECISION_WARN -> "建议关注后续执行结果并检查是否需要升级为阻断。";
             default -> "可仅保留审计记录，无需额外操作。";
         };
+    }
+
+    private Map<String, Object> resolveTrustedFacts(SecurityRuntimeCheckRequest request, String tenantId) {
+        Map<String, Object> facts = new LinkedHashMap<>();
+        facts.put("region", normalizeFact(trustedRegion));
+        facts.put("transportProtocol", normalizeFact(trustedTransportProtocol));
+        facts.put("storageAlgorithm", normalizeFact(trustedStorageAlgorithm));
+        facts.put("sessionTtlMinutes", Math.max(trustedSessionTtlMinutes, 0));
+        facts.put("activeSessions", Math.max(trustedActiveSessions, 0));
+        boolean usageBoundary = request != null && USAGE_BOUNDARY_SCENES.contains(request.getScene());
+        facts.put("tenantQps", usageBoundary ? currentQps(tenantId) : peekQps(tenantId));
+        facts.put("userDailyUsage", usageBoundary
+                ? currentDailyUsage(tenantId, SecurityUtil.getCurrentUserId())
+                : peekDailyUsage(tenantId, SecurityUtil.getCurrentUserId()));
+        return facts;
+    }
+
+    private String normalizeFact(String value) {
+        return StringUtils.hasText(value) ? value.trim().toLowerCase() : "unknown";
+    }
+
+    private int currentQps(String tenantId) {
+        long epochSecond = LocalDateTime.now().toEpochSecond(ZoneOffset.UTC);
+        WindowCounter counter = qpsWindows.computeIfAbsent(tenantId, ignored -> new WindowCounter());
+        return counter.increment(epochSecond);
+    }
+
+    private int peekQps(String tenantId) {
+        WindowCounter counter = qpsWindows.get(tenantId);
+        return counter == null ? 0 : counter.peek(LocalDateTime.now().toEpochSecond(ZoneOffset.UTC));
+    }
+
+    private int currentDailyUsage(String tenantId, String userId) {
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        String key = safeValue(tenantId) + ":" + safeValue(userId);
+        DailyCounter counter = dailyUsage.computeIfAbsent(key, ignored -> new DailyCounter());
+        return counter.increment(today);
+    }
+
+    private int peekDailyUsage(String tenantId, String userId) {
+        DailyCounter counter = dailyUsage.get(safeValue(tenantId) + ":" + safeValue(userId));
+        return counter == null ? 0 : counter.peek(LocalDate.now(ZoneOffset.UTC));
+    }
+
+    private String factString(Map<String, Object> trustedFacts, String key) {
+        Object value = trustedFacts.get(key);
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private Number factNumber(Map<String, Object> trustedFacts, String key) {
+        return numberValue(trustedFacts.get(key));
+    }
+
+    private boolean isUnknownFact(String value) {
+        return !StringUtils.hasText(value)
+                || "unknown".equalsIgnoreCase(value)
+                || "missing".equalsIgnoreCase(value);
+    }
+
+    private boolean isNotApplicable(String value) {
+        return "not_applicable".equalsIgnoreCase(value)
+                || "not-applicable".equalsIgnoreCase(value)
+                || "na".equalsIgnoreCase(value);
+    }
+
+    private String safeFact(String value) {
+        return StringUtils.hasText(value) ? value : "missing";
+    }
+
+    private static final class WindowCounter {
+        private long epochSecond = -1;
+        private final AtomicInteger count = new AtomicInteger();
+
+        private synchronized int increment(long currentSecond) {
+            if (epochSecond != currentSecond) {
+                epochSecond = currentSecond;
+                count.set(0);
+            }
+            return count.incrementAndGet();
+        }
+
+        private synchronized int peek(long currentSecond) {
+            return epochSecond == currentSecond ? count.get() : 0;
+        }
+    }
+
+    private static final class DailyCounter {
+        private LocalDate day;
+        private final AtomicInteger count = new AtomicInteger();
+
+        private synchronized int increment(LocalDate currentDay) {
+            if (!currentDay.equals(day)) {
+                day = currentDay;
+                count.set(0);
+            }
+            return count.incrementAndGet();
+        }
+
+        private synchronized int peek(LocalDate currentDay) {
+            return currentDay.equals(day) ? count.get() : 0;
+        }
     }
 
     private String buildCorpus(SecurityRuntimeCheckRequest request) {
@@ -673,5 +825,13 @@ public class SecurityRuntimeGuardServiceImpl implements SecurityRuntimeGuardServ
 
     private String safeValue(String value) {
         return value == null ? "" : value;
+    }
+
+    private String contextValue(SecurityRuntimeCheckRequest request, String key) {
+        if (request == null || request.getContext() == null) {
+            return "";
+        }
+        Object value = request.getContext().get(key);
+        return value == null ? "" : String.valueOf(value);
     }
 }

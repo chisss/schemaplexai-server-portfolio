@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.schemaplexai.common.enums.AmendmentMatchTypeEnum;
 import com.schemaplexai.common.enums.AmendmentScopeEnum;
+import com.schemaplexai.common.exception.BusinessException;
+import com.schemaplexai.common.result.ResultCode;
 import com.schemaplexai.dao.mapper.ToolApprovalAmendmentMapper;
 import com.schemaplexai.model.entity.ToolApprovalAmendment;
 import lombok.RequiredArgsConstructor;
@@ -25,6 +27,8 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class ToolApprovalAmendmentService {
 
+    private static final int MAX_USES = 20;
+
     private final ToolApprovalAmendmentMapper amendmentMapper;
 
     /**
@@ -36,9 +40,8 @@ public class ToolApprovalAmendmentService {
         }
         List<ToolApprovalAmendment> amendments = findActiveAmendments(tenantId, agentId, toolCode);
         for (ToolApprovalAmendment amendment : amendments) {
-            if (matchesPattern(amendment, command)) {
-                incrementUseCount(amendment.getId());
-                log.debug("工具调用自动放行: toolCode={}, command={}, amendmentId={}", toolCode, command, amendment.getId());
+            if (matchesPattern(amendment, command) && tryConsume(amendment.getId(), tenantId)) {
+                log.debug("工具调用自动审批: toolCode={}, amendmentId={}", toolCode, amendment.getId());
                 return true;
             }
         }
@@ -51,19 +54,24 @@ public class ToolApprovalAmendmentService {
     public ToolApprovalAmendment createAmendment(String tenantId, String agentId, String toolCode,
                                                   String command, String approvedBy,
                                                   AmendmentScopeEnum scope, LocalDateTime expiresAt) {
-        String pattern = extractCommandPattern(toolCode, command);
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime limit = now.plusDays(1);
+        if (expiresAt != null && !expiresAt.isAfter(now)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "审批修正规则的有效期必须晚于当前时间");
+        }
         ToolApprovalAmendment amendment = new ToolApprovalAmendment();
         amendment.setTenantId(tenantId);
         amendment.setAgentId(AmendmentScopeEnum.AGENT.equals(scope) ? agentId : null);
         amendment.setToolCode(toolCode);
-        amendment.setCommandPattern(pattern);
-        amendment.setMatchType(AmendmentMatchTypeEnum.PREFIX.getCode());
+        amendment.setCommandPattern(command == null ? "" : command.strip());
+        amendment.setMatchType(AmendmentMatchTypeEnum.EXACT.getCode());
         amendment.setScope(scope.getCode());
         amendment.setApprovedBy(approvedBy);
-        amendment.setExpiresAt(expiresAt);
+        amendment.setExpiresAt(expiresAt == null || expiresAt.isAfter(limit) ? limit : expiresAt);
+        amendment.setMaxUses(MAX_USES);
         amendment.setUseCount(0);
         amendmentMapper.insert(amendment);
-        log.info("创建审批修正规则: toolCode={}, pattern={}, scope={}", toolCode, pattern, scope.getCode());
+        log.info("创建审批修正规则: toolCode={}, amendmentId={}, scope={}", toolCode, amendment.getId(), scope.getCode());
         return amendment;
     }
 
@@ -81,8 +89,10 @@ public class ToolApprovalAmendmentService {
     /**
      * 删除修正规则
      */
-    public void deleteAmendment(String id) {
-        amendmentMapper.deleteById(id);
+    public void deleteAmendment(String tenantId, String id) {
+        amendmentMapper.delete(new LambdaQueryWrapper<ToolApprovalAmendment>()
+                .eq(ToolApprovalAmendment::getTenantId, tenantId)
+                .eq(ToolApprovalAmendment::getId, id));
     }
 
     private List<ToolApprovalAmendment> findActiveAmendments(String tenantId, String agentId, String toolCode) {
@@ -91,8 +101,8 @@ public class ToolApprovalAmendmentService {
                 .eq(ToolApprovalAmendment::getToolCode, toolCode)
                 .and(w -> w.eq(ToolApprovalAmendment::getAgentId, agentId)
                         .or().eq(ToolApprovalAmendment::getScope, AmendmentScopeEnum.TENANT.getCode()))
-                .and(w -> w.isNull(ToolApprovalAmendment::getExpiresAt)
-                        .or().gt(ToolApprovalAmendment::getExpiresAt, LocalDateTime.now())));
+                .gt(ToolApprovalAmendment::getExpiresAt, LocalDateTime.now())
+                .apply("COALESCE(use_count, 0) < max_uses"));
     }
 
     private boolean matchesPattern(ToolApprovalAmendment amendment, String command) {
@@ -116,25 +126,14 @@ public class ToolApprovalAmendmentService {
         return command.startsWith(pattern);
     }
 
-    private void incrementUseCount(String id) {
-        amendmentMapper.update(null, new LambdaUpdateWrapper<ToolApprovalAmendment>()
+    private boolean tryConsume(String id, String tenantId) {
+        LocalDateTime now = LocalDateTime.now();
+        return amendmentMapper.update(null, new LambdaUpdateWrapper<ToolApprovalAmendment>()
                 .eq(ToolApprovalAmendment::getId, id)
-                .setSql("use_count = use_count + 1")
-                .set(ToolApprovalAmendment::getLastUsedAt, LocalDateTime.now()));
-    }
-
-    /**
-     * 从命令中提取模式（取基础命令部分作为前缀）
-     */
-    private String extractCommandPattern(String toolCode, String command) {
-        if ("sys.bash".equals(toolCode) && StringUtils.hasText(command)) {
-            // 提取第一个命令词 + 第一个参数作为前缀
-            String[] parts = command.trim().split("\\s+", 3);
-            if (parts.length >= 2) {
-                return parts[0] + " " + parts[1];
-            }
-            return parts[0];
-        }
-        return command != null ? command.trim() : "";
+                .eq(ToolApprovalAmendment::getTenantId, tenantId)
+                .gt(ToolApprovalAmendment::getExpiresAt, now)
+                .apply("COALESCE(use_count, 0) < max_uses")
+                .setSql("use_count = COALESCE(use_count, 0) + 1")
+                .set(ToolApprovalAmendment::getLastUsedAt, now)) == 1;
     }
 }

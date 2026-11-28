@@ -31,6 +31,12 @@ public class AgentTeamMemberDTO {
     /** 描述 */
     private String description;
 
+    /** 依赖的前置成员ID（逗号分隔，声明 DAG 依赖） */
+    private String dependsOn;
+
+    /** 允许读取的同队成员ID（逗号分隔，对等读取） */
+    private String canReadPeers;
+
     /** 排序序号 */
     private Integer sortOrder;
 }

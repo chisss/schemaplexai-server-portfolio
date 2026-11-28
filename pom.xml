@@ -62,6 +62,17 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- Actuator 与 Micrometer 的所有组件使用 Spring Boot 管理的同一版本。 -->
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-core</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-registry-prometheus</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
             <!-- 依赖收敛：commons-compress 1.28+ 依赖 commons-lang3 3.13+ 的 SystemProperties，
                  若被其他 BOM 拉低到 3.12 会在 Tika MIME 探测时抛 NoSuchMethodError。
                  显式声明放在最前面，保证优先于后续导入的 BOM。 -->

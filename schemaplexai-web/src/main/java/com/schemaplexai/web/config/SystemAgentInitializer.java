@@ -2,6 +2,7 @@ package com.schemaplexai.web.config;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.schemaplexai.dao.mapper.TenantMapper;
+import com.schemaplexai.common.util.SecurityUtil;
 import com.schemaplexai.model.entity.Tenant;
 import com.schemaplexai.service.agent.system.SystemAgentService;
 import lombok.RequiredArgsConstructor;
@@ -30,7 +31,9 @@ public class SystemAgentInitializer implements CommandLineRunner {
         List<Tenant> tenants = tenantMapper.selectList(
                 new LambdaQueryWrapper<Tenant>().eq(Tenant::getStatus, "active"));
         int created = 0;
+        String previousTenant = SecurityUtil.getCurrentTenantId();
         for (Tenant tenant : tenants) {
+            SecurityUtil.setCurrentTenantId(tenant.getId());
             try {
                 if (systemAgentService.findSystemAgent(tenant.getId()) == null) {
                     systemAgentService.createSystemAgent(tenant.getId());
@@ -38,6 +41,8 @@ public class SystemAgentInitializer implements CommandLineRunner {
                 }
             } catch (Exception e) {
                 log.warn("租户[{}]系统Agent初始化失败: {}", tenant.getId(), e.getMessage());
+            } finally {
+                SecurityUtil.setCurrentTenantId(previousTenant);
             }
         }
         log.info("===== 系统Agent初始化完成: 共{}个租户, 新建{}个 =====", tenants.size(), created);

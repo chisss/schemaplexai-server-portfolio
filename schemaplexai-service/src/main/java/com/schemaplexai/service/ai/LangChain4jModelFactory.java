@@ -12,6 +12,9 @@ import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 import dev.langchain4j.model.googleai.GoogleAiGeminiStreamingChatModel;
 import dev.langchain4j.model.googleai.GeminiThinkingConfig;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import com.schemaplexai.common.util.HashUtils;
+import java.nio.charset.StandardCharsets;
+import java.net.URI;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
@@ -77,6 +80,7 @@ public class LangChain4jModelFactory {
                 var builder = AnthropicChatModel.builder()
                         .apiKey(config.getApiKey())
                         .modelName(config.getModelId())
+                        .cacheSystemMessages(true)
                         .maxRetries(sdkRetries)
                         .timeout(timeout)
                         .baseUrl(config.getBaseUrl());
@@ -107,6 +111,7 @@ public class LangChain4jModelFactory {
                 var builder = AnthropicStreamingChatModel.builder()
                         .apiKey(config.getApiKey())
                         .modelName(config.getModelId())
+                        .cacheSystemMessages(true)
                         .timeout(timeout)
                         .baseUrl(config.getBaseUrl());
                 applyAnthropicStreamingThinking(builder, config);
@@ -139,6 +144,8 @@ public class LangChain4jModelFactory {
         if (shouldUseOkHttpClient(config)) {
             builder.httpClientBuilder(new LangChainOkHttpClientBuilder());
         }
+        String cacheKey = openAiPromptCacheKey(config);
+        if (cacheKey != null) builder.promptCacheKey(cacheKey);
         applyOpenAiReasoning(builder, config);
         return builder.build();
     }
@@ -158,8 +165,20 @@ public class LangChain4jModelFactory {
         if (shouldUseOkHttpClient(config)) {
             builder.httpClientBuilder(new LangChainOkHttpClientBuilder());
         }
+        String cacheKey = openAiPromptCacheKey(config);
+        if (cacheKey != null) builder.promptCacheKey(cacheKey);
         applyOpenAiReasoning(builder, config);
         return builder.build();
+    }
+
+    static String openAiPromptCacheKey(AiModelConfig config) {
+        // 兼容网关可能拒绝供应商专用参数，只为官方端点增加稳定缓存路由键。
+        if (!"openai".equalsIgnoreCase(config.getProvider()) || config.getBaseUrl() == null
+                || !"api.openai.com".equalsIgnoreCase(URI.create(config.getBaseUrl()).getHost())) {
+            return null;
+        }
+        String scope = config.getConfigId() + ":" + config.getModelId();
+        return "schemaplex-" + HashUtils.sha256Hex(scope.getBytes(StandardCharsets.UTF_8)).substring(0, 32);
     }
 
     private boolean shouldUseOkHttpClient(AiModelConfig config) {

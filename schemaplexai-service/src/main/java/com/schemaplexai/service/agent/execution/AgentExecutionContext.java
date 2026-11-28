@@ -2,6 +2,8 @@ package com.schemaplexai.service.agent.execution;
 
 import com.schemaplexai.common.enums.AgentRuntimeEngineEnum;
 import com.schemaplexai.model.entity.AgentToolBinding;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import io.opentelemetry.context.Context;
 import com.schemaplexai.model.vo.cost.BudgetAdmissionVO;
 import com.schemaplexai.service.agent.execution.policy.ExecutionModePolicy;
 import lombok.Builder;
@@ -50,6 +52,10 @@ public class AgentExecutionContext {
 
     /** 父执行 ID（Team 子执行场景） */
     private String parentExecutionId;
+
+    @JsonIgnore
+    @ToString.Exclude
+    private Context traceParent;
 
     /** Team Agent ID（团队场景下用于注入团队共享上下文） */
     private String teamAgentId;
@@ -126,6 +132,19 @@ public class AgentExecutionContext {
     /** 当前执行拥有的普通工具派发账本。 */
     @ToString.Exclude
     private AgentRunRecovery.Lease recoveryLease;
+
+    /** 保存本次 Team 编排所用的运行参数与成员提示。 */
+    private AgentEngineParams teamEngineParams;
+    private Map<String, List<String>> teamMemberSystemContexts;
+    private Map<String, List<AgentToolBinding>> teamMemberToolBindings;
+
+    /** 来源于本次父执行 checkpoint，供 Leader 按需读取成员交付。 */
+    private List<String> teamMemberEvidenceIds;
+
+    /** 已完成成员的 memberId → executionId 映射，供贡献者按 can_read_peers 过滤可读证据（审计 LA-08 白名单控制）。 */
+    private Map<String, String> teamMemberExecutionByMemberId;
+    /** 成员轮已合并的引导输入，供 Advisor 与 Lead 节点复用，避免重复消费引导队列。 */
+    private String teamEffectiveUserInput;
     private boolean recovering;
     /** 由轨迹评估入口设置，隔离模型编排执行器。 */
     private boolean evaluation;

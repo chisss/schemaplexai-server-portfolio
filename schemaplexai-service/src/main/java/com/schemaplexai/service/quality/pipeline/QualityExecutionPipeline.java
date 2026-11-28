@@ -45,6 +45,7 @@ public class QualityExecutionPipeline {
 
     /** SHORT_WAIT 模式下模型评估的最大等待时间（秒） */
     private static final int SHORT_WAIT_TIMEOUT_SECONDS = 15;
+    private static final int INCOMPLETE_COVERAGE_SCORE_CAP = 59;
     private static final String MODEL_INFRASTRUCTURE_PREFIX = "qa.infrastructure.";
     private static final Set<String> MODEL_INFRASTRUCTURE_REASONS = Set.of(
             "model_not_configured", "model_not_found", "model_evaluation_failed",
@@ -98,6 +99,15 @@ public class QualityExecutionPipeline {
             long warningCount = allFindings.stream()
                     .filter(f -> !DeviationSeverityEnum.INFO.getCode().equals(f.severity()))
                     .count();
+            Map<String, Object> coverage = buildCoverage(ruleChecks, model);
+            boolean coverageIncomplete = Boolean.TRUE.equals(coverage.get("requiredIncomplete"));
+            if (coverageIncomplete) {
+                score = Math.min(score, INCOMPLETE_COVERAGE_SCORE_CAP);
+                summary = mergeSummary(summary, buildCoverageSummary(coverage));
+            }
+            String taskStatus = coverageIncomplete
+                    ? TaskStatusEnum.FAILED.getCode() : TaskStatusEnum.SUCCEEDED.getCode();
+            String gateDecision = coverageIncomplete ? GateDecisionEnum.ERROR.getCode() : "pending_gate";
 
             // 标记成功
             Map<String, Object> resultSummary = new LinkedHashMap<>();
@@ -105,19 +115,22 @@ public class QualityExecutionPipeline {
             resultSummary.put("deviationCount", allFindings.size());
             resultSummary.put("warningCount", warningCount);
             resultSummary.put("score", score);
-            resultSummary.put("coverage", Map.of("rules", ruleChecks.coverage(), "model", model.coverage()));
+            resultSummary.put("coverage", coverage);
             if (QualityIssueTypeEnum.DEVIATION.getCode().equals(request.issueType())
                     && TriggerModeEnum.MANUAL.getCode().equals(resolveTriggerMode(request))) {
-                qualityTaskManager.completeManualDeviationTask(taskId, request, allFindings, resultSummary);
+                qualityTaskManager.completeManualDeviationTask(
+                        taskId, request, allFindings, resultSummary, coverageIncomplete);
+            } else if (coverageIncomplete) {
+                qualityTaskManager.markFailed(taskId, summary, resultSummary);
             } else {
                 qualityTaskManager.markSucceeded(taskId, allFindings.size(), allFindings.size(), 0, resultSummary);
             }
 
             long durationMs = System.currentTimeMillis() - startTime;
             return new QualityCheckResult(
-                    taskId, "pending_gate", allFindings, score, summary,
-                    null, durationMs, strategy, TaskStatusEnum.SUCCEEDED.getCode(),
-                    allFindings.size(), Math.toIntExact(warningCount)
+                    taskId, gateDecision, allFindings, score, summary,
+                    null, durationMs, strategy, taskStatus,
+                    allFindings.size(), Math.toIntExact(warningCount), coverage
             );
 
         } catch (Exception e) {
@@ -126,8 +139,11 @@ public class QualityExecutionPipeline {
             log.error("质量检查管线执行失败: specId={}, strategy={}", request.specId(), strategy, e);
             long durationMs = System.currentTimeMillis() - startTime;
             return new QualityCheckResult(
-                    taskId, GateDecisionEnum.PASS.getCode(), List.of(), 100, "质量检查执行失败: " + failureMessage,
-                    null, durationMs, strategy, TaskStatusEnum.FAILED.getCode(), 0, 0
+                    taskId, GateDecisionEnum.ERROR.getCode(), List.of(), 0, "质量检查执行失败: " + failureMessage,
+                    null, durationMs, strategy, TaskStatusEnum.FAILED.getCode(), 0, 0,
+                    Map.of("status", "error", "requiredIncomplete", true,
+                            "dimensions", Map.of(), "rules", Map.of(),
+                            "model", Map.of("status", "unknown", "required", false, "reason", "pipeline_failed"))
             );
         }
     }
@@ -145,7 +161,9 @@ public class QualityExecutionPipeline {
 
     private RuleChecks executeRuleChecks(QualityCheckRequest request) {
         if (!StringUtils.hasText(request.targetContent())) {
-            return new RuleChecks("no_content", List.of());
+            RuleChecks checks = new RuleChecks("no_content", List.of());
+            checks.markDimension("content", "unknown", true, "no_content");
+            return checks;
         }
 
         // 沿用按触发模式加载配置的方式，启用数量另按规则状态统计。
@@ -160,13 +178,18 @@ public class QualityExecutionPipeline {
         RuleChecks checks = new RuleChecks("configured", configuredRules);
         // 按 dimensionCode 分组，每个维度取第一条匹配规则的 ruleConfig
         Map<String, QualityRule> dimensionRuleMap = configuredRules.stream()
+                .filter(rule -> CommonConstant.STATUS_ACTIVE.equalsIgnoreCase(rule.getStatus()))
                 .collect(Collectors.toMap(
                         QualityRule::getDimensionCode,
                         r -> r,
                         (existing, replacement) -> existing
                 ));
 
-        Set<String> enabledDimensions = dimensionRuleMap.keySet();
+        Set<String> enabledDimensions = configuredRules.stream()
+                .filter(rule -> CommonConstant.STATUS_ACTIVE.equalsIgnoreCase(rule.getStatus()))
+                .map(QualityRule::getDimensionCode)
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
 
         for (QualityDetector detector : detectorRegistry.allDetectors().values()) {
             // 跳过不支持任何已启用维度的检测器
@@ -187,8 +210,12 @@ public class QualityExecutionPipeline {
                     .findFirst()
                     .orElse(detector.getType());
             checks.run(detector, new QualityDetector.DetectionContext(
-                    request.specId(), null, dimensionCode, null, ruleConfig, request.targetContent()));
+                    request.specId(), null, dimensionCode, null, ruleConfig, request.targetContent()),
+                    dimensionCode, true);
         }
+        enabledDimensions.stream()
+                .filter(dimension -> !checks.hasDimension(dimension))
+                .forEach(dimension -> checks.markDimension(dimension, "skipped", true, "no_detector"));
         return checks;
     }
 
@@ -197,7 +224,8 @@ public class QualityExecutionPipeline {
         RuleChecks checks = new RuleChecks("all_detectors", List.of());
         for (QualityDetector detector : detectorRegistry.allDetectors().values()) {
             checks.run(detector, new QualityDetector.DetectionContext(
-                    request.specId(), null, detector.getType(), null, Map.of(), request.targetContent()));
+                    request.specId(), null, detector.getType(), null, Map.of(), request.targetContent()),
+                    detector.getType(), true);
         }
         return checks;
     }
@@ -219,22 +247,22 @@ public class QualityExecutionPipeline {
 
     private ModelEvalResult executeModelEvaluation(QualityCheckRequest request, String taskId, String strategy) {
         if (ExecutionStrategyEnum.SYNC.getCode().equalsIgnoreCase(strategy)) {
-            return ModelEvalResult.skipped("strategy_disabled", null, null);
+            return ModelEvalResult.notApplicable("strategy_disabled", null, null);
         }
         QualityProfile profile = resolveProfile(request);
         if (profile == null) {
-            return ModelEvalResult.skipped("no_profile", null, null);
+            return ModelEvalResult.notApplicable("no_profile", null, null);
         }
         String profileId = profile.getId();
         List<String> modelIds = profileResolverService.listModelIds(profileId);
         String primaryModelId = modelIds.isEmpty() ? null : modelIds.getFirst();
         if (!StringUtils.hasText(primaryModelId)) {
-            return ModelEvalResult.skipped("no_model", profileId, null);
+            return ModelEvalResult.failed("no_model", profileId, null, true);
         }
 
         QualityEvaluationStrategy evalStrategy = strategyRegistry.getStrategy(request.issueType());
         if (evalStrategy == null) {
-            return ModelEvalResult.skipped("unsupported_issue_type", profileId, primaryModelId);
+            return ModelEvalResult.failed("unsupported_issue_type", profileId, primaryModelId, true);
         }
 
         QualityReviewPolicy reviewPolicy = reviewPolicyService.resolvePolicy(
@@ -290,11 +318,11 @@ public class QualityExecutionPipeline {
             return ModelEvalResult.fromStrategy(
                     future.get(SHORT_WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS), profileId, context.modelId());
         } catch (java.util.concurrent.TimeoutException e) {
-            log.warn("模型评估超时({}s)，降级为 pass: specId={}", SHORT_WAIT_TIMEOUT_SECONDS, context.specId());
-            return ModelEvalResult.failed("timeout", profileId, context.modelId());
+            log.warn("模型评估超时({}s)，按覆盖不完整处理: specId={}", SHORT_WAIT_TIMEOUT_SECONDS, context.specId());
+            return ModelEvalResult.failed("timeout", profileId, context.modelId(), true);
         } catch (Exception e) {
             log.error("模型评估异常: specId={}", context.specId(), e);
-            return ModelEvalResult.failed("evaluation_error", profileId, context.modelId());
+            return ModelEvalResult.failed("evaluation_error", profileId, context.modelId(), true);
         }
     }
 
@@ -368,11 +396,61 @@ public class QualityExecutionPipeline {
         return StringUtils.hasText(current.getMessage()) ? current.getMessage() : current.getClass().getSimpleName();
     }
 
+    private Map<String, Object> buildCoverage(RuleChecks ruleChecks, ModelEvalResult model) {
+        Map<String, Object> ruleCoverage = ruleChecks.coverage();
+        Map<String, Object> modelCoverage = model.coverage();
+        boolean requiredIncomplete = Boolean.TRUE.equals(ruleCoverage.get("requiredIncomplete"))
+                || Boolean.TRUE.equals(modelCoverage.get("requiredIncomplete"));
+        Map<String, Object> coverage = new LinkedHashMap<>();
+        coverage.put("status", requiredIncomplete ? "incomplete" : "complete");
+        coverage.put("requiredIncomplete", requiredIncomplete);
+        coverage.put("dimensions", ruleCoverage.get("dimensions"));
+        coverage.put("rules", ruleCoverage);
+        coverage.put("model", modelCoverage);
+        coverage.put("crossReview", Map.of(
+                "status", "unknown",
+                "required", false,
+                "reason", "async_not_awaited"
+        ));
+        return coverage;
+    }
+
+    private String buildCoverageSummary(Map<String, Object> coverage) {
+        List<String> incomplete = new ArrayList<>();
+        Map<?, ?> dimensions = coverage.get("dimensions") instanceof Map<?, ?> map ? map : Map.of();
+        dimensions.forEach((key, value) -> {
+            if (value instanceof Map<?, ?> dimension
+                    && Boolean.TRUE.equals(dimension.get("required"))
+                    && !"passed".equalsIgnoreCase(String.valueOf(dimension.get("status")))) {
+                incomplete.add(key + "=" + dimension.get("status"));
+            }
+        });
+        if (coverage.get("model") instanceof Map<?, ?> model
+                && Boolean.TRUE.equals(model.get("required"))
+                && !"passed".equalsIgnoreCase(String.valueOf(model.get("status")))) {
+            incomplete.add("model=" + model.get("status"));
+        }
+        return incomplete.isEmpty()
+                ? "质量检查覆盖不完整"
+                : "质量检查覆盖不完整: " + String.join(", ", incomplete);
+    }
+
+    private String mergeSummary(String summary, String addition) {
+        if (!StringUtils.hasText(summary)) {
+            return addition;
+        }
+        if (!StringUtils.hasText(addition) || summary.contains(addition)) {
+            return summary;
+        }
+        return summary + "；" + addition;
+    }
+
     private static class RuleChecks {
         private final String mode;
         private final int configured;
         private final long enabled;
         private final List<QualityDetector.DetectionResult> findings = new ArrayList<>();
+        private final Map<String, Map<String, Object>> dimensions = new LinkedHashMap<>();
         private int attempted;
         private int completed;
 
@@ -384,23 +462,73 @@ public class QualityExecutionPipeline {
                     .count();
         }
 
-        private void run(QualityDetector detector, QualityDetector.DetectionContext context) {
+        private void run(QualityDetector detector, QualityDetector.DetectionContext context,
+                         String dimensionCode, boolean required) {
             attempted++;
             try {
                 QualityDetector.DetectionResult result = detector.detect(context);
+                if (result == null) {
+                    markDimension(dimensionCode, "unknown", required, "no_result");
+                    return;
+                }
                 completed++;
-                if (result != null && result.hasIssue()) {
+                if (result.hasIssue()) {
                     findings.add(result);
+                    markDimension(dimensionCode, "failed", required, "issues_found");
+                } else {
+                    markDimension(dimensionCode, "passed", required, null);
                 }
             } catch (Exception e) {
                 log.warn("规则检测器执行失败: dimensionCode={}, error={}", context.dimensionCode(), e.getMessage());
+                markDimension(dimensionCode, "unknown", required, "detector_error");
             }
         }
 
         private Map<String, Object> coverage() {
-            return Map.of("mode", mode, "configuredRuleCount", configured, "enabledRuleCount", enabled,
-                    "detectorsAttempted", attempted, "detectorsCompleted", completed,
-                    "detectorsFailed", attempted - completed);
+            boolean requiredIncomplete = dimensions.values().stream()
+                    .anyMatch(dimension -> Boolean.TRUE.equals(dimension.get("required"))
+                            && !"passed".equalsIgnoreCase(String.valueOf(dimension.get("status"))));
+            Map<String, Object> coverage = new LinkedHashMap<>();
+            coverage.put("mode", mode);
+            coverage.put("configuredRuleCount", configured);
+            coverage.put("enabledRuleCount", enabled);
+            coverage.put("detectorsAttempted", attempted);
+            coverage.put("detectorsCompleted", completed);
+            coverage.put("detectorsFailed", attempted - completed);
+            coverage.put("requiredIncomplete", requiredIncomplete);
+            coverage.put("dimensions", dimensions);
+            return coverage;
+        }
+
+        private void markDimension(String dimensionCode, String status, boolean required, String reason) {
+            String key = StringUtils.hasText(dimensionCode) ? dimensionCode : "unknown";
+            Map<String, Object> current = dimensions.get(key);
+            String currentStatus = current == null ? null : String.valueOf(current.get("status"));
+            if (current != null && coverageRank(currentStatus) >= coverageRank(status)) {
+                return;
+            }
+            Map<String, Object> dimension = new LinkedHashMap<>();
+            dimension.put("status", status);
+            dimension.put("required", required);
+            if (reason != null) {
+                dimension.put("reason", reason);
+            }
+            dimensions.put(key, dimension);
+        }
+
+        private boolean hasDimension(String dimensionCode) {
+            return dimensions.containsKey(dimensionCode);
+        }
+
+        private int coverageRank(String status) {
+            return switch (status == null ? "" : status.toLowerCase()) {
+                case "passed" -> 0;
+                case "not_applicable" -> 1;
+                case "skipped" -> 2;
+                case "unknown" -> 3;
+                case "failed" -> 4;
+                default -> 3;
+            };
         }
     }
 
@@ -410,25 +538,26 @@ public class QualityExecutionPipeline {
             String status,
             String reason,
             String profileId,
-            String modelId
+            String modelId,
+            boolean required
     ) {
-        private static ModelEvalResult skipped(String reason, String profileId, String modelId) {
-            return new ModelEvalResult(null, "skipped", reason, profileId, modelId);
+        private static ModelEvalResult notApplicable(String reason, String profileId, String modelId) {
+            return new ModelEvalResult(null, "not_applicable", reason, profileId, modelId, false);
         }
 
-        private static ModelEvalResult failed(String reason, String profileId, String modelId) {
-            return new ModelEvalResult(QualityEvaluationStrategy.EvaluationResult.empty(),
-                    "failed", reason, profileId, modelId);
+        private static ModelEvalResult failed(String reason, String profileId, String modelId, boolean required) {
+            return new ModelEvalResult(null, "failed", reason, profileId, modelId, required);
         }
 
         private static ModelEvalResult fromStrategy(
                 QualityEvaluationStrategy.EvaluationResult result, String profileId, String modelId) {
             if (result == null) {
-                return new ModelEvalResult(null, "unknown", "no_result", profileId, modelId);
+                return new ModelEvalResult(null, "unknown", "no_result", profileId, modelId, true);
             }
             var assessment = result.modelAssessment();
             if (assessment != null) {
-                return new ModelEvalResult(result, assessment.status(), assessment.reason(), profileId, modelId);
+                return new ModelEvalResult(result, assessment.status(), assessment.reason(),
+                        profileId, modelId, true);
             }
             String reason = result.findings().stream()
                     .map(QualityEvaluationStrategy.Finding::ruleCode)
@@ -437,11 +566,17 @@ public class QualityExecutionPipeline {
                     .filter(MODEL_INFRASTRUCTURE_REASONS::contains)
                     .findFirst()
                     .orElse("unverified_result");
-            return new ModelEvalResult(result, "unknown", reason, profileId, modelId);
+            return new ModelEvalResult(result, "unknown", reason, profileId, modelId, true);
         }
 
         private Map<String, Object> coverage() {
-            Map<String, Object> data = new LinkedHashMap<>(Map.of("status", status));
+            String coverageStatus = resolveCoverageStatus();
+            boolean requiredIncomplete = required && !"passed".equals(coverageStatus);
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("status", coverageStatus);
+            data.put("modelRunStatus", status);
+            data.put("required", required);
+            data.put("requiredIncomplete", requiredIncomplete);
             if (reason != null) {
                 data.put("reason", reason);
             }
@@ -452,6 +587,22 @@ public class QualityExecutionPipeline {
                 data.put("resolvedModelId", modelId);
             }
             return data;
+        }
+
+        private String resolveCoverageStatus() {
+            if ("not_applicable".equalsIgnoreCase(status)) {
+                return "not_applicable";
+            }
+            if ("completed".equalsIgnoreCase(status)) {
+                return result != null && !result.hasIssue() ? "passed" : "failed";
+            }
+            if ("skipped".equalsIgnoreCase(status)) {
+                return required ? "failed" : "not_applicable";
+            }
+            if ("failed".equalsIgnoreCase(status)) {
+                return "failed";
+            }
+            return "unknown";
         }
     }
 }
